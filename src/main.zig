@@ -1,6 +1,6 @@
 const std = @import("std");
 const cli = @import("zig-cli");
-const client = @import("client.zig");
+const plugin = @import("plugin.zig");
 const server = @import("server.zig");
 const json = @import("json.zig");
 const network = @import("network.zig");
@@ -14,7 +14,7 @@ const cmd_create = cli.Command{
     },
     .target = cli.CommandTarget{
         .action = cli.CommandAction{
-            .exec = client.create,
+            .exec = plugin.create,
         },
     },
 };
@@ -26,7 +26,7 @@ const cmd_setup = cli.Command{
     },
     .target = cli.CommandTarget{
         .action = cli.CommandAction{
-            .exec = client.setup,
+            .exec = plugin.setup,
         },
     },
 };
@@ -38,7 +38,7 @@ const cmd_teardown = cli.Command{
     },
     .target = cli.CommandTarget{
         .action = cli.CommandAction{
-            .exec = client.teardown,
+            .exec = plugin.teardown,
         },
     },
 };
@@ -50,7 +50,7 @@ const cmd_info = cli.Command{
     },
     .target = cli.CommandTarget{
         .action = cli.CommandAction{
-            .exec = client.getInfo,
+            .exec = plugin.getInfo,
         },
     },
 };
