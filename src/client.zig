@@ -1,5 +1,6 @@
 const std = @import("std");
 const json = @import("json.zig");
+const network = @import("network.zig");
 const allocator = std.heap.page_allocator;
 
 const PluginAction = enum {
@@ -27,30 +28,51 @@ pub fn getInfo() !void {
 }
 
 pub fn create() !void {
-    const buffer = try readStdio();
-    defer allocator.free(buffer);
-    try sendRequest(PluginAction.create);
+    const request = getRequest() catch |err| {
+        try json.stringifyToStdout(err);
+        return;
+    };
+    defer allocator.free(request);
+
+    var parsed = json.parse(network.Network, request) catch |err| {
+        try json.stringifyToStdout(err);
+        return;
+    };
+    defer parsed.deinit();
+
+    var config = parsed.value;
+    const validated = config.validate();
+    if (!validated.isOk()) {
+        try json.stringifyToStdout(validated);
+        return;
+    }
+
+    config.withDefaults();
+    try json.stringifyToStdout(config);
+
+    // TODO: should we send it to server?
 }
 
 pub fn setup() !void {
-    const buffer = try readStdio();
-    defer allocator.free(buffer);
-    try sendRequest(PluginAction.setup);
+    const request = try getRequest();
+    defer allocator.free(request);
+    try sendRequest(PluginAction.setup, request);
 }
 
 pub fn teardown() !void {
-    const buffer = try readStdio();
-    defer allocator.free(buffer);
-    try sendRequest(PluginAction.teardown);
+    const request = try getRequest();
+    defer allocator.free(request);
+    try sendRequest(PluginAction.teardown, request);
 }
 
-const max_input_size = 1024 * 1024;
-
-fn readStdio() ![]u8 {
-    return std.io.getStdIn().reader().readAllAlloc(allocator, max_input_size);
+fn getRequest() ![]const u8 {
+    return std.io.getStdIn().reader().readAllAlloc(allocator, json.max_json_size);
 }
 
-fn sendRequest(action: PluginAction) !void {
+fn sendRequest(action: PluginAction, request: []const u8) !void {
+    _ = action;
+    // try validateRequest(request);
     // TODO: send request to the net-porter server
-    try json.stringifyToStdout(action);
+
+    try json.stringifyToStdout(request);
 }

@@ -3,6 +3,7 @@ const cli = @import("zig-cli");
 const client = @import("client.zig");
 const server = @import("server.zig");
 const json = @import("json.zig");
+const network = @import("network.zig");
 
 const allocator = std.heap.page_allocator;
 
@@ -86,14 +87,13 @@ const app = &cli.App{
     .author = "Songmin Li <lisongmin@protonmail.com>",
 };
 
-const ErrorMessage = struct {
-    @"error": []u8,
-};
-
 pub fn main() !void {
     var runner = cli.AppRunner.init(allocator) catch |err| {
-        const error_message = ErrorMessage{ .@"error" = err };
-        json.stringgifyToStdout(error_message);
+        const error_message = network.ErrorMessage.init(@errorName(err));
+        try json.stringifyToStdout(error_message);
     };
-    return runner.run(app);
+    runner.run(app) catch |err| {
+        const error_message = network.ErrorMessage.init(@errorName(err));
+        try json.stringifyToStdout(error_message);
+    };
 }
