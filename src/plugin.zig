@@ -34,11 +34,15 @@ pub fn create() !void {
     };
     defer allocator.free(request);
 
-    var parsed = json.parse(network.Network, request) catch |err| {
+    const value = json.parse(request) catch |err| {
         try json.stringifyToStdout(err);
         return;
     };
-    defer parsed.deinit();
+
+    const parsed = json.parseValue(network.Network, value) catch |err| {
+        try json.stringifyToStdout(err);
+        return;
+    };
 
     var config = parsed.value;
     const validated = config.validate();
