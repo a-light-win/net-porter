@@ -24,35 +24,21 @@ const Server = struct {
             return e;
         };
 
-        const address = net.Address.initUnix(config.domain_socket_path) catch |e| {
-            log.err(
-                "Failed to create address: {s}, error: {s}",
-                .{ config.domain_socket_path, @errorName(e) },
-            );
-            return e;
-        };
-
-        // Bind the socket to a file path
-        const server = address.listen(.{ .reuse_address = true }) catch |e| {
-            log.err(
-                "Failed to bind address: {s}, error: {s}",
-                .{ config.domain_socket_path, @errorName(e) },
-            );
-            return e;
-        };
+        const server = try config.domain_socket.listen();
 
         return Server{ .config = config, .server = server };
     }
 
     fn deinit(self: *Server) void {
+        log.info("Server shutting down...", .{});
         // Clean up the socket file
-        fs.cwd().deleteFile(self.config.domain_socket_path) catch |e| {
+        fs.cwd().deleteFile(self.config.domain_socket.path) catch |e| {
             if (e == error.FileNotFound) {
                 return;
             }
             log.warn(
                 "Failed to delete socket file: {s}, error: {s}",
-                .{ self.config.domain_socket_path, @errorName(e) },
+                .{ self.config.domain_socket.path, @errorName(e) },
             );
         };
 
@@ -60,7 +46,7 @@ const Server = struct {
     }
 
     fn run(self: *Server) !void {
-        log.info("Server listening on {s}", .{self.config.domain_socket_path});
+        log.info("Server listening on {s}", .{self.config.domain_socket.path});
         while (true) {
             // Accept a client connection
             const connection = try self.server.accept();
@@ -93,6 +79,8 @@ fn handleRequests(connection: net.Server.Connection) !void {
     try authClient(stream, client_info);
 
     const buf = try stream.reader().readAllAlloc(allocator, json.max_json_size);
+    defer allocator.free(buf);
+
     const value = try json.parse(buf);
 
     // TODO: Handle the client in a separate function

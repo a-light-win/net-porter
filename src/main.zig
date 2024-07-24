@@ -97,3 +97,12 @@ pub fn main() !void {
         try json.stringifyToStdout(error_message);
     };
 }
+
+test {
+    _ = @import("config.zig");
+    _ = @import("json.zig");
+    _ = @import("network.zig");
+    _ = @import("plugin.zig");
+    _ = @import("server.zig");
+    _ = @import("user.zig");
+}

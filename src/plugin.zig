@@ -1,6 +1,7 @@
 const std = @import("std");
 const json = @import("json.zig");
 const network = @import("network.zig");
+const Config = @import("config.zig").Config;
 const allocator = std.heap.page_allocator;
 
 const PluginAction = enum {
@@ -75,8 +76,15 @@ fn getRequest() ![]const u8 {
 
 fn sendRequest(action: PluginAction, request: []const u8) !void {
     _ = action;
+    const config = try Config.init("");
     // try validateRequest(request);
     // TODO: send request to the net-porter server
+    const stream = try config.domain_socket.connect();
+    defer stream.close();
 
-    try json.stringifyToStdout(request);
+    try stream.writeAll(request);
+    try std.posix.shutdown(stream.handle, .send);
+
+    const buf = try stream.reader().readAllAlloc(allocator, json.max_json_size);
+    std.debug.print("{s}", .{buf});
 }
