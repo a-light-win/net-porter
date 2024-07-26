@@ -86,6 +86,14 @@ pub fn build(b: *std.Build) void {
         b.pathJoin(&.{ b.install_path, "cover" }),
     });
     run_cover.addArtifactArg(exe_unit_tests);
+
+    const clean_coverage = b.addSystemCommand(&.{
+        "rm",
+        "-rf",
+        b.pathJoin(&.{ b.install_path, "cover" }),
+    });
+
     const cover_step = b.step("cover", "Generate test coverage report");
+    cover_step.dependOn(&clean_coverage.step);
     cover_step.dependOn(&run_cover.step);
 }
