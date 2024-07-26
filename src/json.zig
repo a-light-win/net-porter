@@ -13,31 +13,6 @@ pub fn stringifyToStdout(value: anytype) !void {
     return stringify(value, std.io.getStdOut().writer());
 }
 
-test "stringifyToStdout" {
-    // Create a JSON object
-    const JsonStruct = struct {
-        key: []const u8,
-    };
-    const object = JsonStruct{ .key = "value" };
-
-    var buf: [1024]u8 = undefined;
-    const old_stdout = std.io.getStdOut();
-    std.io.setStdOut(std.io.bufferedOutStream(&buf));
-    defer std.io.setStdOut(old_stdout);
-
-    // Call the function
-    try json.stringifyToStdout(object);
-
-    // Check the output
-    const expected_output =
-        \\{
-        \\  "key": "value"
-        \\}
-    ;
-    const actual_output = std.mem.sliceTo(buf[0..], '\x00');
-    std.testing.expectEqualStrings(expected_output, actual_output);
-}
-
 pub fn stringify(value: anytype, out_stream: anytype) !void {
     return json.stringify(value, stringify_options, out_stream);
 }

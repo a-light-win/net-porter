@@ -1,6 +1,6 @@
 const std = @import("std");
 const user = @import("user.zig");
-const DomainSocket = @import("config/domain_socket.zig").DomainSocket;
+const DomainSocket = @import("config/DomainSocket.zig");
 
 pub const Config = struct {
     domain_socket: DomainSocket = DomainSocket{},
@@ -19,5 +19,5 @@ pub const Config = struct {
 };
 
 test {
-    _ = @import("config/domain_socket.zig");
+    _ = @import("config/DomainSocket.zig");
 }

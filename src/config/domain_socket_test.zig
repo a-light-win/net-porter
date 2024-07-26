@@ -1,39 +1,29 @@
 const std = @import("std");
-const DomainSocket = @import("domain_socket.zig").DomainSocket;
+const DomainSocket = @import("DomainSocket.zig");
 
-test "DomainSocket::postinit no owner or group" {
-    var config_path_only = DomainSocket{
-        .path = "/run/net-porter.sock",
+test "connect() will failed if the socket path not exists" {
+    const socket = DomainSocket{ .path = "/tmp/this-socket-not-exists" };
+    _ = socket.connect() catch |err| {
+        try std.testing.expectEqual(error.FileNotFound, err);
     };
-    config_path_only.postInit();
-    try std.testing.expectEqual(null, config_path_only.owner);
-    try std.testing.expectEqual(null, config_path_only.uid);
-    try std.testing.expectEqual(null, config_path_only.group);
-    try std.testing.expectEqual(null, config_path_only.gid);
 }
 
-test "DomainSocket::postinit owner and group are set" {
-    var config_with_owner = DomainSocket{
-        .path = "/run/net-porter.sock",
-        .owner = "root",
-        .group = "root",
-    };
-    config_with_owner.postInit();
-    try std.testing.expectEqual("root", config_with_owner.owner);
-    try std.testing.expectEqual(0, config_with_owner.uid);
-    try std.testing.expectEqual("root", config_with_owner.group);
-    try std.testing.expectEqual(0, config_with_owner.gid);
+fn serve(socket: DomainSocket) !void {
+    var server = try socket.listen();
+    defer server.deinit();
+    defer std.fs.cwd().deleteFile(socket.path) catch {};
+
+    const conn = try server.accept();
+    defer conn.stream.close();
 }
 
-test "DomainSocket::postinit uid and gid are set" {
-    var config_with_owner = DomainSocket{
-        .path = "/run/net-porter.sock",
-        .uid = 1000,
-        .gid = 1000,
-    };
-    config_with_owner.postInit();
-    try std.testing.expectEqual(null, config_with_owner.owner);
-    try std.testing.expectEqual(1000, config_with_owner.uid);
-    try std.testing.expectEqual(null, config_with_owner.group);
-    try std.testing.expectEqual(1000, config_with_owner.gid);
+test "connect() will success if the socket path exists" {
+    const socket = DomainSocket{ .path = "/tmp/test-DomainSocket-connect.sock" };
+
+    const thread = try std.Thread.spawn(.{}, serve, .{socket});
+    thread.detach();
+
+    const conn = try socket.connect();
+    try std.testing.expectEqual(std.net.Stream, @TypeOf(conn));
+    conn.close();
 }
