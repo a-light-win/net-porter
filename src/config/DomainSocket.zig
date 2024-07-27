@@ -42,7 +42,7 @@ fn setSocketPermissions(self: DomainSocket, handle: std.posix.socket_t) !void {
     const gid = self.getGid();
     if (uid != null or gid != null) {
         std.posix.fchown(handle, uid, gid) catch |e| {
-            std.log.err(
+            std.log.warn(
                 "Failed to set socket owner: file: {s}, error: {s}",
                 .{ self.path, @errorName(e) },
             );
@@ -51,7 +51,7 @@ fn setSocketPermissions(self: DomainSocket, handle: std.posix.socket_t) !void {
     }
 
     std.posix.fchmod(handle, self.mode) catch |e| {
-        std.log.err(
+        std.log.warn(
             "Failed to set socket permissions: file: {s}, error: {s}",
             .{ self.path, @errorName(e) },
         );
@@ -66,7 +66,6 @@ test "setSocketPermissions()" {
         .gid = std.os.linux.getgid(),
     };
 
-    // TODO: creat a domain socket
     const address = try std.net.Address.initUnix(socket.path);
     var server = try address.listen(.{ .reuse_address = true });
     defer server.deinit();
@@ -76,6 +75,27 @@ test "setSocketPermissions()" {
     const stat = try std.posix.fstat(server.stream.handle);
     const mode = stat.mode & 0o777;
     try std.testing.expectEqual(socket.mode, mode);
+}
+
+test "setSocketPermissions() will failed if the user can not change the owner" {
+    const socket = DomainSocket{
+        .path = "/tmp/test-setSocketPermissions.sock",
+        .owner = "root",
+        .group = "root",
+    };
+
+    if (std.os.linux.getuid() == 0) {
+        return error.skip;
+    }
+
+    const address = try std.net.Address.initUnix(socket.path);
+    var server = try address.listen(.{ .reuse_address = true });
+    defer server.deinit();
+    defer std.fs.cwd().deleteFile(socket.path) catch {};
+
+    socket.setSocketPermissions(server.stream.handle) catch |e| {
+        try std.testing.expectEqual(error.AccessDenied, e);
+    };
 }
 
 fn getUid(self: DomainSocket) ?std.posix.uid_t {
@@ -137,5 +157,5 @@ test "getGid() will prefer gid over group" {
 }
 
 test {
-    //     _ = @import("domain_socket_test.zig");
+    _ = @import("domain_socket_test.zig");
 }
