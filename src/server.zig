@@ -2,7 +2,7 @@ const std = @import("std");
 const log = std.log.scoped(.server);
 const net = std.net;
 const fs = std.fs;
-const Config = @import("config.zig").Config;
+const Config = @import("config/Config.zig");
 const json = @import("json.zig");
 const network = @import("network.zig");
 const allocator = std.heap.page_allocator;
@@ -81,7 +81,7 @@ fn handleRequests(connection: net.Server.Connection) !void {
     const buf = try stream.reader().readAllAlloc(allocator, json.max_json_size);
     defer allocator.free(buf);
 
-    const value = try json.parse(buf);
+    const value = try json.parse(allocator, buf);
 
     // TODO: Handle the client in a separate function
     const result = value;

@@ -1,7 +1,7 @@
 const std = @import("std");
 const json = @import("json.zig");
 const network = @import("network.zig");
-const Config = @import("config.zig").Config;
+const Config = @import("config/Config.zig");
 const allocator = std.heap.page_allocator;
 
 const PluginAction = enum {
@@ -35,12 +35,12 @@ pub fn create() !void {
     };
     defer allocator.free(request);
 
-    const value = json.parse(request) catch |err| {
+    const value = json.parse(allocator, request) catch |err| {
         try json.stringifyToStdout(err);
         return;
     };
 
-    const parsed = json.parseValue(network.Network, value) catch |err| {
+    const parsed = json.parseValue(network.Network, allocator, value) catch |err| {
         try json.stringifyToStdout(err);
         return;
     };

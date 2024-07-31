@@ -1,5 +1,5 @@
 const std = @import("std");
-const user = @import("../user.zig");
+const user = @import("user.zig");
 const DomainSocket = @This();
 
 path: []const u8 = "/run/net-porter.sock",
