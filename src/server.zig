@@ -7,6 +7,7 @@ const ManagedConfig = @import("config/ManagedConfig.zig");
 const json = @import("json.zig");
 const network = @import("network.zig");
 const allocator = std.heap.page_allocator;
+const Runtime = @import("config/Runtime.zig");
 
 pub fn run() !void {
     var server = try Server.new("config.json");
@@ -17,6 +18,7 @@ pub fn run() !void {
 
 const Server = struct {
     config: Config,
+    runtime: Runtime,
     server: net.Server,
 
     managed_config: ManagedConfig,
@@ -26,13 +28,19 @@ const Server = struct {
             log.err("Failed to read config file: {s}, error: {s}", .{ config_path, @errorName(e) });
             return e;
         };
+        const config = managed_config.config;
         errdefer managed_config.deinit();
 
-        const server = try managed_config.config.domain_socket.listen();
+        const runtime = Runtime{};
+        runtime.init(allocator, config);
+        errdefer runtime.deinit();
+
+        const server = try config.domain_socket.listen();
         errdefer server.deinit();
 
         return Server{
-            .config = managed_config.config,
+            .config = config,
+            .runtime = runtime,
             .server = server,
             .managed_config = managed_config,
         };
@@ -52,6 +60,8 @@ const Server = struct {
         };
 
         self.server.deinit();
+
+        self.runtime.deinit();
 
         self.managed_config.deinit();
     }

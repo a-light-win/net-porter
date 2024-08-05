@@ -140,4 +140,5 @@ test {
     _ = @import("DomainSocket.zig");
     _ = @import("Config.zig");
     _ = @import("Resource.zig");
+    _ = @import("Runtime.zig");
 }

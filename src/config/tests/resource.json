@@ -1,0 +1,4 @@
+{
+  "name": "test",
+  "allow_users": ["root", "1000"]
+}
