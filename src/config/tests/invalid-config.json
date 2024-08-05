@@ -1,0 +1,5 @@
+{
+  "domain_socket": {
+    "uid": "invalid: should be a number"
+  }
+}

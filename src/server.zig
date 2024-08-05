@@ -3,6 +3,7 @@ const log = std.log.scoped(.server);
 const net = std.net;
 const fs = std.fs;
 const Config = @import("config/Config.zig");
+const ManagedConfig = @import("config/ManagedConfig.zig");
 const json = @import("json.zig");
 const network = @import("network.zig");
 const allocator = std.heap.page_allocator;
@@ -18,15 +19,23 @@ const Server = struct {
     config: Config,
     server: net.Server,
 
+    managed_config: ManagedConfig,
+
     fn new(config_path: []const u8) !Server {
-        const config = Config.init(config_path) catch |e| {
+        var managed_config = ManagedConfig.load(allocator, config_path) catch |e| {
             log.err("Failed to read config file: {s}, error: {s}", .{ config_path, @errorName(e) });
             return e;
         };
+        errdefer managed_config.deinit();
 
-        const server = try config.domain_socket.listen();
+        const server = try managed_config.config.domain_socket.listen();
+        errdefer server.deinit();
 
-        return Server{ .config = config, .server = server };
+        return Server{
+            .config = managed_config.config,
+            .server = server,
+            .managed_config = managed_config,
+        };
     }
 
     fn deinit(self: *Server) void {
@@ -42,7 +51,9 @@ const Server = struct {
             );
         };
 
-        defer self.server.deinit();
+        self.server.deinit();
+
+        self.managed_config.deinit();
     }
 
     fn run(self: *Server) !void {

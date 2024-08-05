@@ -99,7 +99,7 @@ pub fn main() !void {
 }
 
 test {
-    _ = @import("config/Config.zig");
+    _ = @import("config/ManagedConfig.zig");
     _ = @import("json.zig");
     _ = @import("network.zig");
     _ = @import("plugin.zig");

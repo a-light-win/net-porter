@@ -1,6 +1,7 @@
 const std = @import("std");
 const json = std.json;
 
+pub const Parsed = json.Parsed;
 pub const max_json_size = 16 * 1024;
 
 const stringify_options = json.StringifyOptions{

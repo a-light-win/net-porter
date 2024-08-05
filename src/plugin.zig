@@ -1,7 +1,7 @@
 const std = @import("std");
 const json = @import("json.zig");
 const network = @import("network.zig");
-const Config = @import("config/Config.zig");
+const DomainSocket = @import("config/DomainSocket.zig");
 const allocator = std.heap.page_allocator;
 
 const PluginAction = enum {
@@ -76,10 +76,13 @@ fn getRequest() ![]const u8 {
 
 fn sendRequest(action: PluginAction, request: []const u8) !void {
     _ = action;
-    const config = try Config.init("");
-    // try validateRequest(request);
-    // TODO: send request to the net-porter server
-    const stream = try config.domain_socket.connect();
+
+    // TODO: get domain socket from driver options
+    const domain_socket = DomainSocket{
+        .path = "/run/net-porter.sock",
+    };
+
+    const stream = try domain_socket.connect();
     defer stream.close();
 
     try stream.writeAll(request);
