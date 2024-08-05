@@ -1,11 +1,28 @@
 const std = @import("std");
 const cli = @import("zig-cli");
-const plugin = @import("plugin.zig");
+const NetavarkPlugin = @import("NetavarkPlugin.zig");
 const server = @import("server.zig");
 const json = @import("json.zig");
 const network = @import("network.zig");
 
 const allocator = std.heap.page_allocator;
+var plugin = NetavarkPlugin.defaultNetavarkPlugin();
+
+fn setup() !void {
+    try plugin.setup();
+}
+
+fn create() !void {
+    try plugin.create();
+}
+
+fn teardown() !void {
+    try plugin.teardown();
+}
+
+fn printInfo() !void {
+    try plugin.printInfo();
+}
 
 const cmd_create = cli.Command{
     .name = "create",
@@ -14,7 +31,7 @@ const cmd_create = cli.Command{
     },
     .target = cli.CommandTarget{
         .action = cli.CommandAction{
-            .exec = plugin.create,
+            .exec = create,
         },
     },
 };
@@ -26,7 +43,7 @@ const cmd_setup = cli.Command{
     },
     .target = cli.CommandTarget{
         .action = cli.CommandAction{
-            .exec = plugin.setup,
+            .exec = setup,
         },
     },
 };
@@ -38,7 +55,7 @@ const cmd_teardown = cli.Command{
     },
     .target = cli.CommandTarget{
         .action = cli.CommandAction{
-            .exec = plugin.teardown,
+            .exec = teardown,
         },
     },
 };
@@ -50,7 +67,7 @@ const cmd_info = cli.Command{
     },
     .target = cli.CommandTarget{
         .action = cli.CommandAction{
-            .exec = plugin.getInfo,
+            .exec = printInfo,
         },
     },
 };
@@ -102,6 +119,6 @@ test {
     _ = @import("config/ManagedConfig.zig");
     _ = @import("json.zig");
     _ = @import("network.zig");
-    _ = @import("plugin.zig");
+    _ = @import("NetavarkPlugin.zig");
     _ = @import("server.zig");
 }

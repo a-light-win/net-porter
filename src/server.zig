@@ -31,7 +31,7 @@ const Server = struct {
         const config = managed_config.config;
         errdefer managed_config.deinit();
 
-        const runtime = Runtime{};
+        var runtime = Runtime{};
         runtime.init(allocator, config);
         errdefer runtime.deinit();
 
