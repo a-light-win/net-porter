@@ -1,6 +1,6 @@
 const std = @import("std");
 const json = std.json;
-const DomainSocket = @import("config/DomainSocket.zig");
+const DomainSocket = @import("config.zig").DomainSocket;
 const NetavarkPlugin = @This();
 
 const name = "net-porter";

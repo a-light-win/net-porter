@@ -134,11 +134,3 @@ test "parseConfig() should successfully parse a valid config file" {
     try std.testing.expectEqual(1000, config.value.domain_socket.uid);
     try std.testing.expectEqualSlices(u8, "/run/test.sock", config.value.domain_socket.path);
 }
-
-test {
-    _ = @import("user.zig");
-    _ = @import("DomainSocket.zig");
-    _ = @import("Config.zig");
-    _ = @import("Resource.zig");
-    _ = @import("Runtime.zig");
-}

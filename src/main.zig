@@ -116,7 +116,7 @@ pub fn main() !void {
 }
 
 test {
-    _ = @import("config/ManagedConfig.zig");
+    _ = @import("config.zig");
     _ = @import("json.zig");
     _ = @import("network.zig");
     _ = @import("NetavarkPlugin.zig");
