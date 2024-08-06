@@ -1,28 +1,11 @@
 const std = @import("std");
 const cli = @import("zig-cli");
-const NetavarkPlugin = @import("NetavarkPlugin.zig");
+const plugin = @import("plugin.zig");
 const server = @import("server.zig");
 const json = @import("json.zig");
 const network = @import("network.zig");
 
 const allocator = std.heap.page_allocator;
-var plugin = NetavarkPlugin.defaultNetavarkPlugin();
-
-fn setup() !void {
-    try plugin.setup();
-}
-
-fn create() !void {
-    try plugin.create();
-}
-
-fn teardown() !void {
-    try plugin.teardown();
-}
-
-fn printInfo() !void {
-    try plugin.printInfo();
-}
 
 const cmd_create = cli.Command{
     .name = "create",
@@ -31,7 +14,7 @@ const cmd_create = cli.Command{
     },
     .target = cli.CommandTarget{
         .action = cli.CommandAction{
-            .exec = create,
+            .exec = plugin.create,
         },
     },
 };
@@ -43,7 +26,7 @@ const cmd_setup = cli.Command{
     },
     .target = cli.CommandTarget{
         .action = cli.CommandAction{
-            .exec = setup,
+            .exec = plugin.setup,
         },
     },
 };
@@ -55,7 +38,7 @@ const cmd_teardown = cli.Command{
     },
     .target = cli.CommandTarget{
         .action = cli.CommandAction{
-            .exec = teardown,
+            .exec = plugin.teardown,
         },
     },
 };
@@ -67,7 +50,7 @@ const cmd_info = cli.Command{
     },
     .target = cli.CommandTarget{
         .action = cli.CommandAction{
-            .exec = printInfo,
+            .exec = plugin.printInfo,
         },
     },
 };
@@ -86,7 +69,7 @@ const cmd_server = cli.Command{
 
 const app = &cli.App{
     .command = cli.Command{
-        .name = "net-porter",
+        .name = plugin.name,
         .description = cli.Description{
             .one_line = "A simple netavark plugin to create network interface",
         },
@@ -100,7 +83,7 @@ const app = &cli.App{
             },
         },
     },
-    .version = "0.1.0",
+    .version = plugin.version,
     .author = "Songmin Li <lisongmin@protonmail.com>",
 };
 
@@ -119,6 +102,6 @@ test {
     _ = @import("config.zig");
     _ = @import("json.zig");
     _ = @import("network.zig");
-    _ = @import("NetavarkPlugin.zig");
+    _ = @import("plugin.zig");
     _ = @import("server.zig");
 }

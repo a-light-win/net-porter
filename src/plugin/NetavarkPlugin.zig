@@ -1,10 +1,11 @@
 const std = @import("std");
 const json = std.json;
-const DomainSocket = @import("config.zig").DomainSocket;
+const DomainSocket = @import("../config.zig").DomainSocket;
 const NetavarkPlugin = @This();
 
-const name = "net-porter";
-const version = "0.1.0";
+pub const name = "net-porter";
+pub const version = "0.1.0";
+
 const max_request_size = 16 * 1024;
 const max_response_size = 16 * 1024;
 
