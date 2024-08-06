@@ -7,54 +7,6 @@ const network = @import("network.zig");
 
 const allocator = std.heap.page_allocator;
 
-const cmd_create = cli.Command{
-    .name = "create",
-    .description = cli.Description{
-        .one_line = "netavark plugin api: create a network config",
-    },
-    .target = cli.CommandTarget{
-        .action = cli.CommandAction{
-            .exec = plugin.create,
-        },
-    },
-};
-
-const cmd_setup = cli.Command{
-    .name = "setup",
-    .description = cli.Description{
-        .one_line = "netavark plugin api: setup the network in the container",
-    },
-    .target = cli.CommandTarget{
-        .action = cli.CommandAction{
-            .exec = plugin.setup,
-        },
-    },
-};
-
-const cmd_teardown = cli.Command{
-    .name = "teardown",
-    .description = cli.Description{
-        .one_line = "netavark plugin api: teardown the network in the container",
-    },
-    .target = cli.CommandTarget{
-        .action = cli.CommandAction{
-            .exec = plugin.teardown,
-        },
-    },
-};
-
-const cmd_info = cli.Command{
-    .name = "info",
-    .description = cli.Description{
-        .one_line = "netavark plugin api: get the plugin info",
-    },
-    .target = cli.CommandTarget{
-        .action = cli.CommandAction{
-            .exec = plugin.printInfo,
-        },
-    },
-};
-
 const cmd_server = cli.Command{
     .name = "server",
     .description = cli.Description{
@@ -75,10 +27,10 @@ const app = &cli.App{
         },
         .target = cli.CommandTarget{
             .subcommands = &.{
-                cmd_create,
-                cmd_setup,
-                cmd_teardown,
-                cmd_info,
+                plugin.cmd_create,
+                plugin.cmd_setup,
+                plugin.cmd_teardown,
+                plugin.cmd_info,
                 cmd_server,
             },
         },
