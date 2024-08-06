@@ -49,15 +49,35 @@ pub fn handle(self: *Handler) !void {
         return;
     };
     defer parsed_request.deinit();
+    const request = parsed_request.value;
 
-    try self.authClient(client_info, &parsed_request.value);
+    try self.authClient(client_info, &request);
 
-    // TODO: Handle the client in a separate function
-    //const value = try json.parse(self.allocator, buf);
-    //const result = value;
-    //json.stringify(result, stream.writer()) catch |e| {
-    //    log.warn("Failed to send response: {s}", .{@errorName(e)});
-    //};
+    switch (request.action) {
+        .create => try self.handleCreate(request.resource, request.request),
+        // TODO: implement other actions
+        else => {},
+    }
+}
+
+fn handleCreate(self: *Handler, resource: []const u8, request: []const u8) !void {
+    // TODO
+    // load cni by resource name, return error if the file does not exist
+    //
+    _ = resource;
+    _ = request;
+    _ = self;
+}
+
+fn writeResponse(stream: *net.Stream, response: anytype) void {
+    json.stringify(
+        response,
+        .{ .whitespace = .indent_2 },
+        stream.writer(),
+    ) catch |err| {
+        writeError(stream, "Failed to format response: {s}", .{@errorName(err)});
+        return;
+    };
 }
 
 fn writeError(stream: *net.Stream, comptime fmt: []const u8, args: anytype) void {
@@ -102,8 +122,16 @@ fn getClientInfo(stream: *net.Stream) std.posix.UnexpectedError!ClientInfo {
 }
 
 fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
-    // TODO: Implement authentication
-    _ = self;
-    _ = client_info;
-    _ = request;
+    if (self.runtime.isAllowed(request.resource, client_info.uid, client_info.gid)) {
+        const err = error.AccessDenied;
+        writeError(
+            &self.connection.stream,
+            "Failed to access resource '{s}', error: {s}",
+            .{
+                request.resource,
+                @errorName(err),
+            },
+        );
+        return err;
+    }
 }

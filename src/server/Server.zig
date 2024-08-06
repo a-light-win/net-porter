@@ -29,8 +29,7 @@ pub fn new(config_path: ?[]const u8) !Server {
     const conf = managed_config.config;
     errdefer managed_config.deinit();
 
-    var runtime = config.Runtime{};
-    runtime.init(allocator, conf);
+    var runtime = config.Runtime.newRuntime(allocator, conf);
     errdefer runtime.deinit();
 
     const server = try conf.domain_socket.listen();
@@ -75,6 +74,8 @@ pub fn run(self: *Server) !void {
             .config = &self.config,
             .connection = connection,
         };
+
+        // TODO: manage thread lifetime
         _ = std.Thread.spawn(.{}, handleRequests, .{&handler}) catch |e| {
             log.warn(
                 "Failed to spawn thread: {s}",

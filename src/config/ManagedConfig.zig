@@ -19,25 +19,19 @@ pub fn deinit(self: ManagedConfig) void {
 
 pub fn load(allocator: std.mem.Allocator, config_path: ?[]const u8) !ManagedConfig {
     const path = if (config_path) |value| value else default_config_path;
-    const dir = std.fs.path.dirname(path);
-    if (dir == null) {
-        std.log.warn("Can not get config directory from path: {s}", .{path});
-        return error.InvalidPath;
-    }
 
     const parsed_config = parseConfig(allocator, path) catch |err| switch (err) {
         error.FileNotFound => {
-            return ManagedConfig{ .config = Config{
-                .config_dir = dir.?,
-                .config_path = path,
-            } };
+            var managed_config = ManagedConfig{ .config = Config{} };
+            try managed_config.config.init(path);
+            return managed_config;
         },
         else => return err,
     };
+    errdefer parsed_config.deinit();
 
     var config = parsed_config.value;
-    config.config_dir = dir.?;
-    config.config_path = path;
+    try config.init(path);
 
     return ManagedConfig{
         .config = config,

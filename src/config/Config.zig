@@ -5,6 +5,18 @@ const Config = @This();
 
 config_dir: []const u8 = "",
 config_path: []const u8 = "",
+cni_dir: ?[]const u8 = null,
 
 domain_socket: DomainSocket = DomainSocket{},
 resources: ?[]const Resource = null,
+
+pub fn init(self: *Config, path: []const u8) !void {
+    self.config_path = path;
+
+    if (std.fs.path.dirname(path)) |dir| {
+        self.config_dir = dir;
+    } else {
+        std.log.warn("Can not get config directory from path: {s}", .{path});
+        return error.InvalidPath;
+    }
+}
