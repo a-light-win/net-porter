@@ -38,4 +38,6 @@ fn run() !void {
 
 test {
     _ = @import("server/Server.zig");
+    _ = @import("server/Handler.zig");
+    _ = @import("server/Cni.zig");
 }

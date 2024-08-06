@@ -66,6 +66,11 @@ test "isAllowed" {
     try std.testing.expect(!runtime.isAllowed("not-exists", 0, 0));
 }
 
+pub fn getCniPath(self: Runtime, allocator: std.mem.Allocator, name: []const u8) []const u8 {
+    const buf = allocator.alloc(u8, self.cni_dir.len + 1 + name.len) catch unreachable;
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ self.cni_dir, name }) catch unreachable;
+}
+
 fn genCniDir(allocator: std.mem.Allocator, config: Config) []const u8 {
     if (config.cni_dir) |dir| {
         return dir;

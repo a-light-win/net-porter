@@ -4,6 +4,7 @@ const net = std.net;
 const json = std.json;
 const log = std.log.scoped(.server);
 const plugin = @import("../plugin.zig");
+const Cni = @import("Cni.zig");
 const Handler = @This();
 
 const ClientInfo = extern struct {
@@ -12,17 +13,22 @@ const ClientInfo = extern struct {
     gid: std.posix.gid_t,
 };
 
-allocator: std.mem.Allocator,
+arena: *std.heap.ArenaAllocator,
 config: *config.Config,
 runtime: *config.Runtime,
 connection: std.net.Server.Connection,
 
 pub fn deinit(self: *Handler) void {
     self.connection.stream.close();
+
+    const allocator = self.arena.child_allocator;
+    self.arena.deinit();
+    allocator.destroy(self.arena);
 }
 
 pub fn handle(self: *Handler) !void {
     var stream = self.connection.stream;
+    const allocator = self.arena.allocator();
 
     const client_info = try getClientInfo(&stream);
     log.debug(
@@ -31,17 +37,17 @@ pub fn handle(self: *Handler) !void {
     );
 
     const buf = stream.reader().readAllAlloc(
-        self.allocator,
+        allocator,
         plugin.max_request_size,
     ) catch |err| {
         writeError(&stream, "Failed to read request: {s}", .{@errorName(err)});
         return;
     };
-    defer self.allocator.free(buf);
+    defer allocator.free(buf);
 
     const parsed_request = json.parseFromSlice(
         plugin.Request,
-        self.allocator,
+        allocator,
         buf,
         .{},
     ) catch |err| {
@@ -54,19 +60,36 @@ pub fn handle(self: *Handler) !void {
     try self.authClient(client_info, &request);
 
     switch (request.action) {
-        .create => try self.handleCreate(request.resource, request.request),
+        .create => try self.handleCreate(request),
         // TODO: implement other actions
         else => {},
     }
 }
 
-fn handleCreate(self: *Handler, resource: []const u8, request: []const u8) !void {
+fn handleCreate(self: *Handler, request: plugin.Request) !void {
     // TODO
     // load cni by resource name, return error if the file does not exist
     //
-    _ = resource;
-    _ = request;
-    _ = self;
+    const allocator = self.arena.allocator();
+    const cni_path = self.runtime.getCniPath(allocator, request.resource);
+
+    const cni = Cni.load(self.arena.child_allocator, cni_path) catch |err| {
+        writeError(&self.connection.stream, "Failed to load CNI: {s}", .{@errorName(err)});
+        return;
+    };
+
+    // TODO: save cni and send back the request
+    _ = cni;
+
+    self.connection.stream.writeAll(request.request) catch |err| {
+        writeError(
+            &self.connection.stream,
+            "Failed to send response of create action: {s}",
+            .{
+                @errorName(err),
+            },
+        );
+    };
 }
 
 fn writeResponse(stream: *net.Stream, response: anytype) void {
@@ -88,6 +111,8 @@ fn writeError(stream: *net.Stream, comptime fmt: []const u8, args: anytype) void
         return;
     };
 
+    log.warn("{s}", .{error_msg});
+
     json.stringify(
         .{ .@"error" = error_msg },
         .{ .whitespace = .indent_2 },
@@ -95,8 +120,6 @@ fn writeError(stream: *net.Stream, comptime fmt: []const u8, args: anytype) void
     ) catch |err| {
         log.warn("Failed to send error message: {s}", .{@errorName(err)});
     };
-
-    log.warn("{s}", .{error_msg});
 }
 
 fn getClientInfo(stream: *net.Stream) std.posix.UnexpectedError!ClientInfo {

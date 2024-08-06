@@ -68,8 +68,11 @@ pub fn run(self: *Server) !void {
     while (true) {
         // Accept a client connection
         const connection = try self.server.accept();
+
+        const arena = allocator.create(std.heap.ArenaAllocator) catch unreachable;
+        arena.* = std.heap.ArenaAllocator.init(allocator);
         var handler = Handler{
-            .allocator = allocator,
+            .arena = arena,
             .runtime = &self.runtime,
             .config = &self.config,
             .connection = connection,
@@ -86,6 +89,6 @@ pub fn run(self: *Server) !void {
 }
 
 fn handleRequests(handler: *Handler) !void {
-    try handler.handle();
     defer handler.deinit();
+    try handler.handle();
 }
