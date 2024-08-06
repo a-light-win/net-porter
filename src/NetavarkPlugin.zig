@@ -36,14 +36,14 @@ const NetworkPluginExec = struct {
 };
 
 allocator: std.mem.Allocator,
-stream_in: std.io.StreamSource,
-stream_out: std.io.StreamSource,
+stream_in: *std.io.StreamSource,
+stream_out: *std.io.StreamSource,
 
 pub fn defaultNetavarkPlugin() NetavarkPlugin {
     return NetavarkPlugin{
         .allocator = std.heap.page_allocator,
-        .stream_in = std.io.StreamSource{ .file = std.io.getStdIn() },
-        .stream_out = std.io.StreamSource{ .file = std.io.getStdOut() },
+        .stream_in = @constCast(&std.io.StreamSource{ .file = std.io.getStdIn() }),
+        .stream_out = @constCast(&std.io.StreamSource{ .file = std.io.getStdOut() }),
     };
 }
 
@@ -78,14 +78,16 @@ test "printInfo()" {
     var buffer: [1024]u8 = undefined;
     var source = std.io.StreamSource{ .buffer = std.io.fixedBufferStream(&buffer) };
 
-    const plugin = NetavarkPlugin{
+    var plugin = NetavarkPlugin{
         .allocator = test_allocator,
-        .stream_in = source,
-        .stream_out = source,
+        .stream_in = &source,
+        .stream_out = &source,
     };
     try plugin.printInfo();
 
     const output = source.buffer.getWritten();
+    try std.testing.expect(source.buffer.pos != 0);
+
     const parsed = try json.parseFromSlice(PluginInfo, test_allocator, output, .{});
     defer parsed.deinit();
 
