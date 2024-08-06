@@ -3,6 +3,8 @@ const NetavarkPlugin = @import("plugin/NetavarkPlugin.zig");
 
 pub const name = NetavarkPlugin.name;
 pub const version = NetavarkPlugin.version;
+pub const max_request_size = NetavarkPlugin.max_request_size;
+pub const max_response_size = NetavarkPlugin.max_response_size;
 pub const Request = NetavarkPlugin.Request;
 
 var plugin = NetavarkPlugin.defaultNetavarkPlugin();
