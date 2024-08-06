@@ -14,11 +14,18 @@ server: net.Server,
 
 managed_config: config.ManagedConfig,
 
-pub fn new(config_path: []const u8) !Server {
-    var managed_config = config.ManagedConfig.load(allocator, config_path) catch |e| {
-        log.err("Failed to read config file: {s}, error: {s}", .{ config_path, @errorName(e) });
+pub fn new(config_path: ?[]const u8) !Server {
+    var managed_config = config.ManagedConfig.load(
+        allocator,
+        config_path,
+    ) catch |e| {
+        log.err(
+            "Failed to read config file: {s}, error: {s}",
+            .{ config_path orelse "", @errorName(e) },
+        );
         return e;
     };
+
     const conf = managed_config.config;
     errdefer managed_config.deinit();
 
