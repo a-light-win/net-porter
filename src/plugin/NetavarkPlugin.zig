@@ -29,11 +29,17 @@ const Network = struct {
 
 const DriverOptions = struct {
     net_porter_socket: []const u8,
-    net_porter_cni_name: []const u8,
+    net_porter_resource: []const u8,
 };
 
 const NetworkPluginExec = struct {
     network: Network,
+};
+
+pub const Request = struct {
+    action: PluginAction,
+    resource: []const u8,
+    request: []const u8,
 };
 
 allocator: std.mem.Allocator,
@@ -118,7 +124,14 @@ pub fn create(self: *NetavarkPlugin) !void {
         return;
     }
 
-    try self.sendRequest(network.options.net_porter_socket, PluginAction.create, request);
+    try self.sendRequest(
+        network.options.net_porter_socket,
+        &Request{
+            .action = PluginAction.create,
+            .resource = network.options.net_porter_resource,
+            .request = request,
+        },
+    );
 }
 
 pub fn setup(self: *NetavarkPlugin) !void {
@@ -152,7 +165,14 @@ fn exec(self: *NetavarkPlugin, action: PluginAction) !void {
         return;
     }
 
-    try self.sendRequest(network.options.net_porter_socket, action, request);
+    try self.sendRequest(
+        network.options.net_porter_socket,
+        &Request{
+            .action = action,
+            .resource = network.options.net_porter_resource,
+            .request = request,
+        },
+    );
 }
 
 fn validateNetwork(self: *NetavarkPlugin, network: Network) bool {
@@ -164,8 +184,8 @@ fn validateNetwork(self: *NetavarkPlugin, network: Network) bool {
         self.writeError("Missing net_porter_socket in network options", .{}) catch {};
         return false;
     }
-    if (network.options.net_porter_cni_name.len == 0) {
-        self.writeError("Missing net_porter_cni_name in network options", .{}) catch {};
+    if (network.options.net_porter_resource.len == 0) {
+        self.writeError("Missing net_porter_resource in network options", .{}) catch {};
         return false;
     }
     return true;
@@ -175,7 +195,7 @@ fn getRequest(self: *NetavarkPlugin) ![]const u8 {
     return self.stream_in.reader().readAllAlloc(self.allocator, max_request_size);
 }
 
-fn sendRequest(self: *NetavarkPlugin, socket_path: []const u8, action: PluginAction, request: []const u8) !void {
+fn sendRequest(self: *NetavarkPlugin, socket_path: []const u8, request: *const Request) !void {
     const domain_socket = DomainSocket{
         .path = socket_path,
     };
@@ -187,10 +207,7 @@ fn sendRequest(self: *NetavarkPlugin, socket_path: []const u8, action: PluginAct
     defer stream.close();
 
     json.stringify(
-        .{
-            .action = action,
-            .request = request,
-        },
+        request,
         .{
             .whitespace = .indent_2,
             .emit_null_optional_fields = false,

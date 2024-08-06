@@ -3,6 +3,7 @@ const NetavarkPlugin = @import("plugin/NetavarkPlugin.zig");
 
 pub const name = NetavarkPlugin.name;
 pub const version = NetavarkPlugin.version;
+pub const Request = NetavarkPlugin.Request;
 
 var plugin = NetavarkPlugin.defaultNetavarkPlugin();
 
