@@ -141,7 +141,7 @@ fn getClientInfo(stream: *net.Stream) std.posix.UnexpectedError!ClientInfo {
 }
 
 fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
-    if (self.runtime.isAllowed(request.resource, client_info.uid, client_info.gid)) {
+    if (!self.runtime.isAllowed(request.resource, client_info.uid, client_info.gid)) {
         const err = error.AccessDenied;
         writeError(
             &self.connection.stream,

@@ -61,7 +61,7 @@ test "isAllowed() should success if uid is allowed" {
         allocator,
         Resource{
             .name = "test",
-            .allow_users = &[_][]const u8{"root"},
+            .allow_users = &[_][:0]const u8{"root"},
         },
     );
     defer acl.deinit();
@@ -74,14 +74,14 @@ test "isAllowed() should success if gid is allowed" {
         allocator,
         Resource{
             .name = "test",
-            .allow_groups = &[_][]const u8{"root"},
+            .allow_groups = &[_][:0]const u8{"root"},
         },
     );
     defer acl.deinit();
     try std.testing.expectEqual(true, acl.isAllowed(0, 0));
 }
 
-fn initUids(self: *Acl, allocator: Allocator, users: []const []const u8) Allocator.Error!void {
+fn initUids(self: *Acl, allocator: Allocator, users: []const [:0]const u8) Allocator.Error!void {
     // Only init uids once
     if (users.len == 0) {
         return;
@@ -114,7 +114,7 @@ test "initUids() should success if users is empty" {
     const allocator = std.testing.allocator;
     const resource = Resource{
         .name = "test",
-        .allow_users = &[_][]const u8{},
+        .allow_users = &[_][:0]const u8{},
     };
 
     var acl = try fromResource(allocator, resource);
@@ -127,8 +127,8 @@ test "initUids() should success if users are specified" {
     const allocator = std.testing.allocator;
     const resource = Resource{
         .name = "test",
-        .allow_users = &[_][]const u8{ "root", "333" },
-        .allow_groups = &[_][]const u8{ "root", "333" },
+        .allow_users = &[_][:0]const u8{ "root", "333" },
+        .allow_groups = &[_][:0]const u8{ "root", "333" },
     };
 
     var acl = try fromResource(allocator, resource);
@@ -140,7 +140,7 @@ test "initUids() should success if users are specified" {
     try std.testing.expectEqual(333, uids.items[1]);
 }
 
-fn resolveUsers(uids: *std.ArrayList(u32), users: []const []const u8) void {
+fn resolveUsers(uids: *std.ArrayList(u32), users: []const [:0]const u8) void {
     for (users) |u| {
         // if the user is number, add it directly
         // otherwise, resolve the user name to uid
@@ -162,7 +162,7 @@ fn resolveUsers(uids: *std.ArrayList(u32), users: []const []const u8) void {
     }
 }
 
-fn initGids(self: *Acl, allocator: Allocator, groups: []const []const u8) Allocator.Error!void {
+fn initGids(self: *Acl, allocator: Allocator, groups: []const [:0]const u8) Allocator.Error!void {
     // Only init gids once
     if (groups.len == 0) {
         return;
@@ -194,7 +194,7 @@ test "initGids() should success if groups is empty" {
     const allocator = std.testing.allocator;
     const resource = Resource{
         .name = "test",
-        .allow_groups = &[_][]const u8{},
+        .allow_groups = &[_][:0]const u8{},
     };
     var acl = try fromResource(allocator, resource);
     defer acl.deinit();
@@ -206,8 +206,8 @@ test "initGids() should success if groups are specified" {
     const allocator = std.testing.allocator;
     const resource = Resource{
         .name = "test",
-        .allow_users = &[_][]const u8{ "root", "333" },
-        .allow_groups = &[_][]const u8{ "root", "333" },
+        .allow_users = &[_][:0]const u8{ "root", "333" },
+        .allow_groups = &[_][:0]const u8{ "root", "333" },
     };
 
     var acl = try fromResource(allocator, resource);
@@ -218,7 +218,7 @@ test "initGids() should success if groups are specified" {
     try std.testing.expectEqual(333, gids.items[1]);
 }
 
-fn resolveGroups(gids: *std.ArrayList(u32), groups: []const []const u8) void {
+fn resolveGroups(gids: *std.ArrayList(u32), groups: []const [:0]const u8) void {
     for (groups) |g| {
         // if the group is number, add it directly
         // otherwise, resolve the group name to gid

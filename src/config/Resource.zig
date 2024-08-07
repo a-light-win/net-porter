@@ -2,8 +2,8 @@ const std = @import("std");
 const Resource = @This();
 
 name: []const u8,
-allow_users: ?[]const []const u8 = null,
-allow_groups: ?[]const []const u8 = null,
+allow_users: ?[]const [:0]const u8 = null,
+allow_groups: ?[]const [:0]const u8 = null,
 
 test "Resource can be loaded from json" {
     const allocator = std.testing.allocator;

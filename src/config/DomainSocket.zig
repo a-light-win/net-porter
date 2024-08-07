@@ -3,8 +3,8 @@ const user = @import("../user.zig");
 const DomainSocket = @This();
 
 path: []const u8 = "/run/net-porter.sock",
-owner: ?[]const u8 = null,
-group: ?[]const u8 = null,
+owner: ?[:0]const u8 = null,
+group: ?[:0]const u8 = null,
 uid: ?std.posix.uid_t = null,
 gid: ?std.posix.gid_t = null,
 mode: std.posix.mode_t = 0o660,

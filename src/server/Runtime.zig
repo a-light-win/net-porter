@@ -69,7 +69,7 @@ test "isAllowed" {
     const allocator = std.testing.allocator;
     const runtime = try init(allocator, Config{
         .resources = &[_]Resource{
-            Resource{ .name = "test", .allow_users = &[_][]const u8{"root"} },
+            Resource{ .name = "test", .allow_users = &[_][:0]const u8{"root"} },
         },
     });
     defer runtime.deinit();
@@ -80,8 +80,8 @@ test "isAllowed" {
 }
 
 fn getCniPath(self: *Runtime, allocator: Allocator, name: []const u8) Allocator.Error![]const u8 {
-    const buf = try allocator.alloc(u8, self.cni_dir.len + 1 + name.len);
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ self.cni_dir, name }) catch unreachable;
+    const buf = try allocator.alloc(u8, self.cni_dir.len + 1 + name.len + 5);
+    return std.fmt.bufPrint(buf, "{s}/{s}.json", .{ self.cni_dir, name }) catch unreachable;
 }
 
 fn genCniDir(allocator: std.mem.Allocator, config: Config) Allocator.Error![]const u8 {
