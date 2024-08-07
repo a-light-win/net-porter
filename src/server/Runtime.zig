@@ -1,40 +1,46 @@
 const std = @import("std");
 const Acl = @import("Acl.zig");
 const Config = @import("../config.zig").Config;
+const Allocator = std.mem.Allocator;
 const Runtime = @This();
 
 arena: *std.heap.ArenaAllocator,
 cni_dir: []const u8,
 acls: ?std.ArrayList(Acl) = null,
 
-pub fn newRuntime(allocator: std.mem.Allocator, config: Config) Runtime {
-    var arena = allocator.create(std.heap.ArenaAllocator) catch unreachable;
+pub fn init(allocator: Allocator, config: Config) Allocator.Error!Runtime {
+    var arena = try allocator.create(std.heap.ArenaAllocator);
+    errdefer allocator.destroy(arena);
+
     arena.* = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+
     const child_allocator = arena.allocator();
 
     var runtime = Runtime{
         .arena = arena,
-        .cni_dir = genCniDir(child_allocator, config),
+        .cni_dir = try genCniDir(child_allocator, config),
     };
 
-    runtime.init(config);
+    if (config.resources) |resources| {
+        if (runtime.acls == null) {
+            runtime.acls = try std.ArrayList(Acl).initCapacity(allocator, resources.len);
+        }
+        for (resources) |resource| {
+            try runtime.acls.?.append(try Acl.fromResource(allocator, resource));
+        }
+    }
     return runtime;
 }
 
-fn init(self: *Runtime, config: Config) void {
-    const allocator = self.arena.allocator();
-
-    if (config.resources) |resources| {
-        if (self.acls == null) {
-            self.acls = std.ArrayList(Acl).initCapacity(allocator, resources.len) catch unreachable;
-        }
-        for (resources) |resource| {
-            self.acls.?.append(Acl.fromResource(allocator, resource)) catch unreachable;
-        }
-    }
-}
-
 pub fn deinit(self: Runtime) void {
+    if (self.acls) |acls| {
+        for (acls.items) |acl| {
+            acl.deinit();
+        }
+        acls.deinit();
+    }
+
     const allocator = self.arena.child_allocator;
     self.arena.deinit();
     allocator.destroy(self.arena);
@@ -54,7 +60,7 @@ pub fn isAllowed(self: Runtime, name: []const u8, uid: u32, gid: u32) bool {
 test "isAllowed" {
     const Resource = @import("../config.zig").Resource;
     const allocator = std.testing.allocator;
-    const runtime = newRuntime(allocator, Config{
+    const runtime = try init(allocator, Config{
         .resources = &[_]Resource{
             Resource{ .name = "test", .allow_users = &[_][]const u8{"root"} },
         },
@@ -71,11 +77,11 @@ pub fn getCniPath(self: Runtime, allocator: std.mem.Allocator, name: []const u8)
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ self.cni_dir, name }) catch unreachable;
 }
 
-fn genCniDir(allocator: std.mem.Allocator, config: Config) []const u8 {
+fn genCniDir(allocator: std.mem.Allocator, config: Config) Allocator.Error![]const u8 {
     if (config.cni_dir) |dir| {
         return dir;
     }
 
-    const buf = allocator.alloc(u8, config.config_dir.len + 6) catch unreachable;
+    const buf = try allocator.alloc(u8, config.config_dir.len + 6);
     return std.fmt.bufPrint(buf, "{s}/cni.d", .{config.config_dir}) catch unreachable;
 }

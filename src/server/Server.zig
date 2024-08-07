@@ -30,7 +30,7 @@ pub fn new(config_path: ?[]const u8) !Server {
     const conf = managed_config.config;
     errdefer managed_config.deinit();
 
-    var runtime = Runtime.newRuntime(allocator, conf);
+    var runtime = try Runtime.init(allocator, conf);
     errdefer runtime.deinit();
 
     const server = try conf.domain_socket.listen();
