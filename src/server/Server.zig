@@ -3,14 +3,16 @@ const log = std.log.scoped(.server);
 const net = std.net;
 const fs = std.fs;
 const config = @import("../config.zig");
-const Runtime = @import("Runtime.zig");
+const AclManager = @import("AclManager.zig");
+const CniManager = @import("CniManager.zig");
 const json = std.json;
 const allocator = std.heap.page_allocator;
 const Handler = @import("Handler.zig");
 const Server = @This();
 
 config: config.Config,
-runtime: Runtime,
+acl_manager: AclManager,
+cni_manager: CniManager,
 server: net.Server,
 
 managed_config: config.ManagedConfig,
@@ -30,15 +32,13 @@ pub fn new(config_path: ?[]const u8) !Server {
     const conf = managed_config.config;
     errdefer managed_config.deinit();
 
-    var runtime = try Runtime.init(allocator, conf);
-    errdefer runtime.deinit();
-
-    const server = try conf.domain_socket.listen();
+    var server = try conf.domain_socket.listen();
     errdefer server.deinit();
 
     return Server{
         .config = conf,
-        .runtime = runtime,
+        .acl_manager = try AclManager.init(allocator, conf),
+        .cni_manager = try CniManager.init(allocator, conf),
         .server = server,
         .managed_config = managed_config,
     };
@@ -59,7 +59,8 @@ pub fn deinit(self: *Server) void {
 
     self.server.deinit();
 
-    self.runtime.deinit();
+    self.acl_manager.deinit();
+    self.cni_manager.deinit();
 
     self.managed_config.deinit();
 }
@@ -74,7 +75,8 @@ pub fn run(self: *Server) !void {
         arena.* = std.heap.ArenaAllocator.init(allocator);
         var handler = Handler{
             .arena = arena,
-            .runtime = &self.runtime,
+            .acl_manager = &self.acl_manager,
+            .cni_manager = &self.cni_manager,
             .config = &self.config,
             .connection = connection,
         };

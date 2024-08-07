@@ -4,7 +4,8 @@ const net = std.net;
 const json = std.json;
 const log = std.log.scoped(.server);
 const plugin = @import("../plugin.zig");
-const Runtime = @import("Runtime.zig");
+const AclManager = @import("AclManager.zig");
+const CniManager = @import("CniManager.zig");
 const Handler = @This();
 
 const ClientInfo = extern struct {
@@ -15,7 +16,8 @@ const ClientInfo = extern struct {
 
 arena: *std.heap.ArenaAllocator,
 config: *config.Config,
-runtime: *Runtime,
+acl_manager: *AclManager,
+cni_manager: *CniManager,
 connection: std.net.Server.Connection,
 
 pub fn deinit(self: *Handler) void {
@@ -69,7 +71,7 @@ fn handleCreate(self: *Handler, request: plugin.Request) !void {
     // TODO
     // load cni by resource name, return error if the file does not exist
     //
-    const cni = self.runtime.loadCni(request.resource) catch |err| {
+    const cni = self.cni_manager.loadCni(request.resource) catch |err| {
         writeError(&self.connection.stream, "Failed to load CNI: {s}", .{@errorName(err)});
         return;
     };
@@ -141,7 +143,7 @@ fn getClientInfo(stream: *net.Stream) std.posix.UnexpectedError!ClientInfo {
 }
 
 fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
-    if (!self.runtime.isAllowed(request.resource, client_info.uid, client_info.gid)) {
+    if (!self.acl_manager.isAllowed(request.resource, client_info.uid, client_info.gid)) {
         const err = error.AccessDenied;
         writeError(
             &self.connection.stream,
