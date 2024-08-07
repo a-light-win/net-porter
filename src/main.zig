@@ -45,4 +45,5 @@ test {
     _ = @import("network.zig");
     _ = @import("plugin.zig");
     _ = @import("server.zig");
+    _ = @import("user.zig");
 }

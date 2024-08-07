@@ -5,6 +5,7 @@ const json = std.json;
 const log = std.log.scoped(.server);
 const plugin = @import("../plugin.zig");
 const Cni = @import("Cni.zig");
+const Runtime = @import("Runtime.zig");
 const Handler = @This();
 
 const ClientInfo = extern struct {
@@ -15,7 +16,7 @@ const ClientInfo = extern struct {
 
 arena: *std.heap.ArenaAllocator,
 config: *config.Config,
-runtime: *config.Runtime,
+runtime: *Runtime,
 connection: std.net.Server.Connection,
 
 pub fn deinit(self: *Handler) void {

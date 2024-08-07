@@ -1,6 +1,6 @@
 const std = @import("std");
 const Acl = @import("Acl.zig");
-const Config = @import("Config.zig");
+const Config = @import("../config.zig").Config;
 const Runtime = @This();
 
 arena: *std.heap.ArenaAllocator,
@@ -52,7 +52,7 @@ pub fn isAllowed(self: Runtime, name: []const u8, uid: u32, gid: u32) bool {
 }
 
 test "isAllowed" {
-    const Resource = @import("Resource.zig");
+    const Resource = @import("../config.zig").Resource;
     const allocator = std.testing.allocator;
     const runtime = newRuntime(allocator, Config{
         .resources = &[_]Resource{
@@ -78,8 +78,4 @@ fn genCniDir(allocator: std.mem.Allocator, config: Config) []const u8 {
 
     const buf = allocator.alloc(u8, config.config_dir.len + 6) catch unreachable;
     return std.fmt.bufPrint(buf, "{s}/cni.d", .{config.config_dir}) catch unreachable;
-}
-
-test {
-    _ = @import("Acl.zig");
 }

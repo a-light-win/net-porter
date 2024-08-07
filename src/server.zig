@@ -40,4 +40,6 @@ test {
     _ = @import("server/Server.zig");
     _ = @import("server/Handler.zig");
     _ = @import("server/Cni.zig");
+    _ = @import("server/Runtime.zig");
+    _ = @import("server/Acl.zig");
 }

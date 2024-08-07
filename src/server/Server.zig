@@ -3,13 +3,14 @@ const log = std.log.scoped(.server);
 const net = std.net;
 const fs = std.fs;
 const config = @import("../config.zig");
+const Runtime = @import("Runtime.zig");
 const json = std.json;
 const allocator = std.heap.page_allocator;
 const Handler = @import("Handler.zig");
 const Server = @This();
 
 config: config.Config,
-runtime: config.Runtime,
+runtime: Runtime,
 server: net.Server,
 
 managed_config: config.ManagedConfig,
@@ -29,7 +30,7 @@ pub fn new(config_path: ?[]const u8) !Server {
     const conf = managed_config.config;
     errdefer managed_config.deinit();
 
-    var runtime = config.Runtime.newRuntime(allocator, conf);
+    var runtime = Runtime.newRuntime(allocator, conf);
     errdefer runtime.deinit();
 
     const server = try conf.domain_socket.listen();

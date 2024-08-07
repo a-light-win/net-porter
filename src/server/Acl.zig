@@ -1,6 +1,6 @@
 const std = @import("std");
-const user = @import("user.zig");
-const Resource = @import("Resource.zig");
+const user = @import("../user.zig");
+const Resource = @import("../config.zig").Resource;
 
 const Acl = @This();
 
