@@ -4,7 +4,6 @@ const net = std.net;
 const json = std.json;
 const log = std.log.scoped(.server);
 const plugin = @import("../plugin.zig");
-const Cni = @import("Cni.zig");
 const Runtime = @import("Runtime.zig");
 const Handler = @This();
 
@@ -44,7 +43,6 @@ pub fn handle(self: *Handler) !void {
         writeError(&stream, "Failed to read request: {s}", .{@errorName(err)});
         return;
     };
-    defer allocator.free(buf);
 
     const parsed_request = json.parseFromSlice(
         plugin.Request,
@@ -71,10 +69,7 @@ fn handleCreate(self: *Handler, request: plugin.Request) !void {
     // TODO
     // load cni by resource name, return error if the file does not exist
     //
-    const allocator = self.arena.allocator();
-    const cni_path = self.runtime.getCniPath(allocator, request.resource);
-
-    const cni = Cni.load(self.arena.child_allocator, cni_path) catch |err| {
+    const cni = self.runtime.loadCni(request.resource) catch |err| {
         writeError(&self.connection.stream, "Failed to load CNI: {s}", .{@errorName(err)});
         return;
     };

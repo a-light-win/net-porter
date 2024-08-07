@@ -1,12 +1,16 @@
 const std = @import("std");
 const Acl = @import("Acl.zig");
+const Cni = @import("Cni.zig");
 const Config = @import("../config.zig").Config;
 const Allocator = std.mem.Allocator;
 const Runtime = @This();
 
+const CniMap = std.StringHashMap(*Cni);
+
 arena: *std.heap.ArenaAllocator,
 cni_dir: []const u8,
 acls: ?std.ArrayList(Acl) = null,
+cni_plugins: CniMap,
 
 pub fn init(allocator: Allocator, config: Config) Allocator.Error!Runtime {
     var arena = try allocator.create(std.heap.ArenaAllocator);
@@ -20,6 +24,7 @@ pub fn init(allocator: Allocator, config: Config) Allocator.Error!Runtime {
     var runtime = Runtime{
         .arena = arena,
         .cni_dir = try genCniDir(child_allocator, config),
+        .cni_plugins = CniMap.init(child_allocator),
     };
 
     if (config.resources) |resources| {
@@ -40,6 +45,8 @@ pub fn deinit(self: Runtime) void {
         }
         acls.deinit();
     }
+
+    @constCast(&self.cni_plugins).deinit();
 
     const allocator = self.arena.child_allocator;
     self.arena.deinit();
@@ -72,8 +79,8 @@ test "isAllowed" {
     try std.testing.expect(!runtime.isAllowed("not-exists", 0, 0));
 }
 
-pub fn getCniPath(self: Runtime, allocator: std.mem.Allocator, name: []const u8) []const u8 {
-    const buf = allocator.alloc(u8, self.cni_dir.len + 1 + name.len) catch unreachable;
+fn getCniPath(self: *Runtime, allocator: Allocator, name: []const u8) Allocator.Error![]const u8 {
+    const buf = try allocator.alloc(u8, self.cni_dir.len + 1 + name.len);
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ self.cni_dir, name }) catch unreachable;
 }
 
@@ -84,4 +91,21 @@ fn genCniDir(allocator: std.mem.Allocator, config: Config) Allocator.Error![]con
 
     const buf = try allocator.alloc(u8, config.config_dir.len + 6);
     return std.fmt.bufPrint(buf, "{s}/cni.d", .{config.config_dir}) catch unreachable;
+}
+
+pub fn loadCni(self: *Runtime, name: []const u8) !*Cni {
+    if (self.cni_plugins.get(name)) |cni| {
+        return cni;
+    }
+
+    const allocator = self.arena.allocator();
+
+    const path = try self.getCniPath(allocator, name);
+    errdefer allocator.free(path);
+
+    const plugin = try Cni.load(allocator, path);
+    errdefer plugin.destroy();
+
+    try self.cni_plugins.put(name, plugin);
+    return plugin;
 }
