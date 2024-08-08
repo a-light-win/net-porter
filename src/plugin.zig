@@ -9,12 +9,12 @@ pub const Request = NetavarkPlugin.Request;
 
 var plugin = NetavarkPlugin.defaultNetavarkPlugin();
 
-fn setup() !void {
-    try plugin.setup();
-}
-
 fn create() !void {
     try plugin.create();
+}
+
+fn setup() !void {
+    try plugin.setup();
 }
 
 fn teardown() !void {
@@ -37,29 +37,51 @@ pub const cmd_create = cli.Command{
     },
 };
 
-pub const cmd_setup = cli.Command{
-    .name = "setup",
-    .description = cli.Description{
-        .one_line = "netavark plugin api: setup the network in the container",
-    },
-    .target = cli.CommandTarget{
-        .action = cli.CommandAction{
-            .exec = setup,
+pub fn cmd_setup(r: *cli.AppRunner) !cli.Command {
+    return cli.Command{
+        .name = "setup",
+        .description = cli.Description{
+            .one_line = "netavark plugin api: setup the network in the container",
         },
-    },
-};
+        .target = cli.CommandTarget{
+            .action = cli.CommandAction{
+                .exec = setup,
+                .positional_args = cli.PositionalArgs{
+                    .required = try r.mkSlice(cli.PositionalArg, &.{
+                        .{
+                            .name = "namespace_path",
+                            .help = "The path to the network namespace",
+                            .value_ref = r.mkRef(&plugin.namespace_path),
+                        },
+                    }),
+                },
+            },
+        },
+    };
+}
 
-pub const cmd_teardown = cli.Command{
-    .name = "teardown",
-    .description = cli.Description{
-        .one_line = "netavark plugin api: teardown the network in the container",
-    },
-    .target = cli.CommandTarget{
-        .action = cli.CommandAction{
-            .exec = teardown,
+pub fn cmd_teardown(r: *cli.AppRunner) !cli.Command {
+    return cli.Command{
+        .name = "teardown",
+        .description = cli.Description{
+            .one_line = "netavark plugin api: teardown the network in the container",
         },
-    },
-};
+        .target = cli.CommandTarget{
+            .action = cli.CommandAction{
+                .exec = teardown,
+                .positional_args = cli.PositionalArgs{
+                    .required = try r.mkSlice(cli.PositionalArg, &.{
+                        .{
+                            .name = "namespace_path",
+                            .help = "The path to the network namespace",
+                            .value_ref = r.mkRef(&plugin.namespace_path),
+                        },
+                    }),
+                },
+            },
+        },
+    };
+}
 
 pub const cmd_info = cli.Command{
     .name = "info",

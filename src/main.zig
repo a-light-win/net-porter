@@ -22,8 +22,8 @@ pub fn main() !void {
             .target = cli.CommandTarget{
                 .subcommands = &.{
                     plugin.cmd_create,
-                    plugin.cmd_setup,
-                    plugin.cmd_teardown,
+                    try plugin.cmd_setup(&runner),
+                    try plugin.cmd_teardown(&runner),
                     plugin.cmd_info,
                     server.cmd_server(&runner),
                 },
@@ -34,8 +34,14 @@ pub fn main() !void {
     };
 
     runner.run(app) catch |err| {
-        const error_message = network.ErrorMessage.init(@errorName(err));
-        try json.stringifyToStdout(error_message);
+        switch (err) {
+            error.AlreadyHandled => {},
+            else => {
+                const error_message = network.ErrorMessage.init(@errorName(err));
+                try json.stringifyToStdout(error_message);
+            },
+        }
+        std.process.exit(1);
     };
 }
 

@@ -47,12 +47,18 @@ const NetworkPluginExec = struct {
 pub const Request = struct {
     action: PluginAction,
     resource: []const u8,
-    request: []const u8,
+    request: json.Value,
+    netns: ?[]const u8 = null,
+};
+
+pub const ErrorResponse = struct {
+    @"error": ?[]const u8 = null,
 };
 
 allocator: std.mem.Allocator,
 stream_in: *std.io.StreamSource,
 stream_out: *std.io.StreamSource,
+namespace_path: []const u8 = undefined,
 
 pub fn defaultNetavarkPlugin() NetavarkPlugin {
     return NetavarkPlugin{
@@ -112,24 +118,35 @@ test "printInfo()" {
 pub fn create(self: *NetavarkPlugin) !void {
     const request = self.getRequest() catch |err| {
         try self.writeError("Read request failed with {s}", .{@errorName(err)});
-        return;
+        return error.AlreadyHandled;
     };
     defer self.allocator.free(request);
 
     const parsed = json.parseFromSlice(
-        Network,
+        json.Value,
         self.allocator,
         request,
-        .{ .ignore_unknown_fields = true },
+        .{},
     ) catch |err| {
         try self.writeError("Parse request failed with {s}", .{@errorName(err)});
-        return;
+        return error.AlreadyHandled;
     };
     defer parsed.deinit();
 
-    const network = parsed.value;
+    const parsed_network = json.parseFromValue(
+        Network,
+        self.allocator,
+        parsed.value,
+        .{ .ignore_unknown_fields = true },
+    ) catch |err| {
+        try self.writeError("Parse network failed with {s}", .{@errorName(err)});
+        return error.AlreadyHandled;
+    };
+    defer parsed_network.deinit();
+
+    const network = parsed_network.value;
     if (!self.validateNetwork(network)) {
-        return;
+        return error.AlreadyHandled;
     }
 
     try self.sendRequest(
@@ -137,7 +154,7 @@ pub fn create(self: *NetavarkPlugin) !void {
         &Request{
             .action = PluginAction.create,
             .resource = network.options.net_porter_resource,
-            .request = request,
+            .request = parsed.value,
         },
     );
 }
@@ -153,24 +170,35 @@ pub fn teardown(self: *NetavarkPlugin) !void {
 fn exec(self: *NetavarkPlugin, action: PluginAction) !void {
     const request = self.getRequest() catch |err| {
         try self.writeError("Read request failed with {s}", .{@errorName(err)});
-        return;
+        return error.AlreadyHandled;
     };
     defer self.allocator.free(request);
 
     const parsed = json.parseFromSlice(
-        NetworkPluginExec,
+        json.Value,
         self.allocator,
         request,
-        .{ .ignore_unknown_fields = true },
+        .{},
     ) catch |err| {
         try self.writeError("Parse request failed with {s}", .{@errorName(err)});
-        return;
+        return error.AlreadyHandled;
     };
     defer parsed.deinit();
 
-    const network = parsed.value.network;
+    const parsed_network = json.parseFromValue(
+        NetworkPluginExec,
+        self.allocator,
+        parsed.value,
+        .{ .ignore_unknown_fields = true },
+    ) catch |err| {
+        try self.writeError("Parse network failed with {s}", .{@errorName(err)});
+        return error.AlreadyHandled;
+    };
+    defer parsed_network.deinit();
+
+    const network = parsed_network.value.network;
     if (!self.validateNetwork(network)) {
-        return;
+        return error.AlreadyHandled;
     }
 
     try self.sendRequest(
@@ -178,7 +206,8 @@ fn exec(self: *NetavarkPlugin, action: PluginAction) !void {
         &Request{
             .action = action,
             .resource = network.options.net_porter_resource,
-            .request = request,
+            .request = parsed.value,
+            .netns = self.namespace_path,
         },
     );
 }
@@ -210,7 +239,7 @@ fn sendRequest(self: *NetavarkPlugin, socket_path: []const u8, request: *const R
 
     const stream = domain_socket.connect() catch |err| {
         try self.writeError("Failed to connect to domain socket {s}: {s}", .{ socket_path, @errorName(err) });
-        return;
+        return error.AlreadyHandled;
     };
     defer stream.close();
 
@@ -223,6 +252,7 @@ fn sendRequest(self: *NetavarkPlugin, socket_path: []const u8, request: *const R
         stream.writer(),
     ) catch |err| {
         try self.writeError("Failed to send request to domain socket {s}: {s}", .{ socket_path, @errorName(err) });
+        return error.AlreadyHandled;
     };
 
     try std.posix.shutdown(stream.handle, .send);
@@ -232,8 +262,22 @@ fn sendRequest(self: *NetavarkPlugin, socket_path: []const u8, request: *const R
         max_response_size,
     ) catch |err| {
         try self.writeError("Failed to read response from domain socket {s}: {s}", .{ socket_path, @errorName(err) });
-        return;
+        return error.AlreadyHandled;
     };
 
     _ = try self.stream_out.writer().write(buf);
+
+    const parsed_response = json.parseFromSlice(
+        ErrorResponse,
+        self.allocator,
+        buf,
+        .{ .ignore_unknown_fields = true },
+    ) catch {
+        return;
+    };
+    defer parsed_response.deinit();
+
+    if (parsed_response.value.@"error") |_| {
+        return error.AlreadyHandled;
+    }
 }

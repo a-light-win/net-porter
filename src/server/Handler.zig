@@ -46,6 +46,8 @@ pub fn handle(self: *Handler) !void {
         return;
     };
 
+    std.debug.print("{s}\n", .{buf});
+
     const parsed_request = json.parseFromSlice(
         plugin.Request,
         allocator,
@@ -62,15 +64,15 @@ pub fn handle(self: *Handler) !void {
 
     switch (request.action) {
         .create => try self.handleCreate(request),
+        // .setup => try self.handleSetup(request),
         // TODO: implement other actions
-        else => {},
+        else => {
+            writeError(&stream, "Unsupported action: {s}", .{@tagName(request.action)});
+        },
     }
 }
 
 fn handleCreate(self: *Handler, request: plugin.Request) !void {
-    // TODO
-    // load cni by resource name, return error if the file does not exist
-    //
     const cni = self.cni_manager.loadCni(request.resource) catch |err| {
         writeError(&self.connection.stream, "Failed to load CNI: {s}", .{@errorName(err)});
         return;
@@ -79,15 +81,16 @@ fn handleCreate(self: *Handler, request: plugin.Request) !void {
     // TODO: save cni and send back the request
     _ = cni;
 
-    self.connection.stream.writeAll(request.request) catch |err| {
-        writeError(
-            &self.connection.stream,
-            "Failed to send response of create action: {s}",
-            .{
-                @errorName(err),
-            },
-        );
+    writeResponse(&self.connection.stream, request.request);
+}
+
+fn handleSetup(self: *Handler, request: plugin.Request) !void {
+    const cni = self.cni_manager.loadCni(request.resource) catch |err| {
+        writeError(&self.connection.stream, "Failed to load CNI: {s}", .{@errorName(err)});
+        return;
     };
+
+    _ = cni;
 }
 
 fn writeResponse(stream: *net.Stream, response: anytype) void {
@@ -95,6 +98,15 @@ fn writeResponse(stream: *net.Stream, response: anytype) void {
         response,
         .{ .whitespace = .indent_2 },
         stream.writer(),
+    ) catch |err| {
+        writeError(stream, "Failed to format response: {s}", .{@errorName(err)});
+        return;
+    };
+
+    json.stringify(
+        response,
+        .{ .whitespace = .indent_2 },
+        std.io.getStdOut().writer(),
     ) catch |err| {
         writeError(stream, "Failed to format response: {s}", .{@errorName(err)});
         return;
