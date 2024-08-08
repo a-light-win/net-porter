@@ -58,9 +58,17 @@ pub fn handle(self: *Handler) !void {
         return;
     };
     defer parsed_request.deinit();
-    const request = parsed_request.value;
 
+    const request = parsed_request.value;
     try self.authClient(client_info, &request);
+
+    if (request.netns) |netns| {
+        const netns_file = std.fs.cwd().openFile(netns, .{}) catch |err| {
+            writeError(&stream, "Failed to open netns file {s}: {s}", .{ netns, @errorName(err) });
+            return;
+        };
+        defer netns_file.close();
+    }
 
     switch (request.action) {
         .create => try self.handleCreate(request),
@@ -77,8 +85,6 @@ fn handleCreate(self: *Handler, request: plugin.Request) !void {
         writeError(&self.connection.stream, "Failed to load CNI: {s}", .{@errorName(err)});
         return;
     };
-
-    // TODO: save cni and send back the request
     _ = cni;
 
     writeResponse(&self.connection.stream, request.request);
