@@ -32,8 +32,16 @@ const DriverOptions = struct {
     net_porter_resource: []const u8,
 };
 
+const NetworkOptions = struct {
+    interface_name: []const u8, // CNI_IFNAME
+    static_ips: ?[]const []const u8,
+    static_mac: ?[]const u8,
+};
+
 const NetworkPluginExec = struct {
+    container_id: []const u8, // CNI_CONTAINERID
     network: Network,
+    network_options: NetworkOptions,
 };
 
 pub const Request = struct {
