@@ -26,7 +26,12 @@ pub fn init(root_allocator: Allocator, config: Config) Allocator.Error!CniManage
 }
 
 pub fn deinit(self: CniManager) void {
+    var plugin_it = self.cni_plugins.valueIterator();
+    while (plugin_it.next()) |plugin| {
+        plugin.*.deinit();
+    }
     @constCast(&self.cni_plugins).deinit();
+
     self.arena.deinit();
 }
 
@@ -50,10 +55,10 @@ pub fn loadCni(self: *CniManager, name: []const u8) !*Cni {
     const allocator = self.arena.allocator();
 
     const path = try self.getCniPath(allocator, name);
-    errdefer allocator.free(path);
+    defer allocator.free(path);
 
-    const plugin = try Cni.load(allocator, path);
-    errdefer plugin.destroy();
+    const plugin = try Cni.load(self.arena.childAllocator(), path);
+    errdefer plugin.deinit();
 
     try self.cni_plugins.put(name, plugin);
     return plugin;
