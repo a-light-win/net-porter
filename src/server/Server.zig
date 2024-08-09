@@ -7,7 +7,9 @@ const AclManager = @import("AclManager.zig");
 const CniManager = @import("CniManager.zig");
 const json = std.json;
 const allocator = std.heap.page_allocator;
+const Responser = @import("Responser.zig");
 const Handler = @import("Handler.zig");
+const ArenaAllocator = @import("../ArenaAllocator.zig");
 const Server = @This();
 
 config: config.Config,
@@ -69,16 +71,18 @@ pub fn run(self: *Server) !void {
     log.info("Server listening on {s}", .{self.config.domain_socket.path});
     while (true) {
         // Accept a client connection
-        const connection = try self.server.accept();
+        var connection = try self.server.accept();
 
-        const arena = allocator.create(std.heap.ArenaAllocator) catch unreachable;
-        arena.* = std.heap.ArenaAllocator.init(allocator);
         var handler = Handler{
-            .arena = arena,
+            .arena = try ArenaAllocator.init(allocator),
             .acl_manager = &self.acl_manager,
             .cni_manager = &self.cni_manager,
             .config = &self.config,
             .connection = connection,
+            .responser = Responser{
+                .stream = &connection.stream,
+                .log_response = true,
+            },
         };
 
         // TODO: manage thread lifetime

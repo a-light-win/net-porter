@@ -6,6 +6,8 @@ const log = std.log.scoped(.server);
 const plugin = @import("../plugin.zig");
 const AclManager = @import("AclManager.zig");
 const CniManager = @import("CniManager.zig");
+const Responser = @import("Responser.zig");
+const ArenaAllocator = @import("../ArenaAllocator.zig");
 const Handler = @This();
 
 const ClientInfo = extern struct {
@@ -14,25 +16,24 @@ const ClientInfo = extern struct {
     gid: std.posix.gid_t,
 };
 
-arena: *std.heap.ArenaAllocator,
+arena: ArenaAllocator,
 config: *config.Config,
 acl_manager: *AclManager,
 cni_manager: *CniManager,
 connection: std.net.Server.Connection,
+responser: Responser,
 
 pub fn deinit(self: *Handler) void {
     self.connection.stream.close();
 
-    const allocator = self.arena.child_allocator;
     self.arena.deinit();
-    allocator.destroy(self.arena);
 }
 
 pub fn handle(self: *Handler) !void {
     var stream = self.connection.stream;
     const allocator = self.arena.allocator();
 
-    const client_info = try getClientInfo(&stream);
+    const client_info = try getClientInfo(&self.responser);
     log.debug(
         "Client connected with PID {d}, UID {d}, GID {d}",
         .{ client_info.pid, client_info.uid, client_info.gid },
@@ -42,7 +43,7 @@ pub fn handle(self: *Handler) !void {
         allocator,
         plugin.max_request_size,
     ) catch |err| {
-        writeError(&stream, "Failed to read request: {s}", .{@errorName(err)});
+        self.responser.writeError("Failed to read request: {s}", .{@errorName(err)});
         return;
     };
 
@@ -54,7 +55,7 @@ pub fn handle(self: *Handler) !void {
         buf,
         .{},
     ) catch |err| {
-        writeError(&stream, "Failed to parse request: {s}", .{@errorName(err)});
+        self.responser.writeError("Failed to parse request: {s}", .{@errorName(err)});
         return;
     };
     defer parsed_request.deinit();
@@ -64,7 +65,7 @@ pub fn handle(self: *Handler) !void {
 
     if (request.netns) |netns| {
         const netns_file = std.fs.cwd().openFile(netns, .{}) catch |err| {
-            writeError(&stream, "Failed to open netns file {s}: {s}", .{ netns, @errorName(err) });
+            self.responser.writeError("Failed to open netns file {s}: {s}", .{ netns, @errorName(err) });
             return;
         };
         defer netns_file.close();
@@ -75,74 +76,35 @@ pub fn handle(self: *Handler) !void {
         // .setup => try self.handleSetup(request),
         // TODO: implement other actions
         else => {
-            writeError(&stream, "Unsupported action: {s}", .{@tagName(request.action)});
+            self.responser.writeError("Unsupported action: {s}", .{@tagName(request.action)});
         },
     }
 }
 
 fn handleCreate(self: *Handler, request: plugin.Request) !void {
     const cni = self.cni_manager.loadCni(request.resource) catch |err| {
-        writeError(&self.connection.stream, "Failed to load CNI: {s}", .{@errorName(err)});
+        self.responser.writeError("Failed to load CNI: {s}", .{@errorName(err)});
         return;
     };
     _ = cni;
 
-    writeResponse(&self.connection.stream, request.request);
+    self.responser.write(request.request);
 }
 
 fn handleSetup(self: *Handler, request: plugin.Request) !void {
     const cni = self.cni_manager.loadCni(request.resource) catch |err| {
-        writeError(&self.connection.stream, "Failed to load CNI: {s}", .{@errorName(err)});
+        self.responser.writeError("Failed to load CNI: {s}", .{@errorName(err)});
         return;
     };
 
     _ = cni;
 }
 
-fn writeResponse(stream: *net.Stream, response: anytype) void {
-    json.stringify(
-        response,
-        .{ .whitespace = .indent_2 },
-        stream.writer(),
-    ) catch |err| {
-        writeError(stream, "Failed to format response: {s}", .{@errorName(err)});
-        return;
-    };
-
-    json.stringify(
-        response,
-        .{ .whitespace = .indent_2 },
-        std.io.getStdOut().writer(),
-    ) catch |err| {
-        writeError(stream, "Failed to format response: {s}", .{@errorName(err)});
-        return;
-    };
-}
-
-fn writeError(stream: *net.Stream, comptime fmt: []const u8, args: anytype) void {
-    var buf: [1024]u8 = undefined;
-
-    const error_msg = std.fmt.bufPrint(&buf, fmt, args) catch |err| {
-        log.warn("Failed to format error message: {s}", .{@errorName(err)});
-        return;
-    };
-
-    log.warn("{s}", .{error_msg});
-
-    json.stringify(
-        .{ .@"error" = error_msg },
-        .{ .whitespace = .indent_2 },
-        stream.writer(),
-    ) catch |err| {
-        log.warn("Failed to send error message: {s}", .{@errorName(err)});
-    };
-}
-
-fn getClientInfo(stream: *net.Stream) std.posix.UnexpectedError!ClientInfo {
+fn getClientInfo(responser: *Responser) std.posix.UnexpectedError!ClientInfo {
     // Get peer credentials
     var client_info: ClientInfo = undefined;
     var info_len: std.posix.socklen_t = @sizeOf(ClientInfo);
-    const fd = stream.handle;
+    const fd = responser.stream.handle;
     const res = std.posix.system.getsockopt(
         fd,
         std.posix.SOL.SOCKET,
@@ -151,7 +113,7 @@ fn getClientInfo(stream: *net.Stream) std.posix.UnexpectedError!ClientInfo {
         &info_len,
     );
     if (res != 0) {
-        writeError(stream, "Failed to get connection info: {d}", .{res});
+        responser.writeError("Failed to get connection info: {d}", .{res});
 
         const json_err = std.posix.errno(res);
         log.warn("Failed to send error message: {s}", .{@tagName(json_err)});
@@ -163,8 +125,7 @@ fn getClientInfo(stream: *net.Stream) std.posix.UnexpectedError!ClientInfo {
 fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
     if (!self.acl_manager.isAllowed(request.resource, client_info.uid, client_info.gid)) {
         const err = error.AccessDenied;
-        writeError(
-            &self.connection.stream,
+        self.responser.writeError(
             "Failed to access resource '{s}', error: {s}",
             .{
                 request.resource,
