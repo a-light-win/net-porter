@@ -71,33 +71,17 @@ pub fn handle(self: *Handler) !void {
         defer netns_file.close();
     }
 
+    const cni = self.cni_manager.loadCni(request.resource) catch |err| {
+        self.responser.writeError("Failed to load CNI: {s}", .{@errorName(err)});
+        return;
+    };
+
     switch (request.action) {
-        .create => try self.handleCreate(request),
-        // .setup => try self.handleSetup(request),
-        // TODO: implement other actions
-        else => {
-            self.responser.writeError("Unsupported action: {s}", .{@tagName(request.action)});
-        },
+        .create => try cni.create(request, &self.responser),
+        .setup => try cni.setup(request, &self.responser),
+        .teardown => try cni.teardown(request, &self.responser),
+        // else => { self.responser.writeError("Unsupported action: {s}", .{@tagName(request.action)}); },
     }
-}
-
-fn handleCreate(self: *Handler, request: plugin.Request) !void {
-    const cni = self.cni_manager.loadCni(request.resource) catch |err| {
-        self.responser.writeError("Failed to load CNI: {s}", .{@errorName(err)});
-        return;
-    };
-    _ = cni;
-
-    self.responser.write(request.request);
-}
-
-fn handleSetup(self: *Handler, request: plugin.Request) !void {
-    const cni = self.cni_manager.loadCni(request.resource) catch |err| {
-        self.responser.writeError("Failed to load CNI: {s}", .{@errorName(err)});
-        return;
-    };
-
-    _ = cni;
 }
 
 fn getClientInfo(responser: *Responser) std.posix.UnexpectedError!ClientInfo {

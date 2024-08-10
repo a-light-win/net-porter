@@ -5,7 +5,10 @@ const Config = @This();
 
 config_dir: []const u8 = "",
 config_path: []const u8 = "",
+// CNI configuration directory
 cni_dir: ?[]const u8 = null,
+// CNI plugin directory
+cni_plugin_dir: []const u8 = "/usr/lib/cni",
 
 domain_socket: DomainSocket = DomainSocket{},
 resources: ?[]const Resource = null,

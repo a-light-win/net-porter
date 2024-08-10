@@ -9,6 +9,7 @@ const CniManager = @This();
 
 arena: ArenaAllocator,
 cni_dir: []const u8,
+cni_plugin_dir: []const u8,
 cni_plugins: CniMap,
 
 mutex: std.Thread.Mutex = std.Thread.Mutex{},
@@ -21,6 +22,7 @@ pub fn init(root_allocator: Allocator, config: Config) Allocator.Error!CniManage
     return CniManager{
         .arena = arena,
         .cni_dir = try genCniDir(allocator, config),
+        .cni_plugin_dir = config.cni_plugin_dir,
         .cni_plugins = CniMap.init(allocator),
     };
 }
@@ -57,7 +59,7 @@ pub fn loadCni(self: *CniManager, name: []const u8) !*Cni {
     const path = try self.getCniPath(allocator, name);
     defer allocator.free(path);
 
-    const plugin = try Cni.load(self.arena.childAllocator(), path);
+    const plugin = try Cni.load(self.arena.childAllocator(), path, self.cni_plugin_dir);
     errdefer plugin.deinit();
 
     try self.cni_plugins.put(name, plugin);

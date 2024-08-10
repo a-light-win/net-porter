@@ -7,6 +7,8 @@ pub const max_request_size = NetavarkPlugin.max_request_size;
 pub const max_response_size = NetavarkPlugin.max_response_size;
 pub const Request = NetavarkPlugin.Request;
 
+pub const NetworkPluginExec = NetavarkPlugin.NetworkPluginExec;
+
 var plugin = NetavarkPlugin.defaultNetavarkPlugin();
 
 fn create() !void {

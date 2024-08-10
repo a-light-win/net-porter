@@ -22,7 +22,7 @@ const PluginInfo = struct {
     description: []const u8,
 };
 
-const Network = struct {
+pub const Network = struct {
     driver: []const u8,
     options: DriverOptions,
 };
@@ -38,7 +38,8 @@ const NetworkOptions = struct {
     static_mac: ?[]const u8,
 };
 
-const NetworkPluginExec = struct {
+pub const NetworkPluginExec = struct {
+    container_name: []const u8,
     container_id: []const u8, // CNI_CONTAINERID
     network: Network,
     network_options: NetworkOptions,
