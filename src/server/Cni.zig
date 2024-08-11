@@ -127,9 +127,11 @@ const CniConfig = struct {
     disableCheck: bool = false,
     plugins: json.Value,
 
-    const supported_plugins = .{
-        "macvlan",
-    };
+    const ValidateError = error{
+        PluginsIsEmpty,
+        PluginsIsNotArray,
+        PluginIsNotMap,
+    } || PluginConf.ValidateError;
 
     pub fn validate(self: CniConfig) ValidateError!void {
         return switch (self.plugins) {
@@ -198,44 +200,11 @@ const CniConfig = struct {
         };
     }
 
-    const ValidateError = error{
-        PluginsIsEmpty,
-        PluginsIsNotArray,
-        PluginIsNotMap,
-        PluginTypeMissing,
-        PluginTypeNotString,
-        PluginTypeUnsupported,
-    };
-
     fn validatePlugin(self: CniConfig, p: json.Value) ValidateError!void {
         return switch (p) {
-            .object => |obj| blk: {
-                const type_value = obj.get("type") orelse {
-                    log.warn(
-                        "The plugin type in cni config '{s}' is missing",
-                        .{self.name},
-                    );
-                    break :blk error.PluginTypeMissing;
-                };
-
-                const plugin_type = switch (type_value) {
-                    .string => |s| s,
-                    else => {
-                        log.warn(
-                            "The plugin type in cni config '{s}' is not string",
-                            .{self.name},
-                        );
-                        break :blk error.PluginTypeNotString;
-                    },
-                };
-
-                if (!isSupportedPlugin(plugin_type)) {
-                    log.warn(
-                        "The plugin type '{s}' in cni config '{s}' is unsupported",
-                        .{ plugin_type, self.name },
-                    );
-                    break :blk error.PluginTypeUnsupported;
-                }
+            .object => |obj| {
+                const plugin_conf = PluginConf{ .conf = obj };
+                try plugin_conf.validate(self.name);
             },
             else => {
                 log.warn(
@@ -370,6 +339,129 @@ const CniConfig = struct {
         const config = parsed_config.value;
         config.validate() catch unreachable;
     }
+};
+
+const PluginConf = struct {
+    conf: json.ObjectMap,
+
+    const ValidateError = error{
+        PluginTypeMissing,
+        PluginTypeNotString,
+        PluginTypeUnsupported,
+    };
+
+    pub fn init(allocator: Allocator, cni_config: CniConfig, obj: json.ObjectMap) !PluginConf {
+        const conf = try shadowCopy(allocator, obj);
+        var plugin_conf = PluginConf{ .conf = conf };
+
+        try plugin_conf.setName(cni_config.name);
+        try plugin_conf.setCniVersion(cni_config.cniVersion);
+
+        return plugin_conf;
+    }
+
+    pub fn validate(self: PluginConf, cni_name: []const u8) ValidateError!void {
+        const type_value = self.conf.get("type") orelse {
+            log.warn(
+                "The plugin type in cni config '{s}' is missing",
+                .{cni_name},
+            );
+            return error.PluginTypeMissing;
+        };
+
+        const plugin_type = switch (type_value) {
+            .string => |s| s,
+            else => {
+                log.warn(
+                    "The plugin type in cni config '{s}' is not string",
+                    .{cni_name},
+                );
+                return error.PluginTypeNotString;
+            },
+        };
+
+        if (!isSupportedPlugin(plugin_type)) {
+            log.warn(
+                "The plugin type '{s}' in cni config '{s}' is unsupported",
+                .{ plugin_type, cni_name },
+            );
+            return error.PluginTypeUnsupported;
+        }
+    }
+
+    pub fn getName(self: PluginConf) []const u8 {
+        const name = self.conf.get("name");
+        return if (name) |v| v.string else unreachable;
+    }
+
+    pub fn getCniVersion(self: PluginConf) []const u8 {
+        const version = self.conf.get("cniVersion");
+        return if (version) |v| v.string else unreachable;
+    }
+
+    pub fn getType(self: PluginConf) []const u8 {
+        const plugin_type = self.conf.get("type");
+        return if (plugin_type) |v| v.string else unreachable;
+    }
+
+    fn stringifyToPipe(self: PluginConf) !std.fs.File {
+        const fds = try std.posix.pipe();
+
+        const in = std.fs.File{ .handle = fds[0] };
+        errdefer in.close();
+
+        var out = std.fs.File{ .handle = fds[1] };
+        defer out.close();
+
+        try json.stringify(
+            json.Value{ .object = self.conf },
+            .{ .whitespace = .indent_2 },
+            out.writer(),
+        );
+
+        return in;
+    }
+
+    test "stringifyToPipe() will success" {
+        const allocator = std.testing.allocator;
+        const raw_data =
+            \\{
+            \\    "cniVersion": "1.0.0",
+            \\    "name": "test",
+            \\    "type": "macvlan"
+            \\}
+        ;
+        const parsed_data = try json.parseFromSlice(
+            json.Value,
+            allocator,
+            raw_data,
+            .{},
+        );
+        defer parsed_data.deinit();
+
+        const exec_config = PluginConf{ .conf = parsed_data.value.object };
+
+        const in = try exec_config.stringifyToPipe();
+        defer in.close();
+
+        const buf = try in.reader().readAllAlloc(allocator, 1024);
+        defer allocator.free(buf);
+
+        std.debug.print("{s}\n", .{buf});
+        try std.testing.expect(buf.len > 0);
+    }
+
+    fn setName(self: *PluginConf, name: []const u8) !void {
+        try self.conf.put("name", json.Value{ .string = name });
+    }
+
+    fn setCniVersion(self: *PluginConf, version: []const u8) !void {
+        try self.conf.put("cniVersion", json.Value{ .string = version });
+    }
+
+    const supported_plugins = .{
+        "macvlan",
+    };
 
     fn isSupportedPlugin(name: []const u8) bool {
         inline for (supported_plugins) |supported_plugin| {
@@ -380,11 +472,20 @@ const CniConfig = struct {
         }
         return false;
     }
+
+    fn shadowCopy(allocator: Allocator, src: json.ObjectMap) !json.ObjectMap {
+        var new_obj = json.ObjectMap.init(allocator);
+        var it = src.iterator();
+        while (it.next()) |entry| {
+            try new_obj.put(try allocator.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
+        }
+        return new_obj;
+    }
 };
 
 const Attachment = struct {
     arena: ArenaAllocator,
-    exec_configs: std.ArrayList(json.ObjectMap),
+    exec_configs: std.ArrayList(PluginConf),
     latest_exec: usize = 0,
 
     pub fn init(root_allocator: Allocator, cni_config: CniConfig) !Attachment {
@@ -392,7 +493,7 @@ const Attachment = struct {
 
         var attachment = Attachment{
             .arena = arena,
-            .exec_configs = std.ArrayList(json.ObjectMap).init(arena.allocator()),
+            .exec_configs = std.ArrayList(PluginConf).init(arena.allocator()),
         };
         errdefer attachment.deinit();
 
@@ -434,9 +535,9 @@ const Attachment = struct {
         try std.testing.expect(attachment.exec_configs.items.len == 1);
 
         const exec_config = attachment.exec_configs.items[0];
-        try std.testing.expectEqualSlices(u8, "test", exec_config.get("name").?.string);
-        try std.testing.expectEqualSlices(u8, "0.3.1", exec_config.get("cniVersion").?.string);
-        try std.testing.expectEqualSlices(u8, "macvlan", exec_config.get("type").?.string);
+        try std.testing.expectEqualSlices(u8, "test", exec_config.getName());
+        try std.testing.expectEqualSlices(u8, "0.3.1", exec_config.getCniVersion());
+        try std.testing.expectEqualSlices(u8, "macvlan", exec_config.getType());
     }
 
     fn initExecConfig(self: *Attachment, cni_config: CniConfig) !void {
@@ -456,26 +557,16 @@ const Attachment = struct {
     fn appendExecConfig(self: *Attachment, allocator: Allocator, cni_config: CniConfig, cni_plugin: json.Value) !void {
         switch (cni_plugin) {
             .object => |obj| {
-                var exec_config = try shadowCopy(allocator, obj);
-                try exec_config.put("cniVersion", json.Value{ .string = cni_config.cniVersion });
-                try exec_config.put("name", json.Value{ .string = cni_config.name });
+                const exec_config = try PluginConf.init(allocator, cni_config, obj);
                 try self.exec_configs.append(exec_config);
             },
             else => return,
         }
-    }
-
-    fn shadowCopy(allocator: Allocator, src: json.ObjectMap) !json.ObjectMap {
-        var new_obj = json.ObjectMap.init(allocator);
-        var it = src.iterator();
-        while (it.next()) |entry| {
-            try new_obj.put(try allocator.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
-        }
-        return new_obj;
     }
 };
 
 test {
     _ = CniConfig;
     _ = Attachment;
+    _ = PluginConf;
 }
