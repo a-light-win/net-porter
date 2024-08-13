@@ -11,16 +11,10 @@ const max_cni_config_size = 16 * 1024;
 
 arena: ArenaAllocator,
 cni_plugin_dir: []const u8,
-config: json.Parsed(CniConfig),
+config: ?json.Parsed(CniConfig) = null,
 
 mutex: std.Thread.Mutex = std.Thread.Mutex{},
-attachments: ?AttachmentMap = null,
-
-const AttachmentKey = struct {
-    container_id: []const u8,
-    ifname: []const u8,
-};
-const AttachmentMap = std.HashMap(AttachmentKey, Attachment, AttachmentKeyContext, 80);
+attachments: AttachmentMap,
 
 pub fn load(root_allocator: Allocator, path: []const u8, cni_plugin_dir: []const u8) !*Cni {
     var arena = try ArenaAllocator.init(root_allocator);
@@ -41,85 +35,177 @@ pub fn load(root_allocator: Allocator, path: []const u8, cni_plugin_dir: []const
         .arena = arena,
         .cni_plugin_dir = cni_plugin_dir,
         .config = parsed,
+        .attachments = AttachmentMap.init(allocator),
     };
     return cni;
 }
 
 pub fn deinit(self: Cni) void {
-    if (self.attachments) |attachments| {
-        var it = attachments.valueIterator();
-        while (it.next()) |attachment| {
-            attachment.deinit();
-        }
-        @constCast(&attachments).deinit();
+    var it = self.attachments.iterator();
+    while (it.next()) |entry| {
+        entry.key_ptr.*.deinit();
+        entry.value_ptr.*.deinit();
     }
+    @constCast(&self.attachments).deinit();
 
-    self.config.deinit();
+    if (self.config) |parsed| {
+        parsed.deinit();
+    }
 
     const allocator = self.arena.childAllocator();
     self.arena.deinit();
     allocator.destroy(&self);
 }
 
-pub fn create(self: Cni, request: plugin.Request, responser: *Responser) !void {
+pub fn create(self: *Cni, request: plugin.Request, responser: *Responser) !void {
     _ = self;
     responser.write(request);
 }
 
-pub fn setup(self: Cni, request: plugin.Request, responser: *Responser) !void {
+pub fn setup(self: *Cni, request: plugin.Request, responser: *Responser) !void {
     var arena = try ArenaAllocator.init(self.arena.childAllocator());
     defer arena.deinit();
+    const tentative_allocator = arena.allocator();
+    const persistent_allocator = self.arena.allocator();
 
-    const allocator = arena.allocator();
-
-    const parsed_exec_request = json.parseFromValue(
-        plugin.NetworkPluginExec,
-        allocator,
-        request.request,
-        .{},
-    ) catch |err| {
-        responser.writeError("Can not parse request: {s}", .{@errorName(err)});
+    const parsed_exec_request = parseExecRequest(tentative_allocator, request.request) catch |err| {
+        responser.writeError("Failed to parse exec request: {s}", .{@errorName(err)});
         return;
     };
     defer parsed_exec_request.deinit();
     const exec_request = parsed_exec_request.value;
 
-    var env_map = std.process.EnvMap.init(allocator);
+    const attachment_key = AttachmentKey{
+        .container_id = exec_request.container_id,
+        .ifname = exec_request.network_options.interface_name,
+    };
+
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
+    if (self.attachments.get(attachment_key)) |_| {
+        responser.writeError("The network is already setup", .{});
+        return;
+    }
+
+    try self.attachments.put(
+        try attachment_key.copy(persistent_allocator),
+        try Attachment.init(
+            persistent_allocator,
+            self.config.?.value,
+        ),
+    );
+
+    var env_map = std.process.EnvMap.init(tentative_allocator);
     try env_map.put("CNI_COMMAND", "ADD");
     try env_map.put("CNI_CONTAINERID", exec_request.container_id);
     try env_map.put("CNI_NETNS", request.netns.?);
     try env_map.put("CNI_IFNAME", exec_request.network_options.interface_name);
     try env_map.put("CNI_PATH", self.cni_plugin_dir);
-
-    var args = std.ArrayList(u8).init(allocator);
-    try args.appendSlice("K8S_POD_NAME=");
+    var args = std.ArrayList(u8).init(tentative_allocator);
+    try args.appendSlice("IgnoreUnknown=true");
+    try args.appendSlice(";K8S_POD_NAME=");
     try args.appendSlice(exec_request.container_name);
     try env_map.put("CNI_ARGS", args.items);
 
-    // for (self.config.value.plugins) |cni| {}
+    const attachment = self.attachments.get(attachment_key) orelse unreachable;
+    var pid_buf: [20]u8 = undefined;
+    const pid = try std.fmt.bufPrint(&pid_buf, "{d}", .{request.process_id.?});
+
+    for (attachment.exec_configs.items) |exec_config| {
+        const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
+
+        var process = std.process.Child.init(
+            // TODO: replace the process id with the request process id
+            &[_][]const u8{ "nsenter", "-t", pid, "--mount", cmd },
+            tentative_allocator,
+        );
+        process.stdin_behavior = .Pipe;
+        process.stdout_behavior = .Pipe;
+        process.stderr_behavior = .Pipe;
+        process.env_map = &env_map;
+        var stdout = std.ArrayList(u8).init(args.allocator);
+        var stderr = std.ArrayList(u8).init(args.allocator);
+        errdefer {
+            stdout.deinit();
+            stderr.deinit();
+        }
+
+        try process.spawn();
+
+        try exec_config.stringify(process.stdin.?);
+        process.stdin.?.close();
+        process.stdin = null;
+
+        try process.collectOutput(&stdout, &stderr, 4096);
+        const result = try process.wait();
+        log.warn("stdout: {s}", .{stdout.items});
+        log.warn("stderr: {s}", .{stderr.items});
+
+        // std.time.sleep(1 * std.time.ns_per_hour);
+
+        if (result.Exited != 0) {
+            responser.writeError("Failed to setup network: {d}", .{result.Exited});
+            return;
+        }
+
+        // TODO: call responser.write
+    }
 }
 
-pub fn teardown(self: Cni, request: plugin.Request, responser: *Responser) !void {
+const CniErrorMsg = struct {
+    code: u32,
+    msg: []const u8,
+};
+
+pub fn teardown(self: *Cni, request: plugin.Request, responser: *Responser) !void {
     _ = self;
     // TODO:
     responser.write(request);
 }
 
-const AttachmentKeyContext = struct {
-    pub fn hash(self: AttachmentKeyContext, key: AttachmentKey) u64 {
-        _ = self;
-        var hasher = std.hash.Wyhash.init(0);
-        std.hash.autoHashStrat(&hasher, key.container_id, .Shallow);
-        std.hash.autoHashStrat(&hasher, key.ifname, .Shallow);
-        return hasher.final();
-    }
-
-    pub fn eql(self: AttachmentKeyContext, one: AttachmentKey, other: AttachmentKey) bool {
-        _ = self;
-        return std.mem.eql(u8, one.container_id, other.container_id) and
-            std.mem.eql(u8, one.ifname, other.ifname);
-    }
+const LsnsRecord = struct {
+    type: []const u8,
+    pid: u32,
+    command: []const u8,
 };
+
+const LsnsResult = struct {
+    namespaces: []LsnsRecord,
+};
+
+fn cni_plugin_binary(self: Cni, allocator: Allocator, plugin_type: []const u8) ![]const u8 {
+    const total_len = self.cni_plugin_dir.len + 1 + plugin_type.len;
+    var bin = try allocator.alloc(u8, total_len);
+    @memcpy(bin[0..self.cni_plugin_dir.len], self.cni_plugin_dir);
+    bin[self.cni_plugin_dir.len] = '/';
+    @memcpy(bin[self.cni_plugin_dir.len + 1 .. total_len], plugin_type);
+
+    return bin;
+}
+
+test "cni_plugin_binary() should return a valid path" {
+    const allocator = std.testing.allocator;
+    const cni = Cni{
+        .arena = try ArenaAllocator.init(allocator),
+        .cni_plugin_dir = "/path/to/cni/plugins",
+        .config = null,
+        .attachments = AttachmentMap.init(allocator),
+    };
+    defer cni.arena.deinit();
+    const bin = try cni.cni_plugin_binary(allocator, "macvlan");
+    defer allocator.free(bin);
+    try std.testing.expectEqualSlices(u8, "/path/to/cni/plugins/macvlan", bin);
+}
+
+fn parseExecRequest(allocator: Allocator, request: json.Value) !json.Parsed(plugin.NetworkPluginExec) {
+    return try json.parseFromValue(
+        plugin.NetworkPluginExec,
+        allocator,
+        request,
+        .{ .ignore_unknown_fields = true },
+    );
+}
 
 const CniConfig = struct {
     cniVersion: []const u8,
@@ -404,25 +490,15 @@ const PluginConf = struct {
         return if (plugin_type) |v| v.string else unreachable;
     }
 
-    fn stringifyToPipe(self: PluginConf) !std.fs.File {
-        const fds = try std.posix.pipe();
-
-        const in = std.fs.File{ .handle = fds[0] };
-        errdefer in.close();
-
-        var out = std.fs.File{ .handle = fds[1] };
-        defer out.close();
-
+    fn stringify(self: PluginConf, stream: std.fs.File) !void {
         try json.stringify(
             json.Value{ .object = self.conf },
             .{ .whitespace = .indent_2 },
-            out.writer(),
+            stream.writer(),
         );
-
-        return in;
     }
 
-    test "stringifyToPipe() will success" {
+    test "stringify() will success" {
         const allocator = std.testing.allocator;
         const raw_data =
             \\{
@@ -441,8 +517,13 @@ const PluginConf = struct {
 
         const exec_config = PluginConf{ .conf = parsed_data.value.object };
 
-        const in = try exec_config.stringifyToPipe();
+        const fds = try std.posix.pipe();
+        var in = std.fs.File{ .handle = fds[0] };
         defer in.close();
+
+        var out = std.fs.File{ .handle = fds[1] };
+        try exec_config.stringify(out);
+        out.close();
 
         const buf = try in.reader().readAllAlloc(allocator, 1024);
         defer allocator.free(buf);
@@ -482,6 +563,79 @@ const PluginConf = struct {
         return new_obj;
     }
 };
+
+const AttachmentKey = struct {
+    container_id: []const u8,
+    ifname: []const u8,
+    allocator: ?Allocator = null,
+
+    pub fn copy(self: AttachmentKey, allocator: Allocator) !AttachmentKey {
+        return AttachmentKey{
+            .container_id = try allocator.dupe(u8, self.container_id),
+            .ifname = try allocator.dupe(u8, self.ifname),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: AttachmentKey) void {
+        if (self.allocator) |alloc| {
+            alloc.free(self.container_id);
+            alloc.free(self.ifname);
+        }
+    }
+
+    test "copy() will success" {
+        const allocator = std.testing.allocator;
+        const key = AttachmentKey{
+            .container_id = "test",
+            .ifname = "eth0",
+        };
+        const copied_key = try key.copy(allocator);
+        defer copied_key.deinit();
+        try std.testing.expectEqualSlices(u8, "test", copied_key.container_id);
+        try std.testing.expectEqualSlices(u8, "eth0", copied_key.ifname);
+    }
+};
+
+const AttachmentKeyContext = struct {
+    pub fn hash(self: AttachmentKeyContext, key: AttachmentKey) u64 {
+        _ = self;
+        var hasher = std.hash.Wyhash.init(0);
+        std.hash.autoHashStrat(&hasher, key.container_id, .Deep);
+        std.hash.autoHashStrat(&hasher, key.ifname, .Deep);
+        return hasher.final();
+    }
+
+    test "the copy key have the same hash" {
+        const context = AttachmentKeyContext{};
+        const key = AttachmentKey{
+            .container_id = "test",
+            .ifname = "eth0",
+        };
+        const copied_key = try key.copy(std.testing.allocator);
+        defer copied_key.deinit();
+        try std.testing.expectEqual(context.hash(key), context.hash(copied_key));
+    }
+
+    pub fn eql(self: AttachmentKeyContext, one: AttachmentKey, other: AttachmentKey) bool {
+        _ = self;
+        return std.mem.eql(u8, one.container_id, other.container_id) and
+            std.mem.eql(u8, one.ifname, other.ifname);
+    }
+
+    test "the copy key is equal to the original key" {
+        const context = AttachmentKeyContext{};
+        const key = AttachmentKey{
+            .container_id = "test",
+            .ifname = "eth0",
+        };
+        const copied_key = try key.copy(std.testing.allocator);
+        defer copied_key.deinit();
+        try std.testing.expect(context.eql(key, copied_key));
+    }
+};
+
+const AttachmentMap = std.HashMap(AttachmentKey, Attachment, AttachmentKeyContext, 80);
 
 const Attachment = struct {
     arena: ArenaAllocator,
@@ -567,6 +721,8 @@ const Attachment = struct {
 
 test {
     _ = CniConfig;
+    _ = AttachmentKey;
+    _ = AttachmentKeyContext;
     _ = Attachment;
     _ = PluginConf;
 }

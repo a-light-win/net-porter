@@ -28,7 +28,7 @@ pub const Network = struct {
 };
 
 const DriverOptions = struct {
-    net_porter_socket: []const u8,
+    net_porter_socket: [:0]const u8,
     net_porter_resource: []const u8,
 };
 
@@ -50,6 +50,8 @@ pub const Request = struct {
     resource: []const u8,
     request: json.Value,
     netns: ?[]const u8 = null,
+    // The process ID of net-porter client
+    process_id: ?std.posix.pid_t = null,
 };
 
 pub const ErrorResponse = struct {
@@ -233,7 +235,7 @@ fn getRequest(self: *NetavarkPlugin) ![]const u8 {
     return self.stream_in.reader().readAllAlloc(self.allocator, max_request_size);
 }
 
-fn sendRequest(self: *NetavarkPlugin, socket_path: []const u8, request: *const Request) !void {
+fn sendRequest(self: *NetavarkPlugin, socket_path: [:0]const u8, request: *const Request) !void {
     const domain_socket = DomainSocket{
         .path = socket_path,
     };

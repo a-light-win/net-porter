@@ -60,16 +60,10 @@ pub fn handle(self: *Handler) !void {
     };
     defer parsed_request.deinit();
 
-    const request = parsed_request.value;
+    var request = parsed_request.value;
+    request.process_id = client_info.pid;
     try self.authClient(client_info, &request);
-
-    if (request.netns) |netns| {
-        const netns_file = std.fs.cwd().openFile(netns, .{}) catch |err| {
-            self.responser.writeError("Failed to open netns file {s}: {s}", .{ netns, @errorName(err) });
-            return;
-        };
-        defer netns_file.close();
-    }
+    try self.checkNetns(client_info, &request);
 
     const cni = self.cni_manager.loadCni(request.resource) catch |err| {
         self.responser.writeError("Failed to load CNI: {s}", .{@errorName(err)});
@@ -117,5 +111,24 @@ fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Re
             },
         );
         return err;
+    }
+}
+
+fn checkNetns(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
+    if (request.netns) |netns| {
+        const netns_file = std.fs.cwd().openFile(netns, .{}) catch |err| {
+            self.responser.writeError("Failed to open netns file {s}: {s}", .{ netns, @errorName(err) });
+            return err;
+        };
+        defer netns_file.close();
+        const stat = std.posix.fstat(netns_file.handle) catch |err| {
+            self.responser.writeError("Failed to stat netns file {s}: {s}", .{ netns, @errorName(err) });
+            return err;
+        };
+
+        if (stat.uid != client_info.uid) {
+            self.responser.writeError("Netns file {s} doesn't belong to client", .{netns});
+            return error.AccessDenied;
+        }
     }
 }

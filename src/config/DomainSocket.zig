@@ -1,8 +1,12 @@
 const std = @import("std");
 const user = @import("../user.zig");
+const c = @cImport({
+    @cInclude("unistd.h");
+});
+
 const DomainSocket = @This();
 
-path: []const u8 = "/run/net-porter.sock",
+path: [:0]const u8 = "/run/net-porter.sock",
 owner: ?[:0]const u8 = null,
 group: ?[:0]const u8 = null,
 uid: ?std.posix.uid_t = null,
@@ -32,31 +36,73 @@ pub fn listen(self: DomainSocket) !std.net.Server {
         return e;
     };
 
-    self.setSocketPermissions(server.stream.handle) catch {};
+    self.setSocketPermissions();
 
     return server;
 }
 
-fn setSocketPermissions(self: DomainSocket, handle: std.posix.socket_t) !void {
+test "listen() should change the mode of socket to 660" {
+    const socket = DomainSocket{
+        .path = "/tmp/test-listen.sock",
+    };
+
+    var server = try socket.listen();
+    defer server.deinit();
+    defer std.fs.cwd().deleteFile(socket.path) catch {};
+
+    var stat: std.os.linux.Statx = undefined;
+
+    // Call the statx function to get file metadata
+    _ = std.os.linux.statx(std.posix.AT.FDCWD, // dirfd (use current directory)
+        socket.path, // path to the socket
+        0, // flags (0 for default)
+        std.os.linux.STATX_BASIC_STATS, // what (basic stats)
+        &stat // where to store the result
+    );
+    const mode = stat.mode & 0o777;
+    std.debug.print("path: {s}, mode: {o}, stat.mode: {o}\n", .{ socket.path, mode, stat.mode });
+    try std.testing.expectEqual(socket.mode, mode);
+}
+
+fn setSocketPermissions(self: DomainSocket) void {
     const uid = self.getUid();
     const gid = self.getGid();
     if (uid != null or gid != null) {
-        std.posix.fchown(handle, uid, gid) catch |e| {
-            std.log.warn(
-                "Failed to set socket owner: file: {s}, error: {s}",
-                .{ self.path, @errorName(e) },
-            );
-            return e;
-        };
+        setOwner(self.path, uid, gid);
     }
 
-    std.posix.fchmod(handle, self.mode) catch |e| {
+    std.posix.fchmodat(std.posix.AT.FDCWD, self.path, self.mode, 0) catch |e| {
         std.log.warn(
             "Failed to set socket permissions: file: {s}, error: {s}",
             .{ self.path, @errorName(e) },
         );
-        return e;
     };
+}
+
+fn setOwner(path: [:0]const u8, uid: ?std.posix.uid_t, gid: ?std.posix.gid_t) void {
+    const stat = std.posix.fstatat(std.posix.AT.FDCWD, path, 0) catch |e| {
+        std.log.warn(
+            "Failed to get socket owner: file: {s}, error: {s}",
+            .{ path, @errorName(e) },
+        );
+        return;
+    };
+
+    const ret_chown = c.fchownat(
+        std.posix.AT.FDCWD,
+        path,
+        uid orelse stat.uid,
+        gid orelse stat.gid,
+        0,
+    );
+
+    if (ret_chown != 0) {
+        const err = std.posix.errno(ret_chown);
+        std.log.warn(
+            "Failed to set socket owner: file: {s}, error: {d}",
+            .{ path, @tagName(err) },
+        );
+    }
 }
 
 test "setSocketPermissions()" {
@@ -71,8 +117,8 @@ test "setSocketPermissions()" {
     defer server.deinit();
     defer std.fs.cwd().deleteFile(socket.path) catch {};
 
-    try socket.setSocketPermissions(server.stream.handle);
-    const stat = try std.posix.fstat(server.stream.handle);
+    socket.setSocketPermissions();
+    const stat = try std.posix.fstatat(std.posix.AT.FDCWD, socket.path, 0);
     const mode = stat.mode & 0o777;
     try std.testing.expectEqual(socket.mode, mode);
 }
@@ -93,9 +139,7 @@ test "setSocketPermissions() will failed if the user can not change the owner" {
     defer server.deinit();
     defer std.fs.cwd().deleteFile(socket.path) catch {};
 
-    socket.setSocketPermissions(server.stream.handle) catch |e| {
-        try std.testing.expectEqual(error.AccessDenied, e);
-    };
+    socket.setSocketPermissions();
 }
 
 fn getUid(self: DomainSocket) ?std.posix.uid_t {
