@@ -62,10 +62,11 @@ pub fn handle(self: *Handler) !void {
 
     var request = parsed_request.value;
     request.process_id = client_info.pid;
+    request.user_id = client_info.uid;
     try self.authClient(client_info, &request);
     try self.checkNetns(client_info, &request);
 
-    const cni = self.cni_manager.loadCni(request.resource) catch |err| {
+    const cni = self.cni_manager.loadCni(request.resource()) catch |err| {
         self.responser.writeError("Failed to load CNI: {s}", .{@errorName(err)});
         return;
     };
@@ -101,12 +102,12 @@ fn getClientInfo(responser: *Responser) std.posix.UnexpectedError!ClientInfo {
 }
 
 fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
-    if (!self.acl_manager.isAllowed(request.resource, client_info.uid, client_info.gid)) {
+    if (!self.acl_manager.isAllowed(request.resource(), client_info.uid, client_info.gid)) {
         const err = error.AccessDenied;
         self.responser.writeError(
             "Failed to access resource '{s}', error: {s}",
             .{
-                request.resource,
+                request.resource(),
                 @errorName(err),
             },
         );

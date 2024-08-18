@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = @import("../ArenaAllocator.zig");
 const plugin = @import("../plugin.zig");
 const Responser = @import("Responser.zig");
+const DhcpService = @import("DhcpService.zig");
 const Cni = @This();
 
 const max_cni_config_size = 16 * 1024;
@@ -68,12 +69,7 @@ pub fn setup(self: *Cni, request: plugin.Request, responser: *Responser) !void {
     const tentative_allocator = arena.allocator();
     const persistent_allocator = self.arena.allocator();
 
-    const parsed_exec_request = parseExecRequest(tentative_allocator, request.request) catch |err| {
-        responser.writeError("Failed to parse exec request: {s}", .{@errorName(err)});
-        return;
-    };
-    defer parsed_exec_request.deinit();
-    const exec_request = parsed_exec_request.value;
+    const exec_request = request.requestExec();
 
     const attachment_key = AttachmentKey{
         .container_id = exec_request.container_id,
@@ -112,11 +108,23 @@ pub fn setup(self: *Cni, request: plugin.Request, responser: *Responser) !void {
     var pid_buf: [20]u8 = undefined;
     const pid = try std.fmt.bufPrint(&pid_buf, "{d}", .{request.process_id.?});
 
-    for (attachment.exec_configs.items) |exec_config| {
+    for (attachment.exec_configs.items) |*exec_config| {
+        if (exec_config.isDhcp()) {
+            try exec_config.setDhcpSocketPath(persistent_allocator, request.user_id.?, exec_request.container_id);
+            const dhcp_service = try DhcpService.init(
+                tentative_allocator,
+                pid,
+                exec_request.container_id,
+                self.cni_plugin_dir,
+                exec_config.getDhcpSocketPath(),
+            );
+            defer dhcp_service.deinit();
+            _ = try dhcp_service.start();
+        }
+
         const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
 
         var process = std.process.Child.init(
-            // TODO: replace the process id with the request process id
             &[_][]const u8{ "nsenter", "-t", pid, "--mount", cmd },
             tentative_allocator,
         );
@@ -477,17 +485,123 @@ const PluginConf = struct {
 
     pub fn getName(self: PluginConf) []const u8 {
         const name = self.conf.get("name");
-        return if (name) |v| v.string else unreachable;
+        return if (name) |v| switch (v) {
+            .string => |v_str| v_str,
+            else => unreachable,
+        } else unreachable;
     }
 
     pub fn getCniVersion(self: PluginConf) []const u8 {
         const version = self.conf.get("cniVersion");
-        return if (version) |v| v.string else unreachable;
+        return if (version) |v| switch (v) {
+            .string => |v_str| v_str,
+            else => unreachable,
+        } else unreachable;
     }
 
     pub fn getType(self: PluginConf) []const u8 {
         const plugin_type = self.conf.get("type");
-        return if (plugin_type) |v| v.string else unreachable;
+        return if (plugin_type) |v| switch (v) {
+            .string => |v_str| v_str,
+            else => unreachable,
+        } else unreachable;
+    }
+
+    pub fn getDhcpSocketPath(self: PluginConf) []const u8 {
+        if (self.conf.get("ipam")) |ipam| {
+            switch (ipam) {
+                .object => |ipam_obj| {
+                    if (ipam_obj.get("daemonSocketPath")) |socket| {
+                        switch (socket) {
+                            .string => |socket_str| return socket_str,
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+        return "/run/cni/dhcp.sock";
+    }
+
+    fn setDhcpSocketPath(self: *PluginConf, allocator: Allocator, uid: u32, container_id: []const u8) !void {
+        if (self.conf.getPtr("ipam")) |ipam| {
+            switch (ipam.*) {
+                .object => |ipam_obj| {
+                    if (ipam_obj.get("daemonSocketPath")) |_| {
+                        return;
+                    }
+
+                    const path = try std.fmt.allocPrint(
+                        allocator,
+                        "/run/user/{d}/dhcp-{s}.sock",
+                        .{ uid, container_id },
+                    );
+
+                    try ipam.object.put("daemonSocketPath", json.Value{ .string = path });
+                },
+                else => {},
+            }
+        }
+    }
+
+    pub fn isDhcp(self: PluginConf) bool {
+        if (self.conf.get("ipam")) |ipam| {
+            switch (ipam) {
+                .object => |ipam_obj| {
+                    if (ipam_obj.get("type")) |ipam_type| {
+                        switch (ipam_type) {
+                            .string => |type_str| {
+                                return std.mem.eql(u8, "dhcp", type_str);
+                            },
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    test "isDhcp() will return false if the ipam type is not dhcp" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        const allocator = arena.allocator();
+        defer arena.deinit();
+
+        // No ipam field
+        var plugin_conf = PluginConf{ .conf = json.ObjectMap.init(allocator) };
+        try std.testing.expect(!plugin_conf.isDhcp());
+
+        // Ipam field is not object type
+        try plugin_conf.conf.put("ipam", json.Value{ .bool = true });
+        try std.testing.expect(!plugin_conf.isDhcp());
+
+        // Have ipam field but no type field
+        try plugin_conf.conf.put("ipam", json.Value{ .object = json.ObjectMap.init(allocator) });
+        try std.testing.expect(!plugin_conf.isDhcp());
+
+        // Ipam type field is not string type
+        try plugin_conf.conf.getPtr("ipam").?.object.put("type", json.Value{ .bool = true });
+        try std.testing.expect(!plugin_conf.isDhcp());
+
+        // Ipam type field is not 'dhcp'
+        try plugin_conf.conf.getPtr("ipam").?.object.put("type", json.Value{ .string = "static" });
+        try std.testing.expect(!plugin_conf.isDhcp());
+    }
+
+    test "isDhcp() will return true if the type is dhcp" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        const allocator = arena.allocator();
+        defer arena.deinit();
+
+        var plugin_conf = PluginConf{ .conf = json.ObjectMap.init(allocator) };
+        try plugin_conf.conf.put("ipam", json.Value{ .object = json.ObjectMap.init(allocator) });
+        try plugin_conf.conf.getPtr("ipam").?.object.put("type", json.Value{ .string = "dhcp" });
+
+        try std.testing.expect(plugin_conf.isDhcp());
     }
 
     fn stringify(self: PluginConf, stream: std.fs.File) !void {

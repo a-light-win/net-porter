@@ -34,8 +34,8 @@ const DriverOptions = struct {
 
 const NetworkOptions = struct {
     interface_name: []const u8, // CNI_IFNAME
-    static_ips: ?[]const []const u8,
-    static_mac: ?[]const u8,
+    static_ips: ?[]const []const u8 = null,
+    static_mac: ?[]const u8 = null,
 };
 
 pub const NetworkPluginExec = struct {
@@ -45,14 +45,76 @@ pub const NetworkPluginExec = struct {
     network_options: NetworkOptions,
 };
 
+pub const NetAvarkRequest = union(enum) {
+    network: Network,
+    exec: NetworkPluginExec,
+};
+
 pub const Request = struct {
     action: PluginAction,
-    resource: []const u8,
-    request: json.Value,
+    request: NetAvarkRequest,
+    // The network namespace path
     netns: ?[]const u8 = null,
-    // The process ID of net-porter client
+
+    // Following fields are set by the server
+    // The value set by the client will be ignored
+
+    // The process ID of the caller
     process_id: ?std.posix.pid_t = null,
+    // The user id of the caller
+    user_id: ?std.posix.uid_t = null,
+
+    pub fn resource(self: Request) []const u8 {
+        return self.network().options.net_porter_resource;
+    }
+
+    pub fn network(self: Request) Network {
+        return switch (self.request) {
+            .network => |net| net,
+            .exec => |net_exec| net_exec.network,
+        };
+    }
+
+    pub fn requestExec(self: Request) NetworkPluginExec {
+        return switch (self.request) {
+            .network => unreachable,
+            .exec => |net_exec| net_exec,
+        };
+    }
 };
+
+test "Request can stringify and parsed" {
+    var buffer: [1024]u8 = undefined;
+    var source = std.io.StreamSource{ .buffer = std.io.fixedBufferStream(&buffer) };
+
+    const request = Request{
+        .action = PluginAction.setup,
+        .request = NetAvarkRequest{
+            .exec = NetworkPluginExec{
+                .container_name = "test-container",
+                .container_id = "test-container-id",
+                .network = Network{
+                    .driver = "net-porter",
+                    .options = DriverOptions{
+                        .net_porter_socket = "test-socket",
+                        .net_porter_resource = "test-resource",
+                    },
+                },
+                .network_options = NetworkOptions{
+                    .interface_name = "test-interface",
+                },
+            },
+        },
+    };
+    try json.stringify(request, .{ .whitespace = .indent_2 }, source.writer());
+    // std.debug.print("{s}\n", .{buffer[0..source.buffer.pos]});
+    try std.testing.expect(source.buffer.pos != 0);
+
+    const parsed = try json.parseFromSlice(Request, std.testing.allocator, source.buffer.getWritten(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualSlices(u8, "test-resource", parsed.value.resource());
+    try std.testing.expectEqualSlices(u8, "test-container", parsed.value.requestExec().container_name);
+}
 
 pub const ErrorResponse = struct {
     @"error": ?[]const u8 = null,
@@ -112,7 +174,12 @@ test "printInfo()" {
     const output = source.buffer.getWritten();
     try std.testing.expect(source.buffer.pos != 0);
 
-    const parsed = try json.parseFromSlice(PluginInfo, test_allocator, output, .{});
+    const parsed = try json.parseFromSlice(
+        PluginInfo,
+        test_allocator,
+        output,
+        .{ .ignore_unknown_fields = true },
+    );
     defer parsed.deinit();
 
     try std.testing.expectEqualSlices(u8, "net-porter", parsed.value.name);
@@ -125,24 +192,13 @@ pub fn create(self: *NetavarkPlugin) !void {
     };
     defer self.allocator.free(request);
 
-    const parsed = json.parseFromSlice(
-        json.Value,
-        self.allocator,
-        request,
-        .{},
-    ) catch |err| {
-        try self.writeError("Parse request failed with {s}", .{@errorName(err)});
-        return error.AlreadyHandled;
-    };
-    defer parsed.deinit();
-
-    const parsed_network = json.parseFromValue(
+    const parsed_network = json.parseFromSlice(
         Network,
         self.allocator,
-        parsed.value,
+        request,
         .{ .ignore_unknown_fields = true },
     ) catch |err| {
-        try self.writeError("Parse network failed with {s}", .{@errorName(err)});
+        try self.writeError("Parse request failed with {s}", .{@errorName(err)});
         return error.AlreadyHandled;
     };
     defer parsed_network.deinit();
@@ -156,8 +212,7 @@ pub fn create(self: *NetavarkPlugin) !void {
         network.options.net_porter_socket,
         &Request{
             .action = PluginAction.create,
-            .resource = network.options.net_porter_resource,
-            .request = parsed.value,
+            .request = .{ .network = parsed_network.value },
         },
     );
 }
@@ -178,28 +233,18 @@ fn exec(self: *NetavarkPlugin, action: PluginAction) !void {
     defer self.allocator.free(request);
 
     const parsed = json.parseFromSlice(
-        json.Value,
+        NetworkPluginExec,
         self.allocator,
         request,
-        .{},
+        .{ .ignore_unknown_fields = true },
     ) catch |err| {
         try self.writeError("Parse request failed with {s}", .{@errorName(err)});
         return error.AlreadyHandled;
     };
     defer parsed.deinit();
 
-    const parsed_network = json.parseFromValue(
-        NetworkPluginExec,
-        self.allocator,
-        parsed.value,
-        .{ .ignore_unknown_fields = true },
-    ) catch |err| {
-        try self.writeError("Parse network failed with {s}", .{@errorName(err)});
-        return error.AlreadyHandled;
-    };
-    defer parsed_network.deinit();
+    const network = parsed.value.network;
 
-    const network = parsed_network.value.network;
     if (!self.validateNetwork(network)) {
         return error.AlreadyHandled;
     }
@@ -208,8 +253,7 @@ fn exec(self: *NetavarkPlugin, action: PluginAction) !void {
         network.options.net_porter_socket,
         &Request{
             .action = action,
-            .resource = network.options.net_porter_resource,
-            .request = parsed.value,
+            .request = .{ .exec = parsed.value },
             .netns = self.namespace_path,
         },
     );

@@ -62,7 +62,7 @@ pub fn loadCni(self: *CniManager, name: []const u8) !*Cni {
     const plugin = try Cni.load(self.arena.childAllocator(), path, self.cni_plugin_dir);
     errdefer plugin.deinit();
 
-    try self.cni_plugins.put(name, plugin);
+    try self.cni_plugins.put(try allocator.dupe(u8, name), plugin);
     return plugin;
 }
 
