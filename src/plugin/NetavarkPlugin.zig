@@ -116,6 +116,68 @@ test "Request can stringify and parsed" {
     try std.testing.expectEqualSlices(u8, "test-container", parsed.value.requestExec().container_name);
 }
 
+pub const Response = struct {
+    dns_search_domains: ?[]const []const u8 = null,
+    dns_server_ips: ?[]const []const u8 = null,
+    // should be ObjectMap of interface
+    interfaces: json.ArrayHashMap(Interface),
+};
+
+pub const Interface = struct {
+    mac_address: []const u8,
+    subnets: ?[]const Subnet = null,
+};
+
+pub const Subnet = struct {
+    ipnet: []const u8,
+    gateway: ?[]const u8 = null,
+};
+
+test "Response can stringify and parsed" {
+    const allocator = std.testing.allocator;
+
+    var buffer: [1024]u8 = undefined;
+    var source = std.io.StreamSource{ .buffer = std.io.fixedBufferStream(&buffer) };
+
+    var response = Response{
+        .dns_search_domains = &[_][]const u8{"test-domain"},
+        .interfaces = json.ArrayHashMap(Interface){},
+    };
+    defer response.interfaces.deinit(allocator);
+
+    try response.interfaces.map.put(allocator, "eth0", .{
+        .mac_address = "aa:bb:cc:dd:ee:ff",
+        .subnets = &[_]Subnet{
+            .{ .ipnet = "192.168.2.3/24" },
+        },
+    });
+
+    try json.stringify(
+        response,
+        .{ .whitespace = .indent_2 },
+        source.writer(),
+    );
+    try std.testing.expect(source.buffer.pos != 0);
+
+    const parsed = try json.parseFromSlice(
+        Response,
+        allocator,
+        source.buffer.getWritten(),
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualSlices(
+        u8,
+        "test-domain",
+        parsed.value.dns_search_domains.?[0],
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        "192.168.2.3/24",
+        parsed.value.interfaces.map.get("eth0").?.subnets.?[0].ipnet,
+    );
+}
+
 pub const ErrorResponse = struct {
     @"error": ?[]const u8 = null,
 };

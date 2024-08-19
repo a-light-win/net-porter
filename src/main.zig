@@ -52,4 +52,5 @@ test {
     _ = @import("plugin.zig");
     _ = @import("server.zig");
     _ = @import("user.zig");
+    _ = @import("managed_type.zig");
 }

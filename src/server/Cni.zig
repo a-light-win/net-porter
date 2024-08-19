@@ -6,6 +6,7 @@ const ArenaAllocator = @import("../ArenaAllocator.zig");
 const plugin = @import("../plugin.zig");
 const Responser = @import("Responser.zig");
 const DhcpService = @import("DhcpService.zig");
+const managed_type = @import("../managed_type.zig");
 const Cni = @This();
 
 const max_cni_config_size = 16 * 1024;
@@ -67,7 +68,6 @@ pub fn setup(self: *Cni, request: plugin.Request, responser: *Responser) !void {
     var arena = try ArenaAllocator.init(self.arena.childAllocator());
     defer arena.deinit();
     const tentative_allocator = arena.allocator();
-    const persistent_allocator = self.arena.allocator();
 
     const exec_request = request.requestExec();
 
@@ -85,9 +85,9 @@ pub fn setup(self: *Cni, request: plugin.Request, responser: *Responser) !void {
     }
 
     try self.attachments.put(
-        try attachment_key.copy(persistent_allocator),
+        try attachment_key.copy(self.arena.allocator()),
         try Attachment.init(
-            persistent_allocator,
+            self.arena.childAllocator(),
             self.config.?.value,
         ),
     );
@@ -104,13 +104,15 @@ pub fn setup(self: *Cni, request: plugin.Request, responser: *Responser) !void {
     try args.appendSlice(exec_request.container_name);
     try env_map.put("CNI_ARGS", args.items);
 
-    const attachment = self.attachments.get(attachment_key) orelse unreachable;
+    var attachment = self.attachments.get(attachment_key) orelse unreachable;
+    const attatchment_allocator = attachment.arena.allocator();
+
     var pid_buf: [20]u8 = undefined;
     const pid = try std.fmt.bufPrint(&pid_buf, "{d}", .{request.process_id.?});
 
     for (attachment.exec_configs.items) |*exec_config| {
         if (exec_config.isDhcp()) {
-            try exec_config.setDhcpSocketPath(persistent_allocator, request.user_id.?, exec_request.container_id);
+            try exec_config.setDhcpSocketPath(request.user_id.?, exec_request.container_id);
             const dhcp_service = try DhcpService.init(
                 tentative_allocator,
                 pid,
@@ -132,12 +134,11 @@ pub fn setup(self: *Cni, request: plugin.Request, responser: *Responser) !void {
         process.stdout_behavior = .Pipe;
         process.stderr_behavior = .Pipe;
         process.env_map = &env_map;
-        var stdout = std.ArrayList(u8).init(args.allocator);
-        var stderr = std.ArrayList(u8).init(args.allocator);
-        errdefer {
-            stdout.deinit();
-            stderr.deinit();
-        }
+
+        var stdout = std.ArrayList(u8).init(attatchment_allocator);
+        var stderr = std.ArrayList(u8).init(attatchment_allocator);
+        errdefer stdout.deinit();
+        defer stderr.deinit();
 
         try process.spawn();
 
@@ -147,24 +148,131 @@ pub fn setup(self: *Cni, request: plugin.Request, responser: *Responser) !void {
 
         try process.collectOutput(&stdout, &stderr, 4096);
         const result = try process.wait();
-        log.warn("stdout: {s}", .{stdout.items});
-        log.warn("stderr: {s}", .{stderr.items});
 
-        // std.time.sleep(1 * std.time.ns_per_hour);
+        exec_config.result = stdout;
 
         if (result.Exited != 0) {
-            responser.writeError("Failed to setup network: {d}", .{result.Exited});
-            return;
+            try responseError(tentative_allocator, responser, stdout);
+            return error.UnexpectedError;
         }
-
-        // TODO: call responser.write
     }
+
+    try responseResult(
+        tentative_allocator,
+        responser,
+        attachment.finalResult(.last).?,
+    );
 }
 
 const CniErrorMsg = struct {
     code: u32,
     msg: []const u8,
 };
+
+const ManagedResponse = managed_type.ManagedType(plugin.Response);
+
+const CniResult = struct {
+    cniVersion: []const u8,
+    interfaces: []Interface,
+    ips: []IpConfig,
+    routes: ?[]RouteConfig = null,
+    dns: ?DNSConfig = null,
+
+    fn toNetavarkResponse(self: CniResult, root_allocator: Allocator) !ManagedResponse {
+        var response = ManagedResponse{
+            .v = plugin.Response{
+                .dns_search_domains = if (self.dns) |dns| dns.search else null,
+                .dns_server_ips = if (self.dns) |dns| dns.nameservers else null,
+                .interfaces = .{},
+            },
+            .arena = try ArenaAllocator.init(root_allocator),
+        };
+        errdefer response.deinit();
+        const allocator = response.arena.?.allocator();
+
+        for (self.interfaces, 0..) |iface, index| {
+            var subnets = std.ArrayList(plugin.Subnet).init(allocator);
+            for (self.ips) |ip| {
+                if (ip.interface != index) {
+                    continue;
+                }
+                try subnets.append(.{
+                    .ipnet = ip.address,
+                    .gateway = ip.gateway,
+                });
+            }
+
+            try response.v.interfaces.map.put(
+                allocator,
+                iface.name,
+                .{
+                    .mac_address = iface.mac,
+                    .subnets = try subnets.toOwnedSlice(),
+                },
+            );
+        }
+
+        return response;
+    }
+};
+
+const Interface = struct {
+    name: []const u8,
+    mac: []const u8,
+    sandbox: ?[]const u8 = null,
+};
+
+const IpConfig = struct {
+    // index of interface in interfaces field
+    interface: u32,
+    // ip address with prefix length
+    address: []const u8,
+    gateway: ?[]const u8 = null,
+};
+
+const RouteConfig = struct {
+    dst: []const u8,
+    gw: ?[]const u8 = null,
+};
+
+const DNSConfig = struct {
+    nameservers: ?[]const []const u8 = null,
+    domain: ?[]const u8 = null,
+    search: ?[]const []const u8 = null,
+    options: ?[]const []const u8 = null,
+};
+
+fn responseError(allocator: Allocator, responser: *Responser, stdout: std.ArrayList(u8)) !void {
+    var parsed_error_msg = try json.parseFromSlice(
+        CniErrorMsg,
+        allocator,
+        stdout.items,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed_error_msg.deinit();
+
+    const error_msg = parsed_error_msg.value;
+    responser.writeError(
+        "{s}({d})",
+        .{ error_msg.msg, error_msg.code },
+    );
+}
+
+fn responseResult(allocator: Allocator, responser: *Responser, stdout: std.ArrayList(u8)) !void {
+    var parsed_result = try json.parseFromSlice(
+        CniResult,
+        allocator,
+        stdout.items,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed_result.deinit();
+    const result = parsed_result.value;
+
+    var managed_response = try result.toNetavarkResponse(allocator);
+    defer managed_response.deinit();
+
+    responser.write(managed_response.v);
+}
 
 pub fn teardown(self: *Cni, request: plugin.Request, responser: *Responser) !void {
     _ = self;
@@ -437,6 +545,8 @@ const CniConfig = struct {
 
 const PluginConf = struct {
     conf: json.ObjectMap,
+    arena: ?ArenaAllocator = null,
+    result: ?std.ArrayList(u8) = null,
 
     const ValidateError = error{
         PluginTypeMissing,
@@ -444,14 +554,33 @@ const PluginConf = struct {
         PluginTypeUnsupported,
     };
 
-    pub fn init(allocator: Allocator, cni_config: CniConfig, obj: json.ObjectMap) !PluginConf {
+    pub fn init(root_allocator: Allocator, cni_config: CniConfig, obj: json.ObjectMap) !PluginConf {
+        var arena = try ArenaAllocator.init(root_allocator);
+
+        const allocator = arena.allocator();
         const conf = try shadowCopy(allocator, obj);
-        var plugin_conf = PluginConf{ .conf = conf };
+
+        var plugin_conf = PluginConf{
+            .arena = arena,
+            .conf = conf,
+        };
 
         try plugin_conf.setName(cni_config.name);
         try plugin_conf.setCniVersion(cni_config.cniVersion);
 
         return plugin_conf;
+    }
+
+    pub fn deinit(self: PluginConf) void {
+        @constCast(&self.conf).deinit();
+
+        if (self.result) |result| {
+            result.deinit();
+        }
+
+        if (self.arena) |arena| {
+            arena.deinit();
+        }
     }
 
     pub fn validate(self: PluginConf, cni_name: []const u8) ValidateError!void {
@@ -524,7 +653,8 @@ const PluginConf = struct {
         return "/run/cni/dhcp.sock";
     }
 
-    fn setDhcpSocketPath(self: *PluginConf, allocator: Allocator, uid: u32, container_id: []const u8) !void {
+    fn setDhcpSocketPath(self: *PluginConf, uid: u32, container_id: []const u8) !void {
+        const allocator = self.arena.?.allocator();
         if (self.conf.getPtr("ipam")) |ipam| {
             switch (ipam.*) {
                 .object => |ipam_obj| {
@@ -660,7 +790,6 @@ const PluginConf = struct {
 
     fn isSupportedPlugin(name: []const u8) bool {
         inline for (supported_plugins) |supported_plugin| {
-            log.debug("Checking supported plugin {s} with {s}", .{ supported_plugin, name });
             if (std.mem.eql(u8, name, supported_plugin)) {
                 return true;
             }
@@ -754,7 +883,6 @@ const AttachmentMap = std.HashMap(AttachmentKey, Attachment, AttachmentKeyContex
 const Attachment = struct {
     arena: ArenaAllocator,
     exec_configs: std.ArrayList(PluginConf),
-    latest_exec: usize = 0,
 
     pub fn init(root_allocator: Allocator, cni_config: CniConfig) !Attachment {
         var arena = try ArenaAllocator.init(root_allocator);
@@ -770,6 +898,9 @@ const Attachment = struct {
     }
 
     pub fn deinit(self: Attachment) void {
+        for (self.exec_configs.items) |exec_config| {
+            exec_config.deinit();
+        }
         self.exec_configs.deinit();
         self.arena.deinit();
     }
@@ -829,6 +960,21 @@ const Attachment = struct {
                 try self.exec_configs.append(exec_config);
             },
             else => return,
+        }
+    }
+
+    const FinalResultPos = enum { first, last };
+
+    fn finalResult(self: Attachment, pos: FinalResultPos) ?std.ArrayList(u8) {
+        const len = self.exec_configs.items.len;
+        if (len == 0) {
+            return null;
+        }
+
+        if (pos == .first) {
+            return self.exec_configs.items[0].result;
+        } else {
+            return self.exec_configs.items[len - 1].result;
         }
     }
 };
