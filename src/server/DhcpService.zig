@@ -61,6 +61,13 @@ pub fn start(self: DhcpService) !std.process.Child.RunResult {
 }
 
 pub fn stop(self: DhcpService) !std.process.Child.RunResult {
+    // Ensure systemd service file is removed after stopping
+    const service_path = try std.fmt.allocPrintZ(self.allocator, "/run/systemd/transient/{s}.service", .{self.name});
+    defer {
+        std.fs.cwd().deleteFile(service_path) catch {};
+        self.allocator.free(service_path);
+    }
+
     // TODO: process result here?
     return try std.process.Child.run(.{
         .allocator = self.allocator,

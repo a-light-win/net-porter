@@ -31,7 +31,10 @@ pub fn deinit(self: *Handler) void {
 
 pub fn handle(self: *Handler) !void {
     var stream = self.connection.stream;
-    const allocator = self.arena.allocator();
+
+    var arena = try ArenaAllocator.init(self.arena.childAllocator());
+    defer arena.deinit();
+    const tentative_allocator = arena.allocator();
 
     const client_info = try getClientInfo(&self.responser);
     log.debug(
@@ -40,7 +43,7 @@ pub fn handle(self: *Handler) !void {
     );
 
     const buf = stream.reader().readAllAlloc(
-        allocator,
+        tentative_allocator,
         plugin.max_request_size,
     ) catch |err| {
         self.responser.writeError("Failed to read request: {s}", .{@errorName(err)});
@@ -51,7 +54,7 @@ pub fn handle(self: *Handler) !void {
 
     const parsed_request = json.parseFromSlice(
         plugin.Request,
-        allocator,
+        tentative_allocator,
         buf,
         .{},
     ) catch |err| {
@@ -63,6 +66,7 @@ pub fn handle(self: *Handler) !void {
     var request = parsed_request.value;
     request.process_id = client_info.pid;
     request.user_id = client_info.uid;
+
     try self.authClient(client_info, &request);
     try self.checkNetns(client_info, &request);
 
@@ -72,10 +76,9 @@ pub fn handle(self: *Handler) !void {
     };
 
     switch (request.action) {
-        .create => try cni.create(request, &self.responser),
-        .setup => try cni.setup(request, &self.responser),
-        .teardown => try cni.teardown(request, &self.responser),
-        // else => { self.responser.writeError("Unsupported action: {s}", .{@tagName(request.action)}); },
+        .create => try cni.create(tentative_allocator, request, &self.responser),
+        .setup => try cni.setup(tentative_allocator, request, &self.responser),
+        .teardown => try cni.teardown(tentative_allocator, request, &self.responser),
     }
 }
 

@@ -59,29 +59,34 @@ pub fn deinit(self: Cni) void {
     allocator.destroy(&self);
 }
 
-pub fn create(self: *Cni, request: plugin.Request, responser: *Responser) !void {
+pub fn create(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
     _ = self;
+    _ = tentative_allocator;
     responser.write(request);
 }
 
-pub fn setup(self: *Cni, request: plugin.Request, responser: *Responser) !void {
-    var arena = try ArenaAllocator.init(self.arena.childAllocator());
-    defer arena.deinit();
-    const tentative_allocator = arena.allocator();
+const CniCommand = enum {
+    ADD,
+    DEL,
+    GET,
+    VERSION,
+};
+
+fn loadAttachment(self: *Cni, request: plugin.Request, create_on_missing: bool) !?*Attachment {
+    // ensure that the mutex is already locked outside
 
     const exec_request = request.requestExec();
-
     const attachment_key = AttachmentKey{
         .container_id = exec_request.container_id,
         .ifname = exec_request.network_options.interface_name,
     };
 
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    if (self.attachments.getPtr(attachment_key)) |attachment| {
+        return attachment;
+    }
 
-    if (self.attachments.get(attachment_key)) |_| {
-        responser.writeError("The network is already setup", .{});
-        return;
+    if (!create_on_missing) {
+        return null;
     }
 
     try self.attachments.put(
@@ -89,79 +94,46 @@ pub fn setup(self: *Cni, request: plugin.Request, responser: *Responser) !void {
         try Attachment.init(
             self.arena.childAllocator(),
             self.config.?.value,
+            self.cni_plugin_dir,
         ),
     );
+    return self.attachments.getPtr(attachment_key);
+}
 
-    var env_map = std.process.EnvMap.init(tentative_allocator);
-    try env_map.put("CNI_COMMAND", "ADD");
-    try env_map.put("CNI_CONTAINERID", exec_request.container_id);
-    try env_map.put("CNI_NETNS", request.netns.?);
-    try env_map.put("CNI_IFNAME", exec_request.network_options.interface_name);
-    try env_map.put("CNI_PATH", self.cni_plugin_dir);
-    var args = std.ArrayList(u8).init(tentative_allocator);
-    try args.appendSlice("IgnoreUnknown=true");
-    try args.appendSlice(";K8S_POD_NAME=");
-    try args.appendSlice(exec_request.container_name);
-    try env_map.put("CNI_ARGS", args.items);
+pub fn setup(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
 
-    var attachment = self.attachments.get(attachment_key) orelse unreachable;
-    const attatchment_allocator = attachment.arena.allocator();
-
-    var pid_buf: [20]u8 = undefined;
-    const pid = try std.fmt.bufPrint(&pid_buf, "{d}", .{request.process_id.?});
-
-    for (attachment.exec_configs.items) |*exec_config| {
-        if (exec_config.isDhcp()) {
-            try exec_config.setDhcpSocketPath(request.user_id.?, exec_request.container_id);
-            const dhcp_service = try DhcpService.init(
-                tentative_allocator,
-                pid,
-                exec_request.container_id,
-                self.cni_plugin_dir,
-                exec_config.getDhcpSocketPath(),
-            );
-            defer dhcp_service.deinit();
-            _ = try dhcp_service.start();
-        }
-
-        const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
-
-        var process = std.process.Child.init(
-            &[_][]const u8{ "nsenter", "-t", pid, "--mount", cmd },
-            tentative_allocator,
-        );
-        process.stdin_behavior = .Pipe;
-        process.stdout_behavior = .Pipe;
-        process.stderr_behavior = .Pipe;
-        process.env_map = &env_map;
-
-        var stdout = std.ArrayList(u8).init(attatchment_allocator);
-        var stderr = std.ArrayList(u8).init(attatchment_allocator);
-        errdefer stdout.deinit();
-        defer stderr.deinit();
-
-        try process.spawn();
-
-        try exec_config.stringify(process.stdin.?);
-        process.stdin.?.close();
-        process.stdin = null;
-
-        try process.collectOutput(&stdout, &stderr, 4096);
-        const result = try process.wait();
-
-        exec_config.result = stdout;
-
-        if (result.Exited != 0) {
-            try responseError(tentative_allocator, responser, stdout);
-            return error.UnexpectedError;
-        }
+    const attachmentOrNull = try self.loadAttachment(request, true);
+    var attachment = attachmentOrNull.?;
+    if (attachment.isExecuted()) {
+        responser.writeError("The setup has been executed, teardown first", .{});
+        return;
     }
 
-    try responseResult(
-        tentative_allocator,
-        responser,
-        attachment.finalResult(.last).?,
-    );
+    try attachment.setup(tentative_allocator, request, responser);
+}
+
+pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
+    const exec_request = request.requestExec();
+    const attachment_key = AttachmentKey{
+        .container_id = exec_request.container_id,
+        .ifname = exec_request.network_options.interface_name,
+    };
+
+    if (self.attachments.getEntry(attachment_key)) |entry| {
+        defer {
+            self.attachments.removeByPtr(entry.key_ptr);
+            entry.key_ptr.*.deinit();
+            entry.value_ptr.*.deinit();
+        }
+
+        var attachment = entry.value_ptr;
+        try attachment.teardown(tentative_allocator, request, responser);
+    }
 }
 
 const CniErrorMsg = struct {
@@ -272,46 +244,6 @@ fn responseResult(allocator: Allocator, responser: *Responser, stdout: std.Array
     defer managed_response.deinit();
 
     responser.write(managed_response.v);
-}
-
-pub fn teardown(self: *Cni, request: plugin.Request, responser: *Responser) !void {
-    _ = self;
-    // TODO:
-    responser.write(request);
-}
-
-const LsnsRecord = struct {
-    type: []const u8,
-    pid: u32,
-    command: []const u8,
-};
-
-const LsnsResult = struct {
-    namespaces: []LsnsRecord,
-};
-
-fn cni_plugin_binary(self: Cni, allocator: Allocator, plugin_type: []const u8) ![]const u8 {
-    const total_len = self.cni_plugin_dir.len + 1 + plugin_type.len;
-    var bin = try allocator.alloc(u8, total_len);
-    @memcpy(bin[0..self.cni_plugin_dir.len], self.cni_plugin_dir);
-    bin[self.cni_plugin_dir.len] = '/';
-    @memcpy(bin[self.cni_plugin_dir.len + 1 .. total_len], plugin_type);
-
-    return bin;
-}
-
-test "cni_plugin_binary() should return a valid path" {
-    const allocator = std.testing.allocator;
-    const cni = Cni{
-        .arena = try ArenaAllocator.init(allocator),
-        .cni_plugin_dir = "/path/to/cni/plugins",
-        .config = null,
-        .attachments = AttachmentMap.init(allocator),
-    };
-    defer cni.arena.deinit();
-    const bin = try cni.cni_plugin_binary(allocator, "macvlan");
-    defer allocator.free(bin);
-    try std.testing.expectEqualSlices(u8, "/path/to/cni/plugins/macvlan", bin);
 }
 
 fn parseExecRequest(allocator: Allocator, request: json.Value) !json.Parsed(plugin.NetworkPluginExec) {
@@ -734,7 +666,21 @@ const PluginConf = struct {
         try std.testing.expect(plugin_conf.isDhcp());
     }
 
+    fn stopDhcpServer(self: PluginConf, tentative_allocator: Allocator, container_id: []const u8) !void {
+        const dhcp_service = try DhcpService.init(
+            tentative_allocator,
+            "",
+            container_id,
+            "",
+            self.getDhcpSocketPath(),
+        );
+
+        defer dhcp_service.deinit();
+        _ = try dhcp_service.stop();
+    }
+
     fn stringify(self: PluginConf, stream: std.fs.File) !void {
+        // TOTO: set
         try json.stringify(
             json.Value{ .object = self.conf },
             .{ .whitespace = .indent_2 },
@@ -804,6 +750,40 @@ const PluginConf = struct {
             try new_obj.put(try allocator.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
         }
         return new_obj;
+    }
+
+    fn isExecuted(self: PluginConf) bool {
+        return self.result != null;
+    }
+
+    fn exec(self: *PluginConf, tentative_allocator: Allocator, cmd: []const u8, pid: []const u8, env_map: std.process.EnvMap) !std.process.Child.Term {
+        const allocator = self.arena.?.allocator();
+
+        var process = std.process.Child.init(
+            &[_][]const u8{ "nsenter", "-t", pid, "--mount", cmd },
+            tentative_allocator,
+        );
+        process.stdin_behavior = .Pipe;
+        process.stdout_behavior = .Pipe;
+        process.stderr_behavior = .Pipe;
+        process.env_map = &env_map;
+
+        var stdout = std.ArrayList(u8).init(allocator);
+        var stderr = std.ArrayList(u8).init(allocator);
+        errdefer stdout.deinit();
+        defer stderr.deinit();
+
+        try process.spawn();
+
+        try self.stringify(process.stdin.?);
+        process.stdin.?.close();
+        process.stdin = null;
+
+        try process.collectOutput(&stdout, &stderr, 4096);
+        const result = try process.wait();
+
+        self.result = stdout;
+        return result;
     }
 };
 
@@ -883,13 +863,15 @@ const AttachmentMap = std.HashMap(AttachmentKey, Attachment, AttachmentKeyContex
 const Attachment = struct {
     arena: ArenaAllocator,
     exec_configs: std.ArrayList(PluginConf),
+    cni_plugin_dir: []const u8,
 
-    pub fn init(root_allocator: Allocator, cni_config: CniConfig) !Attachment {
+    pub fn init(root_allocator: Allocator, cni_config: CniConfig, cni_plugin_dir: []const u8) !Attachment {
         var arena = try ArenaAllocator.init(root_allocator);
 
         var attachment = Attachment{
             .arena = arena,
             .exec_configs = std.ArrayList(PluginConf).init(arena.allocator()),
+            .cni_plugin_dir = cni_plugin_dir,
         };
         errdefer attachment.deinit();
 
@@ -928,7 +910,7 @@ const Attachment = struct {
         const cni_config = parsed_cni_config.value;
         defer parsed_cni_config.deinit();
 
-        const attachment = try Attachment.init(allocator, cni_config);
+        const attachment = try Attachment.init(allocator, cni_config, "");
         defer attachment.deinit();
 
         try std.testing.expect(attachment.exec_configs.items.len == 1);
@@ -976,6 +958,115 @@ const Attachment = struct {
         } else {
             return self.exec_configs.items[len - 1].result;
         }
+    }
+
+    fn isExecuted(self: Attachment) bool {
+        return self.exec_configs.items[0].isExecuted();
+    }
+
+    fn setup(self: *Attachment, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
+        const exec_request = request.requestExec();
+        const env_map = try self.envMap(tentative_allocator, .ADD, request);
+        const pid = try std.fmt.allocPrint(tentative_allocator, "{d}", .{request.process_id.?});
+
+        for (self.exec_configs.items) |*exec_config| {
+            if (exec_config.isDhcp()) {
+                // Setup dhcp server if the ipam type is dhcp.
+                // the netns only be seen inside the podman container namespace,
+                // so we need to setup per dhcp server for each container.
+                try exec_config.setDhcpSocketPath(request.user_id.?, exec_request.container_id);
+                const dhcp_service = try DhcpService.init(
+                    tentative_allocator,
+                    pid,
+                    exec_request.container_id,
+                    self.cni_plugin_dir,
+                    exec_config.getDhcpSocketPath(),
+                );
+                defer dhcp_service.deinit();
+                _ = try dhcp_service.start();
+            }
+
+            const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
+            const result = try exec_config.exec(tentative_allocator, cmd, pid, env_map);
+            if (result.Exited != 0) {
+                // std.time.sleep(1 * std.time.ns_per_hour);
+                try responseError(tentative_allocator, responser, exec_config.result.?);
+                return error.UnexpectedError;
+            }
+        }
+
+        try responseResult(
+            tentative_allocator,
+            responser,
+            self.finalResult(.last).?,
+        );
+    }
+
+    fn teardown(self: *Attachment, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
+        const exec_request = request.requestExec();
+        const env_map = try self.envMap(tentative_allocator, .DEL, request);
+        const pid = try std.fmt.allocPrint(tentative_allocator, "{d}", .{request.process_id.?});
+
+        var i: usize = 0;
+        const len = self.exec_configs.items.len;
+        while (i < len) : (i += 1) {
+            var exec_config = &self.exec_configs.items[len - (i + 1)];
+            const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
+            const result = try exec_config.exec(tentative_allocator, cmd, pid, env_map);
+
+            if (exec_config.isDhcp()) {
+                exec_config.stopDhcpServer(tentative_allocator, exec_request.container_id) catch |err| {
+                    log.warn("Failed to stop dhcp server: {s}", .{@errorName(err)});
+                };
+            }
+
+            if (result.Exited != 0) {
+                try responseError(tentative_allocator, responser, exec_config.result.?);
+                return error.UnexpectedError;
+            }
+        }
+    }
+
+    fn envMap(self: Attachment, allocator: Allocator, cni_command: CniCommand, request: plugin.Request) !std.process.EnvMap {
+        const exec_request = request.requestExec();
+
+        var env_map = std.process.EnvMap.init(allocator);
+        try env_map.put("CNI_COMMAND", @tagName(cni_command));
+        try env_map.put("CNI_CONTAINERID", exec_request.container_id);
+        try env_map.put("CNI_NETNS", request.netns.?);
+        try env_map.put("CNI_IFNAME", exec_request.network_options.interface_name);
+        try env_map.put("CNI_PATH", self.cni_plugin_dir);
+
+        var args = std.ArrayList(u8).init(allocator);
+        try args.appendSlice("IgnoreUnknown=true");
+        try args.appendSlice(";K8S_POD_NAME=");
+        try args.appendSlice(exec_request.container_name);
+        try env_map.put("CNI_ARGS", args.items);
+
+        return env_map;
+    }
+
+    fn cni_plugin_binary(self: Attachment, allocator: Allocator, plugin_type: []const u8) ![]const u8 {
+        const total_len = self.cni_plugin_dir.len + 1 + plugin_type.len;
+        var bin = try allocator.alloc(u8, total_len);
+        @memcpy(bin[0..self.cni_plugin_dir.len], self.cni_plugin_dir);
+        bin[self.cni_plugin_dir.len] = '/';
+        @memcpy(bin[self.cni_plugin_dir.len + 1 .. total_len], plugin_type);
+
+        return bin;
+    }
+
+    test "cni_plugin_binary() should return a valid path" {
+        const allocator = std.testing.allocator;
+        const attachment = Attachment{
+            .arena = try ArenaAllocator.init(allocator),
+            .cni_plugin_dir = "/path/to/cni/plugins",
+            .exec_configs = std.ArrayList(PluginConf).init(allocator),
+        };
+        defer attachment.deinit();
+        const bin = try attachment.cni_plugin_binary(allocator, "macvlan");
+        defer allocator.free(bin);
+        try std.testing.expectEqualSlices(u8, "/path/to/cni/plugins/macvlan", bin);
     }
 };
 
