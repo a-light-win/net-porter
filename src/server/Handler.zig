@@ -6,6 +6,7 @@ const log = std.log.scoped(.server);
 const plugin = @import("../plugin.zig");
 const AclManager = @import("AclManager.zig");
 const CniManager = @import("CniManager.zig");
+const Cni = @import("Cni.zig");
 const Responser = @import("Responser.zig");
 const ArenaAllocator = @import("../ArenaAllocator.zig");
 const Handler = @This();
@@ -75,10 +76,27 @@ pub fn handle(self: *Handler) !void {
         return;
     };
 
+    self.execAction(tentative_allocator, cni, request) catch |err| {
+        if (!self.responser.done) {
+            self.responser.writeError("Failed to execute action: {s}", .{@errorName(err)});
+        }
+    };
+
+    if (self.responser.is_error) {
+        self.dumpEnv(tentative_allocator, request);
+    }
+}
+
+fn execAction(
+    self: *Handler,
+    allocator: std.mem.Allocator,
+    cni: *Cni,
+    request: plugin.Request,
+) !void {
     switch (request.action) {
-        .create => try cni.create(tentative_allocator, request, &self.responser),
-        .setup => try cni.setup(tentative_allocator, request, &self.responser),
-        .teardown => try cni.teardown(tentative_allocator, request, &self.responser),
+        .create => try cni.create(allocator, request, &self.responser),
+        .setup => try cni.setup(allocator, request, &self.responser),
+        .teardown => try cni.teardown(allocator, request, &self.responser),
     }
 }
 
@@ -135,4 +153,114 @@ fn checkNetns(self: *Handler, client_info: ClientInfo, request: *const plugin.Re
             return error.AccessDenied;
         }
     }
+}
+
+const dump_env_sh =
+    \\echo "# lsns - `date -Iseconds`"
+    \\lsns
+    \\echo "# /proc/{d}/ns - `date -Iseconds`"
+    \\ls -l /proc/{d}/ns
+    \\echo "# All netavark namespaces - `date -Iseconds`"
+    \\
+;
+
+fn dumpEnv(self: Handler, allocator: std.mem.Allocator, request: plugin.Request) void {
+    const env_log = std.log.scoped(.dump_env);
+
+    const dump_env = self.config.log.dump_env;
+    if (!dump_env.enabled) {
+        return;
+    }
+
+    switch (request.request) {
+        .network => return,
+        .exec => {},
+    }
+
+    // Ensure the path of dump env exist
+    std.fs.cwd().makePath(dump_env.path) catch |err| {
+        env_log.warn(
+            "Failed to create dump env path {s}: {s}",
+            .{ dump_env.path, @errorName(err) },
+        );
+    };
+
+    var child = std.process.Child.init(
+        &[_][]const u8{"sh"},
+        allocator,
+    );
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+
+    child.spawn() catch |err| {
+        env_log.warn("Failed to spawn child process: {s}", .{@errorName(err)});
+        return;
+    };
+
+    const pid = request.process_id.?;
+    const in = std.fmt.allocPrintZ(
+        allocator,
+        dump_env_sh,
+        .{
+            pid,
+            pid,
+        },
+    ) catch unreachable;
+    defer allocator.free(in);
+
+    if (child.stdin) |stdin| {
+        stdin.writeAll(in) catch |err| {
+            env_log.warn("Failed to prepare the dump script: {s}", .{@errorName(err)});
+        };
+        stdin.close();
+        child.stdin = null;
+    }
+
+    const exec_request = request.requestExec();
+    const file_path = std.fmt.allocPrintZ(
+        allocator,
+        "{s}/{s}-{s}.log",
+        .{
+            dump_env.path,
+            exec_request.container_name,
+            exec_request.container_id,
+        },
+    ) catch unreachable;
+    defer allocator.free(file_path);
+    env_log.info("Dumping env to {s}", .{file_path});
+
+    const file = std.fs.cwd().createFile(file_path, .{}) catch |err| {
+        env_log.warn("Failed to create dump env file {s}: {s}", .{ file_path, @errorName(err) });
+        return;
+    };
+    defer file.close();
+
+    const dump_stdout = std.Thread.spawn(.{}, dumpToFile, .{ allocator, child.stdout.?, file }) catch |err| {
+        env_log.warn("Failed to spawn thread: {s}", .{@errorName(err)});
+        return;
+    };
+    const dump_stderr = std.Thread.spawn(.{}, dumpToFile, .{ allocator, child.stderr.?, file }) catch |err| {
+        env_log.warn("Failed to spawn thread: {s}", .{@errorName(err)});
+        return;
+    };
+
+    _ = child.wait() catch |err| {
+        env_log.warn("Failed to wait child process: {s}", .{@errorName(err)});
+    };
+
+    dump_stdout.join();
+    dump_stderr.join();
+}
+
+fn dumpToFile(allocator: std.mem.Allocator, in: std.fs.File, out: std.fs.File) void {
+    const env_log = std.log.scoped(.dump_env);
+
+    var fifo = std.fifo.LinearFifo(u8, .Dynamic).init(allocator);
+    fifo.ensureTotalCapacity(4096) catch unreachable;
+    defer fifo.deinit();
+
+    fifo.pump(in.reader(), out.writer()) catch |err| {
+        env_log.warn("Failed to dump env: {s}", .{@errorName(err)});
+    };
 }

@@ -8,4 +8,5 @@ test {
     _ = @import("config/ManagedConfig.zig");
     _ = @import("config/DomainSocket.zig");
     _ = @import("config/Resource.zig");
+    _ = @import("config/LogSettings.zig");
 }

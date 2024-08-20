@@ -6,6 +6,7 @@ const Responser = @This();
 stream: *std.net.Stream,
 log_response: bool = false,
 done: bool = false,
+is_error: bool = false,
 
 pub fn writeError(self: *Responser, comptime fmt: []const u8, args: anytype) void {
     if (self.done) {
@@ -30,6 +31,7 @@ pub fn writeError(self: *Responser, comptime fmt: []const u8, args: anytype) voi
         return;
     };
 
+    self.is_error = true;
     self.done = true;
 }
 
