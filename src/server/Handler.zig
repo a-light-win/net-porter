@@ -240,23 +240,24 @@ fn dumpEnv(self: Handler, allocator: std.mem.Allocator, request: plugin.Request)
         env_log.warn("Failed to spawn thread: {s}", .{@errorName(err)});
         return;
     };
+    defer dump_stdout.join();
+
     const dump_stderr = std.Thread.spawn(.{}, dumpToFile, .{ allocator, child.stderr.?, file }) catch |err| {
         env_log.warn("Failed to spawn thread: {s}", .{@errorName(err)});
         return;
     };
+    defer dump_stderr.join();
 
     _ = child.wait() catch |err| {
         env_log.warn("Failed to wait child process: {s}", .{@errorName(err)});
     };
-
-    dump_stdout.join();
-    dump_stderr.join();
 }
 
 fn dumpToFile(allocator: std.mem.Allocator, in: std.fs.File, out: std.fs.File) void {
     const env_log = std.log.scoped(.dump_env);
+    const Fifo = std.fifo.LinearFifo(u8, .Dynamic);
 
-    var fifo = std.fifo.LinearFifo(u8, .Dynamic).init(allocator);
+    var fifo: Fifo = Fifo.init(allocator);
     fifo.ensureTotalCapacity(4096) catch unreachable;
     defer fifo.deinit();
 
