@@ -54,10 +54,35 @@ fn stopCmd(self: DhcpService) []const []const u8 {
 
 pub fn start(self: DhcpService) !std.process.Child.RunResult {
     // TODO: process result here?
-    return try std.process.Child.run(.{
+    const result = try std.process.Child.run(.{
         .allocator = self.allocator,
         .argv = self.startCmd(),
     });
+
+    switch (result.term) {
+        .Exited => |exit_code| if (exit_code != 0) {
+            return result;
+        },
+        else => return result,
+    }
+
+    const max_wait = 100 * 5; // wait 5 seconds
+    self.waitSocketPathCreated(max_wait);
+
+    return result;
+}
+
+pub fn waitSocketPathCreated(self: DhcpService, comptime max_wait: comptime_int) void {
+    var i: usize = 0;
+    while (i < max_wait) : (i += 1) {
+        _ = std.posix.fstatat(std.posix.AT.FDCWD, self.socket_path, 0) catch |err| switch (err) {
+            error.FileNotFound => {
+                std.time.sleep(10 * std.time.ns_per_ms);
+                continue;
+            },
+            else => return,
+        };
+    }
 }
 
 pub fn stop(self: DhcpService) !std.process.Child.RunResult {
