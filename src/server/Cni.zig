@@ -126,9 +126,9 @@ pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Requ
 
     if (self.attachments.getEntry(attachment_key)) |entry| {
         defer {
-            self.attachments.removeByPtr(entry.key_ptr);
             entry.key_ptr.*.deinit();
             entry.value_ptr.*.deinit();
+            _ = self.attachments.remove(attachment_key);
         }
 
         var attachment = entry.value_ptr;
