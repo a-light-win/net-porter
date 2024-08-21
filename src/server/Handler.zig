@@ -230,6 +230,9 @@ fn dumpEnv(self: Handler, allocator: std.mem.Allocator, request: plugin.Request)
         return;
     };
     defer file.close();
+    file.chmod(0o640) catch |err| {
+        env_log.warn("Failed to chmod the file {s}: {s}", .{ file_path, @errorName(err) });
+    };
 
     const dump_stdout = std.Thread.spawn(.{}, dumpToFile, .{ allocator, child.stdout.?, file }) catch |err| {
         env_log.warn("Failed to spawn thread: {s}", .{@errorName(err)});
