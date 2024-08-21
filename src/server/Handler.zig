@@ -155,14 +155,7 @@ fn checkNetns(self: *Handler, client_info: ClientInfo, request: *const plugin.Re
     }
 }
 
-const dump_env_sh =
-    \\echo "# lsns - `date -Iseconds`"
-    \\lsns
-    \\echo "# /proc/{d}/ns - `date -Iseconds`"
-    \\ls -l /proc/{d}/ns
-    \\echo "# All netavark namespaces - `date -Iseconds`"
-    \\
-;
+const dump_env_sh = @embedFile("files/dump_env.sh");
 
 fn dumpEnv(self: Handler, allocator: std.mem.Allocator, request: plugin.Request) void {
     const env_log = std.log.scoped(.dump_env);
@@ -193,24 +186,26 @@ fn dumpEnv(self: Handler, allocator: std.mem.Allocator, request: plugin.Request)
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
 
+    var env_map = std.process.EnvMap.init(allocator);
+    defer env_map.deinit();
+    child.env_map = &env_map;
+
+    env_map.put(
+        "CLIENT_PID",
+        std.fmt.allocPrintZ(
+            allocator,
+            "{d}",
+            .{request.process_id.?},
+        ) catch unreachable,
+    ) catch unreachable;
+
     child.spawn() catch |err| {
         env_log.warn("Failed to spawn child process: {s}", .{@errorName(err)});
         return;
     };
 
-    const pid = request.process_id.?;
-    const in = std.fmt.allocPrintZ(
-        allocator,
-        dump_env_sh,
-        .{
-            pid,
-            pid,
-        },
-    ) catch unreachable;
-    defer allocator.free(in);
-
     if (child.stdin) |stdin| {
-        stdin.writeAll(in) catch |err| {
+        stdin.writeAll(dump_env_sh) catch |err| {
             env_log.warn("Failed to prepare the dump script: {s}", .{@errorName(err)});
         };
         stdin.close();
