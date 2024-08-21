@@ -124,14 +124,13 @@ pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Requ
         .ifname = exec_request.network_options.interface_name,
     };
 
-    if (self.attachments.getEntry(attachment_key)) |entry| {
+    if (self.attachments.fetchRemove(attachment_key)) |*kv| {
         defer {
-            entry.key_ptr.*.deinit();
-            entry.value_ptr.*.deinit();
-            _ = self.attachments.remove(attachment_key);
+            kv.key.deinit();
+            kv.value.deinit();
         }
 
-        var attachment = entry.value_ptr;
+        var attachment = kv.value;
         try attachment.teardown(tentative_allocator, request, responser);
     }
 }
