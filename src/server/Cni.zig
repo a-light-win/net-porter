@@ -72,40 +72,31 @@ const CniCommand = enum {
     VERSION,
 };
 
-fn loadAttachment(self: *Cni, request: plugin.Request, create_on_missing: bool) !?*Attachment {
+fn loadAttachment(self: *Cni, request: plugin.Request) !*Attachment {
     // ensure that the mutex is already locked outside
-
     const exec_request = request.requestExec();
-    const attachment_key = AttachmentKey{
-        .container_id = exec_request.container_id,
-        .ifname = exec_request.network_options.interface_name,
-    };
+    const attachment_key = try AttachmentKey.init(
+        self.attachments.allocator,
+        exec_request.container_id,
+        exec_request.network_options.interface_name,
+    );
 
-    if (self.attachments.getPtr(attachment_key)) |attachment| {
-        return attachment;
-    }
-
-    if (!create_on_missing) {
-        return null;
-    }
-
-    try self.attachments.put(
-        try attachment_key.copy(self.arena.allocator()),
-        try Attachment.init(
-            self.arena.childAllocator(),
+    const result = try self.attachments.getOrPut(attachment_key);
+    if (!result.found_existing) {
+        result.value_ptr.* = try Attachment.init(
+            self.attachments.allocator,
             self.config.?.value,
             self.cni_plugin_dir,
-        ),
-    );
-    return self.attachments.getPtr(attachment_key);
+        );
+    }
+    return result.value_ptr;
 }
 
 pub fn setup(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
 
-    const attachmentOrNull = try self.loadAttachment(request, true);
-    var attachment = attachmentOrNull.?;
+    const attachment = try self.loadAttachment(request);
     if (attachment.isExecuted()) {
         responser.writeError("The setup has been executed, teardown first", .{});
         return;
@@ -791,12 +782,16 @@ const AttachmentKey = struct {
     ifname: []const u8,
     allocator: ?Allocator = null,
 
-    pub fn copy(self: AttachmentKey, allocator: Allocator) !AttachmentKey {
+    pub fn init(allocator: Allocator, container_id: []const u8, ifname: []const u8) !AttachmentKey {
         return AttachmentKey{
-            .container_id = try allocator.dupe(u8, self.container_id),
-            .ifname = try allocator.dupe(u8, self.ifname),
+            .container_id = try allocator.dupe(u8, container_id),
+            .ifname = try allocator.dupe(u8, ifname),
             .allocator = allocator,
         };
+    }
+
+    pub fn copy(self: AttachmentKey, allocator: Allocator) !AttachmentKey {
+        return try init(allocator, self.container_id, self.ifname);
     }
 
     pub fn deinit(self: AttachmentKey) void {
