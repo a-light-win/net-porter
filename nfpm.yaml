@@ -1,0 +1,53 @@
+---
+name: "net-porter"
+arch: "${PKG_ARCH}"
+platform: "${PKG_PLATFORM}"
+version: "${PKG_VERSION}"
+section: "net"
+priority: "optional"
+maintainer: "Songmin Li <lisongmin@protonmail.com>"
+description: A netavark plugin that provides the macvlan network to rootless podman
+vendor: "a-light.win"
+homepage: "https://github.com/a-light-win/net-porter"
+license: "MIT"
+
+provides:
+  - net-porter
+depends:
+  - systemd
+  - util-linux
+recommends: []
+suggests: []
+conflicts: []
+replaces: []
+overrides:
+  deb:
+    depends:
+      - golang-github-containers-common
+  archlinux:
+    depends:
+      - containers-common
+
+contents:
+  - src: ./zig-out/bin/net-porter
+    dst: /usr/lib/netavark/net-porter
+    type: file
+    file_info:
+      mode: 0755
+  - src: ./misc/systemd/net-porter.service
+    dst: /usr/lib/systemd/system/net-porter.service
+    type: file
+    file_info:
+      mode: 0644
+  - src: ./LICENSE
+    dst: /usr/share/licenses/net-porter/LICENSE
+    type: file
+    file_info:
+      mode: 0644
+  - dst: /etc/net-porter
+    type: dir
+    file_info:
+      mode: 0755
+
+archlinux:
+  packager: "Songmin Li <lisongmin@protonmail.com>"

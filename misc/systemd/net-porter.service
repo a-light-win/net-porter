@@ -1,0 +1,11 @@
+[Unit]
+Description=net-porter service
+Documentation=https://github.com/a-light-win/net-porter
+
+[Service]
+ExecStart=/usr/lib/netavark/net-porter server -c /etc/net-porter/config.json
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
