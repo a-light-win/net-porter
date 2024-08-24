@@ -6,18 +6,19 @@ builder := (just_executable() +
            )
 
 [no-cd, script('bash')]
-build arch: fetch-builder
+build arch='x86_64': fetch-builder
+  echo "Build net-porter for {{ arch }} ..."
   {{ builder }} zig build "{{ arch }}-linux-musl"
 
 [no-cd, script('bash')]
-pack arch: fetch-builder
+pack arch='x86_64': fetch-builder
   export PKG_ARCH="{{ arch }}"
   {{ builder }} pack
 
 pack-all: (pack-from-scratch 'x86_64') (pack-from-scratch 'aarch64')
 
 [no-cd, script('bash')]
-clean: clean-pack
+clean: clean-pack clean-build
 
 [no-cd]
 clean-all: \
@@ -34,6 +35,10 @@ clean-pack:
   rm -f zig-out/*.rpm
   rm -f zig-out/*.tar.xz
   rm -f zig-out/*.tar.zst
+
+[private, no-cd]
+clean-build:
+  rm -rf .zig-cache/*
 
 [private, no-cd, script('bash')]
 fetch-bootstrap-builder:
