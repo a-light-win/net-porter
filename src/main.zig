@@ -25,7 +25,7 @@ pub fn main() !void {
                     try plugin.cmd_setup(&runner),
                     try plugin.cmd_teardown(&runner),
                     plugin.cmd_info,
-                    server.cmd_server(&runner),
+                    try server.cmd_server(&runner),
                 },
             },
         },
