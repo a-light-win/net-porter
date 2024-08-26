@@ -131,7 +131,7 @@ test "setSocketPermissions() will failed if the user can not change the owner" {
     };
 
     if (std.os.linux.getuid() == 0) {
-        return error.skip;
+        return error.SkipZigTest;
     }
 
     const address = try std.net.Address.initUnix(socket.path);
