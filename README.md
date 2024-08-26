@@ -87,8 +87,8 @@ and here is a config example:
 
 We also need a cni configuration file for the macvlan network,
 put the cni configuration file in the `/etc/net-porter/cni.d` directory,
-and ensure the file name is the same as the `name` field in the `resources` field.
-and here is a cni configuration example:
+and ensure the file name is the same as the `name` field in the `resources` field
+with `.json` suffix. And here is a cni configuration example:
 
 ```json
 {
@@ -118,6 +118,11 @@ and here is a cni configuration example:
   ]
 }
 ```
+
+Ensure the `master` filed set to the interface on the host.
+And if you want default routes as well, set the `skipDefault` to `false`.
+More information about the cni configuration, please refer to the
+official [cni documentation](https://www.cni.dev/plugins/current/main/macvlan/).
 
 ## Integrate with `podman`
 

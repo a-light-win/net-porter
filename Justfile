@@ -18,7 +18,14 @@ pack arch='x86_64': fetch-builder
 pack-all: (pack-from-scratch 'x86_64') (pack-from-scratch 'aarch64')
 
 [no-cd, script('bash')]
-clean: clean-pack clean-build
+clean:
+  echo "${PKG_TARGET}"
+  {{ builder }} pack clean
+  {{ builder }} zig clean
+
+[no-cd]
+upload:
+  {{ builder }} pack upload 'a-light-win/net-porter'
 
 [no-cd]
 clean-all: \
@@ -28,17 +35,6 @@ clean-all: \
 
 [private, no-cd, script('bash')]
 pack-from-scratch arch: (build arch) (pack arch)
-
-[private, no-cd]
-clean-pack:
-  rm -f zig-out/*.deb
-  rm -f zig-out/*.rpm
-  rm -f zig-out/*.tar.xz
-  rm -f zig-out/*.tar.zst
-
-[private, no-cd]
-clean-build:
-  rm -rf .zig-cache/*
 
 [private, no-cd, script('bash')]
 fetch-bootstrap-builder:
