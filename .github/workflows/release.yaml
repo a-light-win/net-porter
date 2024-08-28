@@ -1,0 +1,19 @@
+---
+name: Release
+on:
+  push:
+    tags:
+      - "*"
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Setup builder
+        uses: a-light-win/builder@main
+        with:
+          action_ref: ${{ github.action_ref }}
+          zig_project: ${{ github.workspace }}
