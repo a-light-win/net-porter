@@ -14,4 +14,4 @@ jobs:
         uses: a-light-win/builder@main
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          zig_project: "{{ github.workspace }}"
+          zig_project: "."
