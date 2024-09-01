@@ -13,5 +13,5 @@ jobs:
       - name: Build and package
         uses: a-light-win/builder@main
         with:
-          action_ref: ${{ github.action_ref }}
-          zig_project: ${{ github.workspace }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          zig_project: "{{ github.workspace }}"
