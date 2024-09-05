@@ -41,6 +41,14 @@ pub fn write(self: *Responser, response: anytype) void {
         return;
     }
 
+    if (@TypeOf(response) == []const u8) {
+        self.stream.writeAll(response) catch |err| {
+            self.writeError("Failed to send response: {s}", .{@errorName(err)});
+        };
+        self.done = true;
+        return;
+    }
+
     json.stringify(
         response,
         .{ .whitespace = .indent_2 },

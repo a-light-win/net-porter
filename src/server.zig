@@ -46,4 +46,5 @@ test {
     _ = @import("server/AclManager.zig");
     _ = @import("server/Cni.zig");
     _ = @import("server/CniManager.zig");
+    _ = @import("server/Responser.zig");
 }

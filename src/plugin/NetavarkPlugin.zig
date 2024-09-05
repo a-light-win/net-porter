@@ -63,6 +63,7 @@ pub const Request = struct {
     process_id: ?std.posix.pid_t = null,
     // The user id of the caller
     user_id: ?std.posix.uid_t = null,
+    raw_request: ?[]const u8 = null,
 
     pub fn resource(self: Request) []const u8 {
         return self.network().options.net_porter_resource;
@@ -275,6 +276,7 @@ pub fn create(self: *NetavarkPlugin) !void {
         &Request{
             .action = PluginAction.create,
             .request = .{ .network = parsed_network.value },
+            .raw_request = request,
         },
     );
 }
@@ -317,6 +319,7 @@ fn exec(self: *NetavarkPlugin, action: PluginAction) !void {
             .action = action,
             .request = .{ .exec = parsed.value },
             .netns = self.namespace_path,
+            .raw_request = request,
         },
     );
 }

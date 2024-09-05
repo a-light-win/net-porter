@@ -62,7 +62,7 @@ pub fn deinit(self: Cni) void {
 pub fn create(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
     _ = self;
     _ = tentative_allocator;
-    responser.write(request.request.network);
+    responser.write(request.raw_request.?);
 }
 
 const CniCommand = enum {
