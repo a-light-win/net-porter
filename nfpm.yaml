@@ -16,17 +16,11 @@ provides:
 depends:
   - systemd
   - util-linux
+  - podman
 recommends: []
 suggests: []
 conflicts: []
 replaces: []
-overrides:
-  deb:
-    depends:
-      - golang-github-containers-common
-  archlinux:
-    depends:
-      - containers-common
 
 contents:
   - src: ./zig-out/bin/net-porter
