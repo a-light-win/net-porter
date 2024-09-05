@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+update() {
+  local version="$1"
+  local module="$2"
+
+  sed -i 's/[.]version = "[^"]*"/.version = "'"$version"'"/g' build.zig.zon
+  sed -i 's/pub const version = "[^"]*"/pub const version = "'"$version"'"/g' src/plugin/NetavarkPlugin.zig
+  sed -i 's/PKG_VERSION=.*/PKG_VERSION='"$version"'/g' builder-env
+}
+
+update "$@"
