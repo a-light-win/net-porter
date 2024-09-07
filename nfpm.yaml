@@ -33,6 +33,11 @@ contents:
     type: file
     file_info:
       mode: 0644
+  - src: ./misc/systemd/net-porter-dhcp@.service
+    dst: /usr/lib/systemd/system/net-porter-dhcp@.service
+    type: file
+    file_info:
+      mode: 0644
   - src: ./LICENSE
     dst: /usr/share/licenses/net-porter/LICENSE
     type: file

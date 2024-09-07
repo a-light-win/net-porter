@@ -60,8 +60,16 @@ pub fn deinit(self: Cni) void {
 }
 
 pub fn create(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
-    _ = self;
-    _ = tentative_allocator;
+    const dhcp_service = try DhcpService.init(
+        tentative_allocator,
+        request.user_id.?,
+    );
+    defer dhcp_service.deinit();
+    _ = try dhcp_service.start(
+        request.process_id.?,
+        self.cni_plugin_dir,
+    );
+
     responser.write(request.raw_request.?);
 }
 
@@ -575,7 +583,7 @@ const PluginConf = struct {
         return "/run/cni/dhcp.sock";
     }
 
-    fn setDhcpSocketPath(self: *PluginConf, uid: u32, container_id: []const u8) !void {
+    fn setDhcpSocketPath(self: *PluginConf, uid: u32) !void {
         const allocator = self.arena.?.allocator();
         if (self.conf.getPtr("ipam")) |ipam| {
             switch (ipam.*) {
@@ -586,8 +594,8 @@ const PluginConf = struct {
 
                     const path = try std.fmt.allocPrint(
                         allocator,
-                        "/run/user/{d}/dhcp-{s}.sock",
-                        .{ uid, container_id },
+                        "/run/user/{d}/net-porter/dhcp.sock",
+                        .{uid},
                     );
 
                     try ipam.object.put("daemonSocketPath", json.Value{ .string = path });
@@ -654,19 +662,6 @@ const PluginConf = struct {
         try plugin_conf.conf.getPtr("ipam").?.object.put("type", json.Value{ .string = "dhcp" });
 
         try std.testing.expect(plugin_conf.isDhcp());
-    }
-
-    fn stopDhcpServer(self: PluginConf, tentative_allocator: Allocator, container_id: []const u8) !void {
-        const dhcp_service = try DhcpService.init(
-            tentative_allocator,
-            "",
-            container_id,
-            "",
-            self.getDhcpSocketPath(),
-        );
-
-        defer dhcp_service.deinit();
-        _ = try dhcp_service.stop();
     }
 
     fn stringify(self: PluginConf, stream: std.fs.File) !void {
@@ -852,7 +847,12 @@ const AttachmentKeyContext = struct {
     }
 };
 
-const AttachmentMap = std.HashMap(AttachmentKey, Attachment, AttachmentKeyContext, 80);
+const AttachmentMap = std.HashMap(
+    AttachmentKey,
+    Attachment,
+    AttachmentKeyContext,
+    80,
+);
 
 const Attachment = struct {
     arena: ArenaAllocator,
@@ -959,27 +959,13 @@ const Attachment = struct {
     }
 
     fn setup(self: *Attachment, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
-        const exec_request = request.requestExec();
         const env_map = try self.envMap(tentative_allocator, .ADD, request);
         const pid = try std.fmt.allocPrint(tentative_allocator, "{d}", .{request.process_id.?});
 
         for (self.exec_configs.items) |*exec_config| {
             if (exec_config.isDhcp()) {
-                // Setup dhcp server if the ipam type is dhcp.
-                // the netns only be seen inside the podman container namespace,
-                // so we need to setup per dhcp server for each container.
-                try exec_config.setDhcpSocketPath(request.user_id.?, exec_request.container_id);
-                const dhcp_service = try DhcpService.init(
-                    tentative_allocator,
-                    pid,
-                    exec_request.container_id,
-                    self.cni_plugin_dir,
-                    exec_config.getDhcpSocketPath(),
-                );
-                defer dhcp_service.deinit();
-                _ = try dhcp_service.start();
+                exec_config.setDhcpSocketPath(request.user_id.?);
             }
-
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
             const result = try exec_config.exec(tentative_allocator, cmd, pid, env_map);
             if (result.Exited != 0) {
@@ -997,7 +983,6 @@ const Attachment = struct {
     }
 
     fn teardown(self: *Attachment, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
-        const exec_request = request.requestExec();
         const env_map = try self.envMap(tentative_allocator, .DEL, request);
         const pid = try std.fmt.allocPrint(tentative_allocator, "{d}", .{request.process_id.?});
 
@@ -1007,12 +992,6 @@ const Attachment = struct {
             var exec_config = &self.exec_configs.items[len - (i + 1)];
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
             const result = try exec_config.exec(tentative_allocator, cmd, pid, env_map);
-
-            if (exec_config.isDhcp()) {
-                exec_config.stopDhcpServer(tentative_allocator, exec_request.container_id) catch |err| {
-                    log.warn("Failed to stop dhcp server: {s}", .{@errorName(err)});
-                };
-            }
 
             if (result.Exited != 0) {
                 try responseError(tentative_allocator, responser, exec_config.result.?);

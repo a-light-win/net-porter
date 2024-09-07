@@ -1,0 +1,11 @@
+[Unit]
+Description=net-porter dhcp service
+Documentation=https://github.com/a-light-win/net-porter
+
+[Service]
+ExecStart=nsenter -t "${NET_PORTER_CALLER_PID}" --mount "${NET_PORTER_CNI_PATH}/dhcp" daemon -socketpath "${NET_PORTER_DHCP_SOCK_PATH}"
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
