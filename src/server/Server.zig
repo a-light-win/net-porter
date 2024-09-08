@@ -19,7 +19,7 @@ server: net.Server,
 
 managed_config: config.ManagedConfig,
 
-const Opts = struct {
+pub const Opts = struct {
     config_path: ?[]const u8 = null,
     uid: u32 = 0,
 };
@@ -28,6 +28,7 @@ pub fn new(opts: Opts) !Server {
     var managed_config = config.ManagedConfig.load(
         allocator,
         opts.config_path,
+        opts.uid,
     ) catch |e| {
         log.err(
             "Failed to read config file: {s}, error: {s}",

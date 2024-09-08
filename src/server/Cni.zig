@@ -964,7 +964,7 @@ const Attachment = struct {
 
         for (self.exec_configs.items) |*exec_config| {
             if (exec_config.isDhcp()) {
-                exec_config.setDhcpSocketPath(request.user_id.?);
+                try exec_config.setDhcpSocketPath(request.user_id.?);
             }
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
             const result = try exec_config.exec(tentative_allocator, cmd, pid, env_map);

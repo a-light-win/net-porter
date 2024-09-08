@@ -47,7 +47,7 @@ pub fn start(self: DhcpService, caller_pid: std.posix.pid_t, cni_path: []const u
     var env_map = std.process.EnvMap.init(self.allocator);
     defer env_map.deinit();
 
-    const pid = try std.fmt.printAlloc(self.allocator, "{d}", .{caller_pid});
+    const pid = try std.fmt.allocPrint(self.allocator, "{d}", .{caller_pid});
     defer self.allocator.free(pid);
 
     try env_map.put("NET_PORTER_CALLER_PID", pid);
@@ -58,7 +58,7 @@ pub fn start(self: DhcpService, caller_pid: std.posix.pid_t, cni_path: []const u
     const result = try std.process.Child.run(.{
         .allocator = self.allocator,
         .argv = self.startCmd(),
-        .env_map = env_map,
+        .env_map = &env_map,
     });
 
     switch (result.term) {
