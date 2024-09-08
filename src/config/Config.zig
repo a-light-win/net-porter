@@ -15,7 +15,7 @@ domain_socket: DomainSocket = DomainSocket{},
 resources: ?[]const Resource = null,
 log: LogSettings = .{},
 
-pub fn init(self: *Config, path: []const u8) !void {
+pub fn init(self: *Config, allocator: std.mem.Allocator, path: []const u8, accepted_uid: std.posix.uid_t) !void {
     self.config_path = path;
 
     // std.log.default_level = self.log.level;
@@ -26,4 +26,6 @@ pub fn init(self: *Config, path: []const u8) !void {
         std.log.warn("Can not get config directory from path: {s}", .{path});
         return error.InvalidPath;
     }
+
+    try self.domain_socket.init(allocator, accepted_uid);
 }

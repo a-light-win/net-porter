@@ -17,7 +17,7 @@ pub fn init(allocator: Allocator, caller_uid: std.posix.uid_t) !DhcpService {
 
     const dhcp_sock_path = try std.fmt.allocPrintZ(
         allocator,
-        "/run/user/{d}/net-porter/dhcp.sock",
+        "/run/user/{d}/net-porter-dhcp.sock",
         .{caller_uid},
     );
     errdefer allocator.free(dhcp_sock_path);

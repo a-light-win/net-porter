@@ -594,7 +594,7 @@ const PluginConf = struct {
 
                     const path = try std.fmt.allocPrint(
                         allocator,
-                        "/run/user/{d}/net-porter/dhcp.sock",
+                        "/run/user/{d}/net-porter-dhcp.sock",
                         .{uid},
                     );
 

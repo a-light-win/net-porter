@@ -6,14 +6,16 @@ const Allocator = std.mem.Allocator;
 const AclManager = @This();
 
 arena: ArenaAllocator,
+accepted_uid: std.posix.uid_t,
 acls: ?std.ArrayList(Acl) = null,
 
-pub fn init(root_allocator: Allocator, config: Config) Allocator.Error!AclManager {
+pub fn init(root_allocator: Allocator, config: Config, accepted_uid: std.posix.uid_t) Allocator.Error!AclManager {
     var arena = try ArenaAllocator.init(root_allocator);
     errdefer arena.deinit();
 
     var acl_manager = AclManager{
         .arena = arena,
+        .accepted_uid = accepted_uid,
     };
 
     const allocator = arena.allocator();
@@ -40,6 +42,9 @@ pub fn deinit(self: AclManager) void {
 }
 
 pub fn isAllowed(self: AclManager, name: []const u8, uid: u32, gid: u32) bool {
+    if (uid != self.accepted_uid) {
+        return false;
+    }
     if (self.acls) |acls| {
         for (acls.items) |acl| {
             if (std.mem.eql(u8, name, acl.name)) {
@@ -57,7 +62,7 @@ test "isAllowed" {
         .resources = &[_]Resource{
             Resource{ .name = "test", .allow_users = &[_][:0]const u8{"root"} },
         },
-    });
+    }, 0);
     defer runtime.deinit();
 
     try std.testing.expect(runtime.isAllowed("test", 0, 0));

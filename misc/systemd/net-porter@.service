@@ -3,7 +3,7 @@ Description=net-porter service
 Documentation=https://github.com/a-light-win/net-porter
 
 [Service]
-ExecStart=/usr/lib/netavark/net-porter server -c /etc/net-porter/config.json
+ExecStart=/usr/lib/netavark/net-porter server -c /etc/net-porter/config.json --uid=%i
 Restart=on-failure
 RestartSec=10s
 

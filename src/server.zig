@@ -3,9 +3,7 @@ const cli = @import("zig-cli");
 const Server = @import("server/Server.zig");
 const config = @import("config.zig");
 
-var server_opts = struct {
-    config_path: ?[]const u8 = null,
-}{};
+var server_opts = Server.Opts{};
 
 pub fn cmd_server(r: *cli.AppRunner) !cli.Command {
     return cli.Command{
@@ -15,14 +13,17 @@ pub fn cmd_server(r: *cli.AppRunner) !cli.Command {
         },
         .options = try r.mkSlice(
             cli.Option,
-            &.{
-                .{
-                    .long_name = "config",
-                    .short_alias = 'c',
-                    .help = "Path to the configuration file",
-                    .value_ref = r.mkRef(&server_opts.config_path),
-                },
-            },
+            &.{ .{
+                .long_name = "config",
+                .short_alias = 'c',
+                .help = "Path to the configuration file",
+                .value_ref = r.mkRef(&server_opts.config_path),
+            }, .{
+                .long_name = "uid",
+                .short_alias = 'u',
+                .help = "The net-porter server will process requests from this user id",
+                .value_ref = r.mkRef(&server_opts.uid),
+            } },
         ),
         .target = cli.CommandTarget{
             .action = cli.CommandAction{
@@ -33,7 +34,7 @@ pub fn cmd_server(r: *cli.AppRunner) !cli.Command {
 }
 
 fn run() !void {
-    var server = try Server.new(server_opts.config_path);
+    var server = try Server.new(server_opts);
     defer server.deinit();
 
     try server.run();

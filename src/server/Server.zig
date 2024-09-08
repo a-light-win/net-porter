@@ -19,14 +19,19 @@ server: net.Server,
 
 managed_config: config.ManagedConfig,
 
-pub fn new(config_path: ?[]const u8) !Server {
+const Opts = struct {
+    config_path: ?[]const u8 = null,
+    uid: u32 = 0,
+};
+
+pub fn new(opts: Opts) !Server {
     var managed_config = config.ManagedConfig.load(
         allocator,
-        config_path,
+        opts.config_path,
     ) catch |e| {
         log.err(
             "Failed to read config file: {s}, error: {s}",
-            .{ config_path orelse "", @errorName(e) },
+            .{ opts.config_path orelse "", @errorName(e) },
         );
         return e;
     };
@@ -39,7 +44,7 @@ pub fn new(config_path: ?[]const u8) !Server {
 
     return Server{
         .config = conf,
-        .acl_manager = try AclManager.init(allocator, conf),
+        .acl_manager = try AclManager.init(allocator, conf, opts.uid),
         .cni_manager = try CniManager.init(allocator, conf),
         .server = server,
         .managed_config = managed_config,

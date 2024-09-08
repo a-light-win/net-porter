@@ -28,8 +28,8 @@ contents:
     type: file
     file_info:
       mode: 0755
-  - src: ./misc/systemd/net-porter.service
-    dst: /usr/lib/systemd/system/net-porter.service
+  - src: ./misc/systemd/net-porter@.service
+    dst: /usr/lib/systemd/system/net-porter@.service
     type: file
     file_info:
       mode: 0644
