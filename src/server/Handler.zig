@@ -6,6 +6,7 @@ const log = std.log.scoped(.server);
 const plugin = @import("../plugin.zig");
 const AclManager = @import("AclManager.zig");
 const CniManager = @import("CniManager.zig");
+const DhcpService = @import("DhcpService.zig");
 const Cni = @import("Cni.zig");
 const Responser = @import("Responser.zig");
 const ArenaAllocator = @import("../ArenaAllocator.zig");
@@ -21,6 +22,7 @@ arena: ArenaAllocator,
 config: *config.Config,
 acl_manager: *AclManager,
 cni_manager: *CniManager,
+dhcp_service: *DhcpService,
 connection: std.net.Server.Connection,
 responser: Responser,
 
@@ -79,6 +81,9 @@ pub fn handle(self: *Handler) !void {
     self.execAction(tentative_allocator, cni, request) catch |err| {
         if (!self.responser.done) {
             self.responser.writeError("Failed to execute action: {s}", .{@errorName(err)});
+            if (@errorReturnTrace()) |trace| {
+                std.log.warn("Trace: {}", .{trace});
+            }
         }
     };
 
@@ -93,6 +98,7 @@ fn execAction(
     cni: *Cni,
     request: plugin.Request,
 ) !void {
+    try self.dhcp_service.ensureStarted(request.process_id.?);
     switch (request.action) {
         .create => try cni.create(allocator, request, &self.responser),
         .setup => try cni.setup(allocator, request, &self.responser),

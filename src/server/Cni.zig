@@ -5,7 +5,6 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = @import("../ArenaAllocator.zig");
 const plugin = @import("../plugin.zig");
 const Responser = @import("Responser.zig");
-const DhcpService = @import("DhcpService.zig");
 const managed_type = @import("../managed_type.zig");
 const Cni = @This();
 
@@ -60,16 +59,8 @@ pub fn deinit(self: Cni) void {
 }
 
 pub fn create(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
-    const dhcp_service = try DhcpService.init(
-        tentative_allocator,
-        request.user_id.?,
-    );
-    defer dhcp_service.deinit();
-    _ = try dhcp_service.start(
-        request.process_id.?,
-        self.cni_plugin_dir,
-    );
-
+    _ = self;
+    _ = tentative_allocator;
     responser.write(request.raw_request.?);
 }
 

@@ -5,6 +5,7 @@ const fs = std.fs;
 const config = @import("../config.zig");
 const AclManager = @import("AclManager.zig");
 const CniManager = @import("CniManager.zig");
+const DhcpService = @import("DhcpService.zig");
 const json = std.json;
 const allocator = std.heap.page_allocator;
 const Responser = @import("Responser.zig");
@@ -15,6 +16,7 @@ const Server = @This();
 config: config.Config,
 acl_manager: AclManager,
 cni_manager: CniManager,
+dhcp_service: DhcpService,
 server: net.Server,
 
 managed_config: config.ManagedConfig,
@@ -47,6 +49,7 @@ pub fn new(opts: Opts) !Server {
         .config = conf,
         .acl_manager = try AclManager.init(allocator, conf, opts.uid),
         .cni_manager = try CniManager.init(allocator, conf),
+        .dhcp_service = try DhcpService.init(allocator, opts.uid, conf.cni_plugin_dir),
         .server = server,
         .managed_config = managed_config,
     };
@@ -69,6 +72,7 @@ pub fn deinit(self: *Server) void {
 
     self.acl_manager.deinit();
     self.cni_manager.deinit();
+    self.dhcp_service.deinit();
 
     self.managed_config.deinit();
 }
@@ -83,6 +87,7 @@ pub fn run(self: *Server) !void {
             .arena = try ArenaAllocator.init(allocator),
             .acl_manager = &self.acl_manager,
             .cni_manager = &self.cni_manager,
+            .dhcp_service = &self.dhcp_service,
             .config = &self.config,
             .connection = connection,
             .responser = Responser{

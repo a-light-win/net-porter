@@ -14,9 +14,8 @@ license: "MIT"
 provides:
   - net-porter
 depends:
-  - systemd
   - util-linux
-  - podman
+  - netavark
 recommends: []
 suggests: []
 conflicts: []
@@ -30,11 +29,6 @@ contents:
       mode: 0755
   - src: ./misc/systemd/net-porter@.service
     dst: /usr/lib/systemd/system/net-porter@.service
-    type: file
-    file_info:
-      mode: 0644
-  - src: ./misc/systemd/net-porter-dhcp@.service
-    dst: /usr/lib/systemd/system/net-porter-dhcp@.service
     type: file
     file_info:
       mode: 0644
