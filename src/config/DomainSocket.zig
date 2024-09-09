@@ -13,7 +13,7 @@ uid: ?std.posix.uid_t = null,
 gid: ?std.posix.gid_t = null,
 mode: std.posix.mode_t = 0o660,
 
-pub fn init(self: *DomainSocket, allocator: std.mem.Allocator, accepted_uid: std.posix.uid_t) !void {
+pub fn postInit(self: *DomainSocket, allocator: std.mem.Allocator, accepted_uid: std.posix.uid_t) !void {
     if (std.mem.eql(u8, self.path, "")) {
         self.path = try std.fmt.allocPrintZ(
             allocator,

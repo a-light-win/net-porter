@@ -26,7 +26,7 @@ pub fn load(root_allocator: std.mem.Allocator, config_path: ?[]const u8, accepte
     const parsed_config = parseConfig(allocator, path) catch |err| switch (err) {
         error.FileNotFound => {
             var managed_config = ManagedConfig{ .config = Config{}, .arena = arena };
-            try managed_config.config.init(allocator, path, accepted_uid);
+            try managed_config.config.postInit(allocator, path, accepted_uid);
             return managed_config;
         },
         else => return err,
@@ -34,7 +34,7 @@ pub fn load(root_allocator: std.mem.Allocator, config_path: ?[]const u8, accepte
     errdefer parsed_config.deinit();
 
     var config = parsed_config.value;
-    try config.init(allocator, path, accepted_uid);
+    try config.postInit(allocator, path, accepted_uid);
 
     return ManagedConfig{
         .config = config,
