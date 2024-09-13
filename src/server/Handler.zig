@@ -98,7 +98,7 @@ fn execAction(
     cni: *Cni,
     request: plugin.Request,
 ) !void {
-    try self.dhcp_service.ensureStarted(request.process_id.?);
+    try self.dhcp_service.ensureStarted();
     switch (request.action) {
         .create => try cni.create(allocator, request, &self.responser),
         .setup => try cni.setup(allocator, request, &self.responser),
