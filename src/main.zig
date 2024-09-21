@@ -13,14 +13,14 @@ pub var logger = Logger.newLogger();
 
 fn logIt(
     comptime message_level: std.log.Level,
-    scope: @Type(std.log.Scope),
-    format: []const u8,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
     args: anytype,
 ) void {
     logger.log(message_level, scope, format, args);
 }
 
-const std_options = std.Options{
+pub const std_options = std.Options{
     .log_level = std.log.Level.debug,
     .logFn = logIt,
 };

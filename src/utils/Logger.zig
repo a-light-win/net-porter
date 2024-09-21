@@ -82,7 +82,7 @@ test "log" {
     temp_file_manager.should_clean_file = true;
 }
 
-inline fn logEnabled(
+pub inline fn logEnabled(
     logger: Logger,
     comptime message_level: std.log.Level,
     comptime scope: @Type(.EnumLiteral),
