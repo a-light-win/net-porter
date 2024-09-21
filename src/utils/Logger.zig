@@ -1,5 +1,5 @@
 const std = @import("std");
-const LogSettings = @import("config/LogSettings.zig");
+const LogSettings = @import("LogSettings.zig");
 const Logger = @This();
 
 const LogBufferedWriter = std.io.BufferedWriter(8192, std.fs.File.Writer);
@@ -37,7 +37,7 @@ pub fn log(
 }
 
 test "log" {
-    const test_utils = @import("test_utils.zig");
+    const test_utils = @import("../test_utils.zig");
     const allocator = std.testing.allocator;
 
     var temp_file_manager = try test_utils.newTempFileManager(

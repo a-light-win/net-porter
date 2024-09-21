@@ -4,7 +4,8 @@ const plugin = @import("plugin.zig");
 const server = @import("server.zig");
 const json = @import("json.zig");
 const network = @import("network.zig");
-const Logger = @import("Logger.zig");
+const utils = @import("utils.zig");
+const Logger = utils.Logger;
 
 const allocator = std.heap.page_allocator;
 
@@ -69,6 +70,6 @@ test {
     _ = @import("plugin.zig");
     _ = @import("server.zig");
     _ = @import("user.zig");
-    _ = @import("managed_type.zig");
-    _ = @import("Logger.zig");
+    _ = @import("utils.zig");
+    _ = @import("cni.zig");
 }

@@ -1,7 +1,7 @@
 const std = @import("std");
 const DomainSocket = @import("DomainSocket.zig");
 const Resource = @import("Resource.zig");
-const LogSettings = @import("LogSettings.zig");
+const LogSettings = @import("../utils.zig").LogSettings;
 const Config = @This();
 
 config_dir: []const u8 = "",

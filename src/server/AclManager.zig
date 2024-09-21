@@ -1,7 +1,7 @@
 const std = @import("std");
 const Acl = @import("Acl.zig");
 const Config = @import("../config.zig").Config;
-const ArenaAllocator = @import("../ArenaAllocator.zig");
+const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const Allocator = std.mem.Allocator;
 const AclManager = @This();
 

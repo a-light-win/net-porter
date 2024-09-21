@@ -4,13 +4,13 @@ const net = std.net;
 const fs = std.fs;
 const config = @import("../config.zig");
 const AclManager = @import("AclManager.zig");
-const CniManager = @import("CniManager.zig");
-const DhcpService = @import("DhcpService.zig");
+const CniManager = @import("../cni/CniManager.zig");
+const DhcpService = @import("../cni/DhcpService.zig");
 const json = std.json;
 const allocator = std.heap.page_allocator;
-const Responser = @import("Responser.zig");
+const Responser = @import("../plugin/Responser.zig");
 const Handler = @import("Handler.zig");
-const ArenaAllocator = @import("../ArenaAllocator.zig");
+const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const Server = @This();
 
 config: config.Config,

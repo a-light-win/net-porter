@@ -2,10 +2,10 @@ const std = @import("std");
 const json = std.json;
 const log = std.log.scoped(.cni);
 const Allocator = std.mem.Allocator;
-const ArenaAllocator = @import("../ArenaAllocator.zig");
+const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const plugin = @import("../plugin.zig");
-const Responser = @import("Responser.zig");
-const managed_type = @import("../managed_type.zig");
+const Responser = plugin.Responser;
+const managed_type = @import("managed_type.zig");
 const Cni = @This();
 
 const max_cni_config_size = 16 * 1024;

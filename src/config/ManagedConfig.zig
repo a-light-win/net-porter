@@ -2,7 +2,7 @@ const std = @import("std");
 const json = std.json;
 const Config = @import("Config.zig");
 const ManagedConfig = @This();
-const ArenaAllocator = @import("../ArenaAllocator.zig");
+const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 
 const default_config_path = "/etc/net-porter/config.json";
 const max_config_size = 1024 * 1024;

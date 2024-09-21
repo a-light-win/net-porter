@@ -1,5 +1,5 @@
 const std = @import("std");
-const ArenaAllocator = @import("ArenaAllocator.zig");
+const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 
 pub fn ManagedType(comptime T: type) type {
     return struct {

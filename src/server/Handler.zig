@@ -5,11 +5,11 @@ const json = std.json;
 const log = std.log.scoped(.server);
 const plugin = @import("../plugin.zig");
 const AclManager = @import("AclManager.zig");
-const CniManager = @import("CniManager.zig");
-const DhcpService = @import("DhcpService.zig");
-const Cni = @import("Cni.zig");
-const Responser = @import("Responser.zig");
-const ArenaAllocator = @import("../ArenaAllocator.zig");
+const DhcpService = @import("../cni/DhcpService.zig");
+const Cni = @import("../cni/Cni.zig");
+const CniManager = @import("../cni/CniManager.zig");
+const Responser = plugin.Responser;
+const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const Handler = @This();
 
 const ClientInfo = extern struct {

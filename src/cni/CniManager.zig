@@ -2,7 +2,7 @@ const std = @import("std");
 const Cni = @import("Cni.zig");
 const Config = @import("../config.zig").Config;
 const Allocator = std.mem.Allocator;
-const ArenaAllocator = @import("../ArenaAllocator.zig");
+const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 
 const CniMap = std.StringHashMap(*Cni);
 const CniManager = @This();
