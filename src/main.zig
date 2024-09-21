@@ -4,8 +4,25 @@ const plugin = @import("plugin.zig");
 const server = @import("server.zig");
 const json = @import("json.zig");
 const network = @import("network.zig");
+const Logger = @import("Logger.zig");
 
 const allocator = std.heap.page_allocator;
+
+var logger = Logger.newLogger();
+
+fn logIt(
+    comptime message_level: std.log.Level,
+    scope: @Type(std.log.Scope),
+    format: []const u8,
+    args: anytype,
+) void {
+    logger.log(message_level, scope, format, args);
+}
+
+const std_options = std.Options{
+    .log_level = std.log.Level.debug,
+    .logFn = logIt,
+};
 
 pub fn main() !void {
     var runner = cli.AppRunner.init(allocator) catch |err| {
@@ -53,4 +70,5 @@ test {
     _ = @import("server.zig");
     _ = @import("user.zig");
     _ = @import("managed_type.zig");
+    _ = @import("Logger.zig");
 }
