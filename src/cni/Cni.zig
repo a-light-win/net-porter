@@ -960,12 +960,13 @@ const Attachment = struct {
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
             const result = try exec_config.exec(tentative_allocator, cmd, pid, env_map);
             if (result.Exited != 0) {
-                // std.time.sleep(1 * std.time.ns_per_hour);
+                log.warn("Setup {s} failed", .{request.request.exec.container_name});
                 try responseError(tentative_allocator, responser, exec_config.result.?);
                 return error.UnexpectedError;
             }
         }
 
+        log.info("Setup {s} success", .{request.request.exec.container_name});
         try responseResult(
             tentative_allocator,
             responser,
@@ -974,6 +975,7 @@ const Attachment = struct {
     }
 
     fn teardown(self: *Attachment, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
+        _ = responser;
         const env_map = try self.envMap(tentative_allocator, .DEL, request);
         const pid = try std.fmt.allocPrint(tentative_allocator, "{d}", .{request.process_id.?});
 
@@ -985,10 +987,20 @@ const Attachment = struct {
             const result = try exec_config.exec(tentative_allocator, cmd, pid, env_map);
 
             if (result.Exited != 0) {
-                try responseError(tentative_allocator, responser, exec_config.result.?);
-                return error.UnexpectedError;
+                log.warn(
+                    "Teardown {s} failed on step {s}, ignore it. the detail error is {s}",
+                    .{
+                        request.request.exec.container_name,
+                        exec_config.getType(),
+                        exec_config.result.?.items,
+                    },
+                );
+                // Do not send failed to the client, so client can normal stopped
+                // try responseError(tentative_allocator, responser, exec_config.result.?);
+                // return error.UnexpectedError;
             }
         }
+        log.info("Teardown {s} is complete", .{request.request.exec.container_name});
     }
 
     fn envMap(self: Attachment, allocator: Allocator, cni_command: CniCommand, request: plugin.Request) !std.process.EnvMap {

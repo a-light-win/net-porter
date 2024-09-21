@@ -9,7 +9,7 @@ const Logger = utils.Logger;
 
 const allocator = std.heap.page_allocator;
 
-var logger = Logger.newLogger();
+pub var logger = Logger.newLogger();
 
 fn logIt(
     comptime message_level: std.log.Level,

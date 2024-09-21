@@ -88,14 +88,7 @@ inline fn logEnabled(
     comptime scope: @Type(.EnumLiteral),
 ) bool {
     if (logger.log_settings) |settings| {
-        if (settings.scope_levels) |scope_levels| {
-            for (scope_levels) |scope_level| {
-                if (std.mem.eql(u8, @tagName(scope), scope_level.scope)) {
-                    return @intFromEnum(message_level) <= @intFromEnum(scope_level.level);
-                }
-            }
-        }
-        return @intFromEnum(message_level) <= @intFromEnum(settings.level);
+        return settings.logEnabled(message_level, scope);
     }
     return true;
 }

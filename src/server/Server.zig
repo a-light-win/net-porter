@@ -42,6 +42,9 @@ pub fn new(opts: Opts) !Server {
     const conf = managed_config.config;
     errdefer managed_config.deinit();
 
+    var logger = @import("root").logger;
+    logger.log_settings = conf.log;
+
     var server = try conf.domain_socket.listen();
     errdefer server.deinit();
 
@@ -79,6 +82,8 @@ pub fn deinit(self: *Server) void {
 
 pub fn run(self: *Server) !void {
     log.info("Server listening on {s}", .{self.config.domain_socket.path});
+    const log_response = self.config.log.logEnabled(.debug, .traffic);
+
     while (true) {
         // Accept a client connection
         var connection = try self.server.accept();
@@ -92,7 +97,7 @@ pub fn run(self: *Server) !void {
             .connection = connection,
             .responser = Responser{
                 .stream = &connection.stream,
-                .log_response = true,
+                .log_response = log_response,
             },
         };
 

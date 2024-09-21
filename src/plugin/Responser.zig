@@ -1,6 +1,7 @@
 const std = @import("std");
 const json = std.json;
 const log = std.log.scoped(.server);
+const traffic_log = std.log.scoped(.traffic);
 const Responser = @This();
 
 stream: *std.net.Stream,
@@ -20,6 +21,7 @@ pub fn writeError(self: *Responser, comptime fmt: []const u8, args: anytype) voi
         log.warn("Failed to format error message: {s}", .{@errorName(err)});
         return;
     };
+
     log.warn("{s}", .{error_msg});
 
     json.stringify(

@@ -3,6 +3,7 @@ const config = @import("../config.zig");
 const net = std.net;
 const json = std.json;
 const log = std.log.scoped(.server);
+const traffic_log = std.log.scoped(.traffic);
 const plugin = @import("../plugin.zig");
 const AclManager = @import("AclManager.zig");
 const DhcpService = @import("../cni/DhcpService.zig");
@@ -40,10 +41,6 @@ pub fn handle(self: *Handler) !void {
     const tentative_allocator = arena.allocator();
 
     const client_info = try getClientInfo(&self.responser);
-    log.debug(
-        "Client connected with PID {d}, UID {d}, GID {d}",
-        .{ client_info.pid, client_info.uid, client_info.gid },
-    );
 
     const buf = stream.reader().readAllAlloc(
         tentative_allocator,
@@ -52,8 +49,6 @@ pub fn handle(self: *Handler) !void {
         self.responser.writeError("Failed to read request: {s}", .{@errorName(err)});
         return;
     };
-
-    std.debug.print("{s}\n", .{buf});
 
     const parsed_request = json.parseFromSlice(
         plugin.Request,
@@ -69,6 +64,26 @@ pub fn handle(self: *Handler) !void {
     var request = parsed_request.value;
     request.process_id = client_info.pid;
     request.user_id = client_info.uid;
+
+    const container_name = switch (request.request) {
+        .network => "none",
+        .exec => |exec| exec.container_name,
+    };
+
+    log.info(
+        "Receive request from user({}) with pid({}), action={s}, container={s}, netns={s}",
+        .{
+            client_info.uid,
+            client_info.pid,
+            @tagName(request.action),
+            container_name,
+            request.netns orelse "none",
+        },
+    );
+
+    if (request.raw_request) |raw_request| {
+        traffic_log.debug("{s}", .{raw_request});
+    }
 
     try self.authClient(client_info, &request);
     try self.checkNetns(client_info, &request);
