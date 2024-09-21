@@ -123,6 +123,8 @@ pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Requ
         var attachment = kv.value;
         try attachment.teardown(tentative_allocator, request, responser);
     }
+
+    log.info("Teardown {s} is complete", .{request.request.exec.container_name});
 }
 
 const CniErrorMsg = struct {
@@ -1000,7 +1002,6 @@ const Attachment = struct {
                 // return error.UnexpectedError;
             }
         }
-        log.info("Teardown {s} is complete", .{request.request.exec.container_name});
     }
 
     fn envMap(self: Attachment, allocator: Allocator, cni_command: CniCommand, request: plugin.Request) !std.process.EnvMap {
