@@ -21,6 +21,9 @@ pub fn postInit(self: *DomainSocket, allocator: std.mem.Allocator, accepted_uid:
             .{accepted_uid},
         );
     }
+    if (self.owner == null and self.uid == null) {
+        self.uid = accepted_uid;
+    }
 }
 
 pub fn connect(self: DomainSocket) !std.net.Stream {
