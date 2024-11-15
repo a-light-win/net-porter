@@ -15,7 +15,7 @@ provides:
   - net-porter
 depends:
   - util-linux
-  - netavark
+  - podman
 recommends: []
 suggests: []
 conflicts: []
