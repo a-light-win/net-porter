@@ -41,7 +41,7 @@ pub fn listen(self: DomainSocket) !std.net.Server {
 
     // Bind the socket to a file path
     std.fs.cwd().deleteFile(self.path) catch {};
-    const server = address.listen(.{ .reuse_address = true }) catch |e| {
+    const server = address.listen(.{}) catch |e| {
         std.log.err(
             "Failed to bind address: {s}, error: {s}",
             .{ self.path, @errorName(e) },
@@ -126,7 +126,7 @@ test "setSocketPermissions()" {
     };
 
     const address = try std.net.Address.initUnix(socket.path);
-    var server = try address.listen(.{ .reuse_address = true });
+    var server = try address.listen(.{});
     defer server.deinit();
     defer std.fs.cwd().deleteFile(socket.path) catch {};
 
@@ -148,7 +148,7 @@ test "setSocketPermissions() will failed if the user can not change the owner" {
     }
 
     const address = try std.net.Address.initUnix(socket.path);
-    var server = try address.listen(.{ .reuse_address = true });
+    var server = try address.listen(.{});
     defer server.deinit();
     defer std.fs.cwd().deleteFile(socket.path) catch {};
 
@@ -211,6 +211,23 @@ test "getGid() will return gid if it is set" {
 test "getGid() will prefer gid over group" {
     const socket = DomainSocket{ .group = "root", .gid = 1000 };
     try std.testing.expectEqual(1000, socket.getGid().?);
+}
+
+test "can connect to domain socket without reuse_address" {
+    const test_path = "/tmp/test-connect-without-reuse.sock";
+    const socket = DomainSocket{
+        .path = test_path,
+    };
+
+    var server = try socket.listen();
+    defer server.deinit();
+    defer std.fs.cwd().deleteFile(test_path) catch {};
+
+    // Try to connect multiple times to verify connections work
+    for (0..3) |_| {
+        var stream = try socket.connect();
+        defer stream.close();
+    }
 }
 
 test {
