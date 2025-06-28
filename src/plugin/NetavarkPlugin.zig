@@ -4,7 +4,7 @@ const DomainSocket = @import("../config.zig").DomainSocket;
 const NetavarkPlugin = @This();
 
 pub const name = "net-porter";
-pub const version = "0.3.4";
+pub const version = "0.4.0-rc.1";
 
 pub const max_request_size = 16 * 1024;
 pub const max_response_size = 16 * 1024;
