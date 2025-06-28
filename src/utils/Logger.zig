@@ -11,7 +11,7 @@ log_settings: ?LogSettings = null,
 pub fn log(
     logger: *Logger,
     comptime message_level: std.log.Level,
-    comptime scope: @Type(.EnumLiteral),
+    comptime scope: @TypeOf(.enum_literal),
     comptime format: []const u8,
     args: anytype,
 ) void {
@@ -85,7 +85,7 @@ test "log" {
 pub inline fn logEnabled(
     logger: Logger,
     comptime message_level: std.log.Level,
-    comptime scope: @Type(.EnumLiteral),
+    comptime scope: @TypeOf(.enum_literal),
 ) bool {
     if (logger.log_settings) |settings| {
         return settings.logEnabled(message_level, scope);

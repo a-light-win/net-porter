@@ -11,8 +11,7 @@ pub fn cmd_server(r: *cli.AppRunner) !cli.Command {
         .description = cli.Description{
             .one_line = "Run a server to handle network operation requests",
         },
-        .options = try r.mkSlice(
-            cli.Option,
+        .options = try r.allocOptions(
             &.{ .{
                 .long_name = "config",
                 .short_alias = 'c',

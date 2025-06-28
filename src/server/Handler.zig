@@ -1,5 +1,5 @@
 const std = @import("std");
-const config = @import("../config.zig");
+const config_mod = @import("../config.zig");
 const net = std.net;
 const json = std.json;
 const log = std.log.scoped(.server);
@@ -20,7 +20,7 @@ const ClientInfo = extern struct {
 };
 
 arena: ArenaAllocator,
-config: *config.Config,
+config: *config_mod.Config,
 acl_manager: *AclManager,
 cni_manager: *CniManager,
 dhcp_service: *DhcpService,

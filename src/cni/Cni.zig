@@ -746,10 +746,9 @@ const PluginConf = struct {
         process.stderr_behavior = .Pipe;
         process.env_map = &env_map;
 
-        var stdout = std.ArrayList(u8).init(allocator);
-        var stderr = std.ArrayList(u8).init(allocator);
-        errdefer stdout.deinit();
-        defer stderr.deinit();
+        var stdout = std.ArrayListUnmanaged(u8){};
+        var stderr = std.ArrayListUnmanaged(u8){};
+        defer stderr.deinit(allocator);
 
         try process.spawn();
 
@@ -757,10 +756,10 @@ const PluginConf = struct {
         process.stdin.?.close();
         process.stdin = null;
 
-        try process.collectOutput(&stdout, &stderr, 4096);
+        try process.collectOutput(allocator, &stdout, &stderr, 4096);
         const result = try process.wait();
 
-        self.result = stdout;
+        self.result = std.ArrayList(u8).fromOwnedSlice(allocator, try stdout.toOwnedSlice(allocator));
         return result;
     }
 };

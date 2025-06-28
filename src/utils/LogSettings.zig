@@ -21,7 +21,7 @@ dump_env: EnvLog = .{},
 pub inline fn logEnabled(
     settings: LogSettings,
     comptime message_level: std.log.Level,
-    comptime scope: @Type(.EnumLiteral),
+    comptime scope: @TypeOf(.enum_literal),
 ) bool {
     for (settings.scope_levels) |scope_level| {
         if (std.mem.eql(u8, @tagName(scope), scope_level.scope)) {

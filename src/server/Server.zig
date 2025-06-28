@@ -2,7 +2,7 @@ const std = @import("std");
 const log = std.log.scoped(.server);
 const net = std.net;
 const fs = std.fs;
-const config = @import("../config.zig");
+const config_mod = @import("../config.zig");
 const AclManager = @import("AclManager.zig");
 const CniManager = @import("../cni/CniManager.zig");
 const DhcpService = @import("../cni/DhcpService.zig");
@@ -13,13 +13,13 @@ const Handler = @import("Handler.zig");
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const Server = @This();
 
-config: config.Config,
+config: config_mod.Config,
 acl_manager: AclManager,
 cni_manager: CniManager,
 dhcp_service: DhcpService,
 server: net.Server,
 
-managed_config: config.ManagedConfig,
+managed_config: config_mod.ManagedConfig,
 
 pub const Opts = struct {
     config_path: ?[]const u8 = null,
@@ -27,7 +27,7 @@ pub const Opts = struct {
 };
 
 pub fn new(opts: Opts) !Server {
-    var managed_config = config.ManagedConfig.load(
+    var managed_config = config_mod.ManagedConfig.load(
         allocator,
         opts.config_path,
         opts.uid,

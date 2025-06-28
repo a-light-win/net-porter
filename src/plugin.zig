@@ -53,7 +53,7 @@ pub fn cmd_setup(r: *cli.AppRunner) !cli.Command {
             .action = cli.CommandAction{
                 .exec = setup,
                 .positional_args = cli.PositionalArgs{
-                    .required = try r.mkSlice(cli.PositionalArg, &.{
+                    .required = try r.allocPositionalArgs(&.{
                         .{
                             .name = "namespace_path",
                             .help = "The path to the network namespace",
@@ -76,7 +76,7 @@ pub fn cmd_teardown(r: *cli.AppRunner) !cli.Command {
             .action = cli.CommandAction{
                 .exec = teardown,
                 .positional_args = cli.PositionalArgs{
-                    .required = try r.mkSlice(cli.PositionalArg, &.{
+                    .required = try r.allocPositionalArgs(&.{
                         .{
                             .name = "namespace_path",
                             .help = "The path to the network namespace",
