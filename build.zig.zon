@@ -1,31 +1,12 @@
 .{
-    // This is the default name used by packages depending on this one. For
-    // example, when a user runs `zig fetch --save <url>`, this field is used
-    // as the key in the `dependencies` table. Although the user can choose a
-    // different name, most users will stick with this provided value.
-    //
-    // It is redundant to include "zig" in this name because it is already
-    // within the Zig package namespace.
-    .name = "net-porter",
-
-    // This is a [Semantic Version](https://semver.org/).
-    // In a future version of Zig it will be used for package deduplication.
+    .name = .net_porter,
     .version = "0.3.4",
-
-    // This field is optional.
-    // This is currently advisory only; Zig does not yet do anything
-    // with this value.
-    //.minimum_zig_version = "0.11.0",
-
-    // This field is optional.
-    // Each dependency must either provide a `url` and `hash`, or a `path`.
-    // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
-    // Once all dependencies are fetched, `zig build` no longer requires
-    // internet connectivity.
+    .fingerprint = 0xe3d8545efbb96a27,
+    .minimum_zig_version = "0.14.1",
     .dependencies = .{
-        .@"zig-cli" = .{
-            .url = "https://github.com/sam701/zig-cli/archive/9a94c4803a52e54c26b198096d63fb5bde752da2.tar.gz",
-            .hash = "1220ab73fb7cc11b2308edc3364988e05efcddbcac31b707f55e6216d1b9c0da13f1",
+        .cli = .{
+            .url = "git+https://github.com/sam701/zig-cli#9d1e7e324a0e8e331078acca6d5c038a76181512",
+            .hash = "cli-0.9.0-2eKe_0UBAQCYgzv6ikHEAjKS55_tew68MN1eh_HOa_rg",
         },
     },
     .paths = .{

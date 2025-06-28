@@ -20,8 +20,8 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const zigcli_pkg = b.dependency("zig-cli", .{ .target = target });
-    const zigcli_mod = zigcli_pkg.module("zig-cli");
+    const zigcli_pkg = b.dependency("cli", .{ .target = target });
+    const zigcli_mod = zigcli_pkg.module("cli");
 
     const exe = b.addExecutable(.{
         .name = "net-porter",
