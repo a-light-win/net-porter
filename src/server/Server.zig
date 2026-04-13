@@ -5,7 +5,7 @@ const fs = std.fs;
 const config_mod = @import("../config.zig");
 const AclManager = @import("AclManager.zig");
 const CniManager = @import("../cni/CniManager.zig");
-const DhcpService = @import("../cni/DhcpService.zig");
+const DhcpManager = @import("../cni/DhcpManager.zig");
 const json = std.json;
 const allocator = std.heap.page_allocator;
 const Responser = @import("../plugin/Responser.zig");
@@ -16,21 +16,19 @@ const Server = @This();
 config: config_mod.Config,
 acl_manager: AclManager,
 cni_manager: CniManager,
-dhcp_service: DhcpService,
+dhcp_manager: DhcpManager,
 server: net.Server,
 
 managed_config: config_mod.ManagedConfig,
 
 pub const Opts = struct {
     config_path: ?[]const u8 = null,
-    uid: u32 = 0,
 };
 
 pub fn new(opts: Opts) !Server {
     var managed_config = config_mod.ManagedConfig.load(
         allocator,
         opts.config_path,
-        opts.uid,
     ) catch |e| {
         log.err(
             "Failed to read config file: {s}, error: {s}",
@@ -50,9 +48,9 @@ pub fn new(opts: Opts) !Server {
 
     return Server{
         .config = conf,
-        .acl_manager = try AclManager.init(allocator, conf, opts.uid),
+        .acl_manager = try AclManager.init(allocator, conf),
         .cni_manager = try CniManager.init(allocator, conf),
-        .dhcp_service = try DhcpService.init(allocator, opts.uid, conf.cni_plugin_dir),
+        .dhcp_manager = DhcpManager.init(allocator, conf.cni_plugin_dir),
         .server = server,
         .managed_config = managed_config,
     };
@@ -75,7 +73,7 @@ pub fn deinit(self: *Server) void {
 
     self.acl_manager.deinit();
     self.cni_manager.deinit();
-    self.dhcp_service.deinit();
+    self.dhcp_manager.deinit();
 
     self.managed_config.deinit();
 }
@@ -92,7 +90,7 @@ pub fn run(self: *Server) !void {
             .arena = try ArenaAllocator.init(allocator),
             .acl_manager = &self.acl_manager,
             .cni_manager = &self.cni_manager,
-            .dhcp_service = &self.dhcp_service,
+            .dhcp_manager = &self.dhcp_manager,
             .config = &self.config,
             .connection = connection,
             .responser = Responser{

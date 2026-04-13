@@ -6,7 +6,7 @@ const log = std.log.scoped(.server);
 const traffic_log = std.log.scoped(.traffic);
 const plugin = @import("../plugin.zig");
 const AclManager = @import("AclManager.zig");
-const DhcpService = @import("../cni/DhcpService.zig");
+const DhcpManager = @import("../cni/DhcpManager.zig");
 const Cni = @import("../cni/Cni.zig");
 const CniManager = @import("../cni/CniManager.zig");
 const Responser = plugin.Responser;
@@ -23,7 +23,7 @@ arena: ArenaAllocator,
 config: *config_mod.Config,
 acl_manager: *AclManager,
 cni_manager: *CniManager,
-dhcp_service: *DhcpService,
+dhcp_manager: *DhcpManager,
 connection: std.net.Server.Connection,
 responser: Responser,
 
@@ -120,7 +120,7 @@ pub fn handle(self: *Handler) !void {
         return;
     };
 
-    self.execAction(tentative_allocator, cni, request) catch |err| {
+    self.execAction(tentative_allocator, cni, request, client_info.uid) catch |err| {
         if (!self.responser.done) {
             log.err("Failed to execute action={s} for container={s}: {s}", .{
                 @tagName(request.action),
@@ -144,13 +144,14 @@ fn execAction(
     allocator: std.mem.Allocator,
     cni: *Cni,
     request: plugin.Request,
+    caller_uid: u32,
 ) !void {
     // Only start DHCP service for create and setup actions.
     // During teardown, the DHCP daemon may have crashed or the last
     // container (catatonit) may already be gone, causing ensureStarted()
     // to fail. Teardown should still proceed to clean up whatever it can.
     if (request.action != .teardown) {
-        try self.dhcp_service.ensureStarted();
+        try self.dhcp_manager.ensureStarted(caller_uid);
     }
     switch (request.action) {
         .create => try cni.create(allocator, request, &self.responser),
@@ -182,6 +183,16 @@ fn getClientInfo(responser: *Responser) std.posix.UnexpectedError!ClientInfo {
 }
 
 fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
+    // Socket-level pre-filtering: reject if uid has no permission on any resource
+    if (!self.acl_manager.hasAnyPermission(client_info.uid, client_info.gid)) {
+        const err = error.AccessDenied;
+        self.responser.writeError(
+            "User {} has no permission on any resource, error: {s}",
+            .{ client_info.uid, @errorName(err) },
+        );
+        return err;
+    }
+    // Resource-level ACL check
     if (!self.acl_manager.isAllowed(request.resource(), client_info.uid, client_info.gid)) {
         const err = error.AccessDenied;
         self.responser.writeError(

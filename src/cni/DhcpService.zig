@@ -62,9 +62,13 @@ pub fn ensureStarted(self: *DhcpService) !void {
 }
 
 fn start(self: *DhcpService) !void {
-    if (self.podman_infra_pid == null) {
-        try self.initPodmanInfraPid();
+    // Always re-discover infra PID - it may have changed
+    // after podman session restart
+    if (self.podman_infra_pid) |old_pid| {
+        self.allocator.free(old_pid);
+        self.podman_infra_pid = null;
     }
+    try self.initPodmanInfraPid();
 
     self.removeSocketPath();
 

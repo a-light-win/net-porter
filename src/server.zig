@@ -12,17 +12,12 @@ pub fn cmd_server(r: *cli.AppRunner) !cli.Command {
             .one_line = "Run a server to handle network operation requests",
         },
         .options = try r.allocOptions(
-            &.{ .{
+            &.{.{
                 .long_name = "config",
                 .short_alias = 'c',
                 .help = "Path to the configuration file",
                 .value_ref = r.mkRef(&server_opts.config_path),
-            }, .{
-                .long_name = "uid",
-                .short_alias = 'u',
-                .help = "The net-porter server will process requests from this user id",
-                .value_ref = r.mkRef(&server_opts.uid),
-            } },
+            }},
         ),
         .target = cli.CommandTarget{
             .action = cli.CommandAction{

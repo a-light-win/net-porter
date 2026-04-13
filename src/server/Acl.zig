@@ -35,6 +35,16 @@ pub fn deinit(self: *Acl) void {
     }
 }
 
+pub fn hasAnyAllow(self: Acl) bool {
+    if (self.allow_uids) |uids| {
+        if (uids.items.len > 0) return true;
+    }
+    if (self.allow_gids) |gids| {
+        if (gids.items.len > 0) return true;
+    }
+    return false;
+}
+
 pub fn isAllowed(self: Acl, uid: u32, gid: u32) bool {
     if (self.allow_uids) |uids| {
         if (contains(uids, uid)) {

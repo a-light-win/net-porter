@@ -13,17 +13,12 @@ uid: ?std.posix.uid_t = null,
 gid: ?std.posix.gid_t = null,
 mode: std.posix.mode_t = 0o660,
 
-pub fn postInit(self: *DomainSocket, allocator: std.mem.Allocator, accepted_uid: std.posix.uid_t) !void {
+pub fn postInit(self: *DomainSocket, allocator: std.mem.Allocator) !void {
     if (std.mem.eql(u8, self.path, "")) {
-        self.path = try std.fmt.allocPrintSentinel(
-            allocator,
-            "/run/user/{d}/net-porter.sock",
-            .{accepted_uid},
-            0,
-        );
+        self.path = try allocator.dupeZ(u8, "/run/net-porter.sock");
     }
     if (self.owner == null and self.uid == null) {
-        self.uid = accepted_uid;
+        self.uid = 0; // root owns the socket by default
     }
 }
 

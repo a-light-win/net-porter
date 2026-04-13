@@ -1,6 +1,7 @@
 {
   "domain_socket": {
     "path": "/run/test.sock",
-    "uid": 1000
+    "uid": 0,
+    "group": "root"
   }
 }

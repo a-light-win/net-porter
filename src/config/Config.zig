@@ -15,7 +15,7 @@ domain_socket: DomainSocket = DomainSocket{},
 resources: ?[]const Resource = null,
 log: LogSettings = .{},
 
-pub fn postInit(self: *Config, allocator: std.mem.Allocator, path: []const u8, accepted_uid: std.posix.uid_t) !void {
+pub fn postInit(self: *Config, allocator: std.mem.Allocator, path: []const u8) !void {
     self.config_path = path;
 
     // std.log.default_level = self.log.level;
@@ -29,7 +29,7 @@ pub fn postInit(self: *Config, allocator: std.mem.Allocator, path: []const u8, a
 
     self.setCNIPluginDir();
 
-    try self.domain_socket.postInit(allocator, accepted_uid);
+    try self.domain_socket.postInit(allocator);
 }
 
 const cni_plugin_search_paths = &[_][]const u8{
