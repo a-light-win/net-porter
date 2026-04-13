@@ -179,6 +179,20 @@ usermod -aG net-porter bob
 ```
 This will allow users in the `net-porter` group to connect to the service socket.
 
+> ℹ️ **Note**: User group changes take effect only after the user re-login. To make it effective immediately without re-login:
+> ```bash
+> # Method 1: Switch to the new group in current shell
+> newgrp net-porter
+> 
+> # Verify group membership
+> id
+> ```
+> If you have running podman processes, you also need to restart the podman user service to pick up the new group:
+> ```bash
+> systemctl --user restart podman
+> ```
+> For desktop environments, a full re-login is recommended to ensure all applications get the new group permissions.
+
 ### 3. Configure network resource
 Create CNI configuration for your macvlan network at `/etc/net-porter/cni.d/macvlan-dhcp.json`:
 ```json
