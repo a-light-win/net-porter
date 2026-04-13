@@ -41,13 +41,13 @@ pub fn load(root_allocator: Allocator, path: []const u8, cni_plugin_dir: []const
     return cni;
 }
 
-pub fn deinit(self: Cni) void {
+pub fn deinit(self: *Cni) void {
     var it = self.attachments.iterator();
     while (it.next()) |entry| {
         entry.key_ptr.*.deinit();
         entry.value_ptr.*.deinit();
     }
-    @constCast(&self.attachments).deinit();
+    self.attachments.deinit();
 
     if (self.config) |parsed| {
         parsed.deinit();
@@ -55,7 +55,7 @@ pub fn deinit(self: Cni) void {
 
     const allocator = self.arena.childAllocator();
     self.arena.deinit();
-    allocator.destroy(&self);
+    allocator.destroy(self);
 }
 
 pub fn create(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
@@ -114,14 +114,20 @@ pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Requ
         .ifname = exec_request.network_options.interface_name,
     };
 
-    if (self.attachments.fetchRemove(attachment_key)) |*kv| {
+    if (self.attachments.fetchRemove(attachment_key)) |kv| {
+        var key = kv.key;
+        var value = kv.value;
         defer {
-            kv.key.deinit();
-            kv.value.deinit();
+            key.deinit();
+            value.deinit();
         }
 
-        var attachment = kv.value;
-        try attachment.teardown(tentative_allocator, request, responser);
+        try value.teardown(tentative_allocator, request, responser);
+    } else {
+        log.warn(
+            "Attachment not found for container_id={s}, ifname={s}, skipping CNI DEL. This can happen if the server was restarted.",
+            .{ exec_request.container_id, exec_request.network_options.interface_name },
+        );
     }
 
     log.info("Teardown {s} is complete", .{request.request.exec.container_name});
@@ -154,12 +160,12 @@ const CniResult = struct {
         const allocator = response.arena.?.allocator();
 
         for (self.interfaces, 0..) |iface, index| {
-            var subnets = std.ArrayList(plugin.Subnet).init(allocator);
+            var subnets = std.ArrayList(plugin.Subnet).empty;
             for (self.ips) |ip| {
                 if (ip.interface != index) {
                     continue;
                 }
-                try subnets.append(.{
+                try subnets.append(allocator, .{
                     .ipnet = ip.address,
                     .gateway = ip.gateway,
                 });
@@ -170,7 +176,7 @@ const CniResult = struct {
                 iface.name,
                 .{
                     .mac_address = iface.mac,
-                    .subnets = try subnets.toOwnedSlice(),
+                    .subnets = try subnets.toOwnedSlice(allocator),
                 },
             );
         }
@@ -494,14 +500,15 @@ const PluginConf = struct {
         return plugin_conf;
     }
 
-    pub fn deinit(self: PluginConf) void {
-        @constCast(&self.conf).deinit();
+    pub fn deinit(self: *PluginConf) void {
+        self.conf.deinit();
 
-        if (self.result) |result| {
-            result.deinit();
+        if (self.result) |*result| {
+            const allocator = self.arena.?.allocator();
+            result.deinit(allocator);
         }
 
-        if (self.arena) |arena| {
+        if (self.arena) |*arena| {
             arena.deinit();
         }
     }
@@ -658,12 +665,14 @@ const PluginConf = struct {
     }
 
     fn stringify(self: PluginConf, stream: std.fs.File) !void {
-        // TOTO: set
-        try json.stringify(
+        var write_buffer: [4096]u8 = undefined;
+        var file_writer = stream.writer(&write_buffer);
+        try json.Stringify.value(
             json.Value{ .object = self.conf },
             .{ .whitespace = .indent_2 },
-            stream.writer(),
+            &file_writer.interface,
         );
+        try file_writer.end();
     }
 
     test "stringify() will success" {
@@ -693,7 +702,11 @@ const PluginConf = struct {
         try exec_config.stringify(out);
         out.close();
 
-        const buf = try in.reader().readAllAlloc(allocator, 1024);
+        const buf = blk: {
+            var read_buffer: [1024]u8 = undefined;
+            var file_reader = in.reader(&read_buffer);
+            break :blk try file_reader.interface.allocRemaining(allocator, .limited(1024));
+        };
         defer allocator.free(buf);
 
         std.debug.print("{s}\n", .{buf});
@@ -759,7 +772,7 @@ const PluginConf = struct {
         try process.collectOutput(allocator, &stdout, &stderr, 4096);
         const result = try process.wait();
 
-        self.result = std.ArrayList(u8).fromOwnedSlice(allocator, try stdout.toOwnedSlice(allocator));
+        self.result = std.ArrayList(u8).fromOwnedSlice(try stdout.toOwnedSlice(allocator));
         return result;
     }
 };
@@ -852,11 +865,11 @@ const Attachment = struct {
     cni_plugin_dir: []const u8,
 
     pub fn init(root_allocator: Allocator, cni_config: CniConfig, cni_plugin_dir: []const u8) !Attachment {
-        var arena = try ArenaAllocator.init(root_allocator);
+        const arena = try ArenaAllocator.init(root_allocator);
 
         var attachment = Attachment{
             .arena = arena,
-            .exec_configs = std.ArrayList(PluginConf).init(arena.allocator()),
+            .exec_configs = std.ArrayList(PluginConf).empty,
             .cni_plugin_dir = cni_plugin_dir,
         };
         errdefer attachment.deinit();
@@ -865,11 +878,12 @@ const Attachment = struct {
         return attachment;
     }
 
-    pub fn deinit(self: Attachment) void {
-        for (self.exec_configs.items) |exec_config| {
+    pub fn deinit(self: *Attachment) void {
+        for (self.exec_configs.items) |*exec_config| {
             exec_config.deinit();
         }
-        self.exec_configs.deinit();
+        const allocator = self.arena.allocator();
+        self.exec_configs.deinit(allocator);
         self.arena.deinit();
     }
 
@@ -896,7 +910,7 @@ const Attachment = struct {
         const cni_config = parsed_cni_config.value;
         defer parsed_cni_config.deinit();
 
-        const attachment = try Attachment.init(allocator, cni_config, "");
+        var attachment = try Attachment.init(allocator, cni_config, "");
         defer attachment.deinit();
 
         try std.testing.expect(attachment.exec_configs.items.len == 1);
@@ -925,7 +939,7 @@ const Attachment = struct {
         switch (cni_plugin) {
             .object => |obj| {
                 const exec_config = try PluginConf.init(allocator, cni_config, obj);
-                try self.exec_configs.append(exec_config);
+                try self.exec_configs.append(allocator, exec_config);
             },
             else => return,
         }
@@ -1013,10 +1027,10 @@ const Attachment = struct {
         try env_map.put("CNI_IFNAME", exec_request.network_options.interface_name);
         try env_map.put("CNI_PATH", self.cni_plugin_dir);
 
-        var args = std.ArrayList(u8).init(allocator);
-        try args.appendSlice("IgnoreUnknown=true");
-        try args.appendSlice(";K8S_POD_NAME=");
-        try args.appendSlice(exec_request.container_name);
+        var args = std.ArrayList(u8).empty;
+        try args.appendSlice(allocator, "IgnoreUnknown=true");
+        try args.appendSlice(allocator, ";K8S_POD_NAME=");
+        try args.appendSlice(allocator, exec_request.container_name);
         try env_map.put("CNI_ARGS", args.items);
 
         return env_map;
@@ -1034,10 +1048,10 @@ const Attachment = struct {
 
     test "cni_plugin_binary() should return a valid path" {
         const allocator = std.testing.allocator;
-        const attachment = Attachment{
+        var attachment = Attachment{
             .arena = try ArenaAllocator.init(allocator),
             .cni_plugin_dir = "/path/to/cni/plugins",
-            .exec_configs = std.ArrayList(PluginConf).init(allocator),
+            .exec_configs = std.ArrayList(PluginConf).empty,
         };
         defer attachment.deinit();
         const bin = try attachment.cni_plugin_binary(allocator, "macvlan");

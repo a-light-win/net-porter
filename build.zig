@@ -23,19 +23,24 @@ pub fn build(b: *std.Build) void {
     const zigcli_pkg = b.dependency("cli", .{ .target = target });
     const zigcli_mod = zigcli_pkg.module("cli");
 
-    const exe = b.addExecutable(.{
-        .name = "net-porter",
+    const exe_root_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zig-cli", .module = zigcli_mod },
+        },
     });
-    exe.linkLibC();
 
-    exe.root_module.addImport("zig-cli", zigcli_mod);
+    const exe = b.addExecutable(.{
+        .name = "net-porter",
+        .root_module = exe_root_mod,
+    });
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
-    // step when running `zig build`).
+    // step when running "zig build").
     b.installArtifact(exe);
 
     // This *creates* a Run step in the build graph, to be executed when another
@@ -61,13 +66,19 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const exe_unit_tests = b.addTest(.{
+    const test_root_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zig-cli", .module = zigcli_mod },
+        },
     });
 
-    exe_unit_tests.linkLibC();
+    const exe_unit_tests = b.addTest(.{
+        .root_module = test_root_mod,
+    });
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 

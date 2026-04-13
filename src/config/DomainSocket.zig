@@ -15,10 +15,11 @@ mode: std.posix.mode_t = 0o660,
 
 pub fn postInit(self: *DomainSocket, allocator: std.mem.Allocator, accepted_uid: std.posix.uid_t) !void {
     if (std.mem.eql(u8, self.path, "")) {
-        self.path = try std.fmt.allocPrintZ(
+        self.path = try std.fmt.allocPrintSentinel(
             allocator,
             "/run/user/{d}/net-porter.sock",
             .{accepted_uid},
+            0,
         );
     }
     if (self.owner == null and self.uid == null) {
@@ -112,7 +113,7 @@ fn setOwner(path: [:0]const u8, uid: ?std.posix.uid_t, gid: ?std.posix.gid_t) vo
     if (ret_chown != 0) {
         const err = std.posix.errno(ret_chown);
         std.log.warn(
-            "Failed to set socket owner: file: {s}, error: {d}",
+            "Failed to set socket owner: file: {s}, error: {s}",
             .{ path, @tagName(err) },
         );
     }

@@ -4,17 +4,20 @@ const json = std.json;
 pub const Parsed = json.Parsed;
 pub const max_json_size = 16 * 1024;
 
-const stringify_options = json.StringifyOptions{
+const stringify_options = json.Stringify.Options{
     .whitespace = .indent_2,
     .emit_null_optional_fields = false,
 };
 
 pub fn stringifyToStdout(value: anytype) !void {
-    return stringify(value, std.io.getStdOut().writer());
+    var write_buffer: [4096]u8 = undefined;
+    var file_writer = std.fs.File.stdout().writer(&write_buffer);
+    try json.Stringify.value(value, stringify_options, &file_writer.interface);
+    try file_writer.end();
 }
 
-pub fn stringify(value: anytype, out_stream: anytype) !void {
-    return json.stringify(value, stringify_options, out_stream);
+pub fn stringify(value: anytype, out_writer: *std.io.Writer) !void {
+    return json.Stringify.value(value, stringify_options, out_writer);
 }
 
 const loose_parse_options = json.ParseOptions{

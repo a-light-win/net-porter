@@ -9,6 +9,11 @@ pub const version = "0.4.0-rc.1";
 pub const max_request_size = 16 * 1024;
 pub const max_response_size = 16 * 1024;
 
+const stringify_options = json.Stringify.Options{
+    .whitespace = .indent_2,
+    .emit_null_optional_fields = false,
+};
+
 const PluginAction = enum {
     create,
     setup,
@@ -85,8 +90,7 @@ pub const Request = struct {
 };
 
 test "Request can stringify and parsed" {
-    var buffer: [1024]u8 = undefined;
-    var source = std.io.StreamSource{ .buffer = std.io.fixedBufferStream(&buffer) };
+    const test_allocator = std.testing.allocator;
 
     const request = Request{
         .action = PluginAction.setup,
@@ -107,11 +111,11 @@ test "Request can stringify and parsed" {
             },
         },
     };
-    try json.stringify(request, .{ .whitespace = .indent_2 }, source.writer());
-    // std.debug.print("{s}\n", .{buffer[0..source.buffer.pos]});
-    try std.testing.expect(source.buffer.pos != 0);
+    const output = try json.Stringify.valueAlloc(test_allocator, request, stringify_options);
+    defer test_allocator.free(output);
+    try std.testing.expect(output.len != 0);
 
-    const parsed = try json.parseFromSlice(Request, std.testing.allocator, source.buffer.getWritten(), .{});
+    const parsed = try json.parseFromSlice(Request, test_allocator, output, .{});
     defer parsed.deinit();
     try std.testing.expectEqualSlices(u8, "test-resource", parsed.value.resource());
     try std.testing.expectEqualSlices(u8, "test-container", parsed.value.requestExec().container_name);
@@ -137,9 +141,6 @@ pub const Subnet = struct {
 test "Response can stringify and parsed" {
     const allocator = std.testing.allocator;
 
-    var buffer: [1024]u8 = undefined;
-    var source = std.io.StreamSource{ .buffer = std.io.fixedBufferStream(&buffer) };
-
     var response = Response{
         .dns_search_domains = &[_][]const u8{"test-domain"},
         .interfaces = json.ArrayHashMap(Interface){},
@@ -153,17 +154,14 @@ test "Response can stringify and parsed" {
         },
     });
 
-    try json.stringify(
-        response,
-        .{ .whitespace = .indent_2 },
-        source.writer(),
-    );
-    try std.testing.expect(source.buffer.pos != 0);
+    const output = try json.Stringify.valueAlloc(allocator, response, stringify_options);
+    defer allocator.free(output);
+    try std.testing.expect(output.len != 0);
 
     const parsed = try json.parseFromSlice(
         Response,
         allocator,
-        source.buffer.getWritten(),
+        output,
         .{ .ignore_unknown_fields = true },
     );
     defer parsed.deinit();
@@ -184,15 +182,15 @@ pub const ErrorResponse = struct {
 };
 
 allocator: std.mem.Allocator,
-stream_in: *std.io.StreamSource,
-stream_out: *std.io.StreamSource,
+stdin_file: std.fs.File,
+stdout_file: std.fs.File,
 namespace_path: []const u8 = undefined,
 
 pub fn defaultNetavarkPlugin() NetavarkPlugin {
     return NetavarkPlugin{
         .allocator = std.heap.page_allocator,
-        .stream_in = @constCast(&std.io.StreamSource{ .file = std.io.getStdIn() }),
-        .stream_out = @constCast(&std.io.StreamSource{ .file = std.io.getStdOut() }),
+        .stdin_file = std.fs.File.stdin(),
+        .stdout_file = std.fs.File.stdout(),
     };
 }
 
@@ -206,14 +204,10 @@ pub fn printInfo(self: *NetavarkPlugin) !void {
 }
 
 fn write(self: *NetavarkPlugin, message: anytype) !void {
-    try json.stringify(
-        message,
-        .{
-            .whitespace = .indent_2,
-            .emit_null_optional_fields = false,
-        },
-        self.stream_out.writer(),
-    );
+    var write_buffer: [4096]u8 = undefined;
+    var file_writer = self.stdout_file.writer(&write_buffer);
+    try json.Stringify.value(message, stringify_options, &file_writer.interface);
+    try file_writer.end();
 }
 
 fn writeError(self: *NetavarkPlugin, comptime fmt: []const u8, args: anytype) !void {
@@ -224,18 +218,17 @@ fn writeError(self: *NetavarkPlugin, comptime fmt: []const u8, args: anytype) !v
 
 test "printInfo()" {
     const test_allocator = std.testing.allocator;
-    var buffer: [1024]u8 = undefined;
-    var source = std.io.StreamSource{ .buffer = std.io.fixedBufferStream(&buffer) };
 
-    var plugin = NetavarkPlugin{
-        .allocator = test_allocator,
-        .stream_in = &source,
-        .stream_out = &source,
+    // Use valueAlloc to test serialization
+    const info = PluginInfo{
+        .name = name,
+        .version = version,
+        .api_version = "1.0.0",
+        .description = "A netavark plugin to create host network interface into the rootless container",
     };
-    try plugin.printInfo();
-
-    const output = source.buffer.getWritten();
-    try std.testing.expect(source.buffer.pos != 0);
+    const output = try json.Stringify.valueAlloc(test_allocator, info, stringify_options);
+    defer test_allocator.free(output);
+    try std.testing.expect(output.len != 0);
 
     const parsed = try json.parseFromSlice(
         PluginInfo,
@@ -341,7 +334,9 @@ fn validateNetwork(self: *NetavarkPlugin, network: Network) bool {
 }
 
 fn getRequest(self: *NetavarkPlugin) ![]const u8 {
-    return self.stream_in.reader().readAllAlloc(self.allocator, max_request_size);
+    var read_buffer: [4096]u8 = undefined;
+    var file_reader = self.stdin_file.reader(&read_buffer);
+    return try file_reader.interface.allocRemaining(self.allocator, .limited(max_request_size));
 }
 
 fn sendRequest(self: *NetavarkPlugin, socket_path: [:0]const u8, request: *const Request) !void {
@@ -355,29 +350,34 @@ fn sendRequest(self: *NetavarkPlugin, socket_path: [:0]const u8, request: *const
     };
     defer stream.close();
 
-    json.stringify(
-        request,
-        .{
-            .whitespace = .indent_2,
-            .emit_null_optional_fields = false,
-        },
-        stream.writer(),
-    ) catch |err| {
-        try self.writeError("Failed to send request to domain socket {s}: {s}", .{ socket_path, @errorName(err) });
-        return error.AlreadyHandled;
-    };
+    {
+        var write_buffer: [4096]u8 = undefined;
+        var stream_writer = stream.writer(&write_buffer);
+        json.Stringify.value(request, stringify_options, &stream_writer.interface) catch |err| {
+            try self.writeError("Failed to send request to domain socket {s}: {s}", .{ socket_path, @errorName(err) });
+            return error.AlreadyHandled;
+        };
+        try stream_writer.interface.flush();
+    }
 
     try std.posix.shutdown(stream.handle, .send);
 
-    const buf = stream.reader().readAllAlloc(
+    var read_buffer: [4096]u8 = undefined;
+    var stream_reader = stream.reader(&read_buffer);
+    const buf = stream_reader.interface().allocRemaining(
         self.allocator,
-        max_response_size,
+        .limited(max_response_size),
     ) catch |err| {
         try self.writeError("Failed to read response from domain socket {s}: {s}", .{ socket_path, @errorName(err) });
         return error.AlreadyHandled;
     };
 
-    _ = try self.stream_out.writer().write(buf);
+    {
+        var write_buffer: [4096]u8 = undefined;
+        var out_writer = self.stdout_file.writer(&write_buffer);
+        _ = try out_writer.interface.write(buf);
+        try out_writer.end();
+    }
 
     const parsed_response = json.parseFromSlice(
         ErrorResponse,

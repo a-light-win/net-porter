@@ -27,12 +27,12 @@ pub fn init(root_allocator: Allocator, config: Config) Allocator.Error!CniManage
     };
 }
 
-pub fn deinit(self: CniManager) void {
+pub fn deinit(self: *CniManager) void {
     var plugin_it = self.cni_plugins.valueIterator();
     while (plugin_it.next()) |plugin| {
         plugin.*.deinit();
     }
-    @constCast(&self.cni_plugins).deinit();
+    self.cni_plugins.deinit();
 
     self.arena.deinit();
 }

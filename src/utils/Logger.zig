@@ -2,11 +2,20 @@ const std = @import("std");
 const LogSettings = @import("LogSettings.zig");
 const Logger = @This();
 
-const LogBufferedWriter = std.io.BufferedWriter(8192, std.fs.File.Writer);
-
-info_writer: LogBufferedWriter,
-error_writer: LogBufferedWriter,
+info_writer: std.fs.File.Writer = undefined,
+error_writer: std.fs.File.Writer = undefined,
+info_buffer: [4096]u8 = undefined,
+error_buffer: [4096]u8 = undefined,
+initialized: bool = false,
 log_settings: ?LogSettings = null,
+
+fn ensureInitialized(self: *Logger) void {
+    if (!self.initialized) {
+        self.info_writer = std.fs.File.stdout().writer(&self.info_buffer);
+        self.error_writer = std.fs.File.stderr().writer(&self.error_buffer);
+        self.initialized = true;
+    }
+}
 
 pub fn log(
     logger: *Logger,
@@ -15,24 +24,23 @@ pub fn log(
     comptime format: []const u8,
     args: anytype,
 ) void {
+    logger.ensureInitialized();
+
     if (!logger.logEnabled(message_level, scope)) {
         return;
     }
 
     const level_txt = comptime message_level.asText();
     const scope_txt = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
-    var bufferedWriter = switch (message_level) {
-        .err => logger.error_writer,
-        .warn => logger.error_writer,
-        .info => logger.info_writer,
-        .debug => logger.info_writer,
+    const writer = switch (message_level) {
+        .err, .warn => &logger.error_writer,
+        .info, .debug => &logger.info_writer,
     };
-    const writer = bufferedWriter.writer();
 
     nosuspend {
-        writer.print("{}ms ", .{std.time.milliTimestamp()}) catch return;
-        writer.print(level_txt ++ scope_txt ++ format ++ "\n", args) catch return;
-        bufferedWriter.flush() catch return;
+        writer.interface.print("{d}ms ", .{std.time.milliTimestamp()}) catch return;
+        writer.interface.print(level_txt ++ scope_txt ++ format ++ "\n", args) catch return;
+        writer.interface.flush() catch return;
     }
 }
 
@@ -53,14 +61,15 @@ test "log" {
     logger.log(.info, .not_exists, "info message", .{});
     logger.log(.warn, .not_exists, "warn message", .{});
 
-    var buf: [1024]u8 = undefined;
     {
         const f = try std.fs.cwd().openFile(infoFile.path, .{});
         defer f.close();
 
-        const len = try f.reader().readAll(&buf);
-        try std.testing.expectEqual(true, len > 0);
-        const infoLog = buf[0..len];
+        var read_buffer: [1024]u8 = undefined;
+        var file_reader = f.reader(&read_buffer);
+        const infoLog = try file_reader.interface.allocRemaining(allocator, .limited(1024));
+        defer allocator.free(infoLog);
+        try std.testing.expectEqual(true, infoLog.len > 0);
         try std.testing.expectEqual(
             true,
             std.mem.indexOf(u8, infoLog, "info message") != null,
@@ -71,8 +80,10 @@ test "log" {
         const f = try std.fs.cwd().openFile(errFile.path, .{});
         defer f.close();
 
-        const warnLen = try f.reader().readAll(&buf);
-        const warnLog = buf[0..warnLen];
+        var read_buffer: [1024]u8 = undefined;
+        var file_reader = f.reader(&read_buffer);
+        const warnLog = try file_reader.interface.allocRemaining(allocator, .limited(1024));
+        defer allocator.free(warnLog);
         try std.testing.expectEqual(
             true,
             std.mem.indexOf(u8, warnLog, "warn message") != null,
@@ -123,15 +134,13 @@ test "logEnabled" {
 }
 
 pub fn newLogger() Logger {
-    return newFileLogger(std.io.getStdOut(), std.io.getStdErr());
+    return .{};
 }
 
 pub fn newFileLogger(infoFile: std.fs.File, errorFile: std.fs.File) Logger {
-    const infoWriter = infoFile.writer();
-    const errorWriter = errorFile.writer();
-
-    return .{
-        .info_writer = LogBufferedWriter{ .unbuffered_writer = infoWriter },
-        .error_writer = LogBufferedWriter{ .unbuffered_writer = errorWriter },
-    };
+    var logger = Logger{};
+    logger.info_writer = infoFile.writer(&logger.info_buffer);
+    logger.error_writer = errorFile.writer(&logger.error_buffer);
+    logger.initialized = true;
+    return logger;
 }

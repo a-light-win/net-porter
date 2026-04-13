@@ -5,12 +5,13 @@ const Resource = @import("../config.zig").Resource;
 
 const Acl = @This();
 
+allocator: std.mem.Allocator,
 name: []const u8,
 allow_uids: ?std.ArrayList(u32) = null,
 allow_gids: ?std.ArrayList(u32) = null,
 
 pub fn fromResource(allocator: Allocator, resource: Resource) Allocator.Error!Acl {
-    var acl = Acl{ .name = resource.name };
+    var acl = Acl{ .allocator = allocator, .name = resource.name };
     try acl.init(allocator, resource);
     return acl;
 }
@@ -25,12 +26,12 @@ fn init(self: *Acl, allocator: std.mem.Allocator, resource: Resource) Allocator.
     }
 }
 
-pub fn deinit(self: Acl) void {
-    if (self.allow_uids) |uids| {
-        uids.deinit();
+pub fn deinit(self: *Acl) void {
+    if (self.allow_uids) |*uids| {
+        uids.deinit(self.allocator);
     }
-    if (self.allow_gids) |gids| {
-        gids.deinit();
+    if (self.allow_gids) |*gids| {
+        gids.deinit(self.allocator);
     }
 }
 
@@ -94,7 +95,7 @@ fn initUids(self: *Acl, allocator: Allocator, users: []const [:0]const u8) Alloc
         );
 
         if (self.allow_uids) |*uids| {
-            resolveUsers(uids, users);
+            resolveUsers(uids, allocator, users);
         }
     }
 }
@@ -140,19 +141,19 @@ test "initUids() should success if users are specified" {
     try std.testing.expectEqual(333, uids.items[1]);
 }
 
-fn resolveUsers(uids: *std.ArrayList(u32), users: []const [:0]const u8) void {
+fn resolveUsers(uids: *std.ArrayList(u32), gpa: std.mem.Allocator, users: []const [:0]const u8) void {
     for (users) |u| {
         // if the user is number, add it directly
         // otherwise, resolve the user name to uid
         if (std.fmt.parseUnsigned(u32, u, 10)) |uid| {
-            uids.append(uid) catch unreachable;
+            uids.append(gpa, uid) catch unreachable;
             continue;
         } else |e| switch (e) {
             else => {},
         }
 
         if (user.getUid(u)) |uid| {
-            uids.append(uid) catch unreachable;
+            uids.append(gpa, uid) catch unreachable;
         } else {
             std.log.warn(
                 "Failed to resolve user '{s}', ignore it.",
@@ -173,7 +174,7 @@ fn initGids(self: *Acl, allocator: Allocator, groups: []const [:0]const u8) Allo
             groups.len,
         );
         if (self.allow_gids) |*gids| {
-            resolveGroups(gids, groups);
+            resolveGroups(gids, allocator, groups);
         }
     }
 }
@@ -218,19 +219,19 @@ test "initGids() should success if groups are specified" {
     try std.testing.expectEqual(333, gids.items[1]);
 }
 
-fn resolveGroups(gids: *std.ArrayList(u32), groups: []const [:0]const u8) void {
+fn resolveGroups(gids: *std.ArrayList(u32), gpa: std.mem.Allocator, groups: []const [:0]const u8) void {
     for (groups) |g| {
         // if the group is number, add it directly
         // otherwise, resolve the group name to gid
         if (std.fmt.parseUnsigned(u32, g, 10)) |gid| {
-            gids.append(gid) catch unreachable;
+            gids.append(gpa, gid) catch unreachable;
             continue;
         } else |e| switch (e) {
             else => {},
         }
 
         if (user.getGid(g)) |gid| {
-            gids.append(gid) catch unreachable;
+            gids.append(gpa, gid) catch unreachable;
         } else {
             std.log.warn(
                 "Failed to resolve group '{s}', ignore it.",
@@ -252,9 +253,9 @@ fn contains(list: std.ArrayList(u32), value: u32) bool {
 test "contains()" {
     const allocator = std.testing.allocator;
 
-    var list = std.ArrayList(u32).init(allocator);
-    defer list.deinit();
-    list.append(1) catch unreachable;
+    var list = std.ArrayList(u32).empty;
+    defer list.deinit(allocator);
+    list.append(allocator, 1) catch unreachable;
 
     try std.testing.expectEqual(true, contains(list, 1));
     try std.testing.expectEqual(false, contains(list, 2));

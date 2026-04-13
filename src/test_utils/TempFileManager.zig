@@ -21,7 +21,7 @@ pub fn deinit(self: *TempFileManager) void {
     for (self.opened_files.items) |file| {
         file.close();
     }
-    self.opened_files.deinit();
+    self.opened_files.deinit(self.allocator);
 
     for (self.temp_files.items) |file| {
         if (self.should_clean_file) {
@@ -29,7 +29,7 @@ pub fn deinit(self: *TempFileManager) void {
         }
         self.allocator.free(file);
     }
-    self.temp_files.deinit();
+    self.temp_files.deinit(self.allocator);
 
     self.temp_dir.close();
 
@@ -47,7 +47,7 @@ pub fn tempFile(self: *TempFileManager, prefix: []const u8, subfix: []const u8) 
         .{ self.temp_dir_path, prefix, rand, subfix },
     );
     errdefer self.allocator.free(file_path);
-    try self.temp_files.append(file_path);
+    try self.temp_files.append(self.allocator, file_path);
     return file_path;
 }
 
@@ -55,7 +55,7 @@ pub fn openedFile(self: *TempFileManager, prefix: []const u8, subfix: []const u8
     const file_path = try self.tempFile(prefix, subfix);
     const f = try self.temp_dir.createFile(file_path, .{ .read = true });
     errdefer f.close();
-    try self.opened_files.append(f);
+    try self.opened_files.append(self.allocator, f);
     return .{ .path = file_path, .file = f };
 }
 
@@ -76,7 +76,7 @@ pub fn newTempFileManager(allocator: std.mem.Allocator, dir_prefix: []const u8) 
         .temp_dir_path = temp_dir_path,
         .temp_dir = temp_dir,
 
-        .temp_files = std.ArrayList([]const u8).init(allocator),
-        .opened_files = std.ArrayList(std.fs.File).init(allocator),
+        .temp_files = std.ArrayList([]const u8).empty,
+        .opened_files = std.ArrayList(std.fs.File).empty,
     };
 }

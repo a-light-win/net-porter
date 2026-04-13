@@ -125,7 +125,7 @@ fn waitSocketPathCreated(self: DhcpService, comptime max_wait: comptime_int) voi
     while (i < max_wait) : (i += 1) {
         _ = std.posix.fstatat(std.posix.AT.FDCWD, self.sock_path, 0) catch |err| switch (err) {
             error.FileNotFound => {
-                std.time.sleep(10 * std.time.ns_per_ms);
+                std.posix.nanosleep(0, 10 * std.time.ns_per_ms);
                 continue;
             },
             else => return,

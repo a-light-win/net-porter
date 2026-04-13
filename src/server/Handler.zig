@@ -40,12 +40,18 @@ pub fn handle(self: *Handler) !void {
     defer arena.deinit();
     const tentative_allocator = arena.allocator();
 
-    const client_info = try getClientInfo(&self.responser);
+    const client_info = getClientInfo(&self.responser) catch |err| {
+        log.err("Failed to get client info: {s}", .{@errorName(err)});
+        return;
+    };
 
-    const buf = stream.reader().readAllAlloc(
+    var read_buffer: [4096]u8 = undefined;
+    var stream_reader = stream.reader(&read_buffer);
+    const buf = stream_reader.interface().allocRemaining(
         tentative_allocator,
-        plugin.max_request_size,
+        .limited(plugin.max_request_size),
     ) catch |err| {
+        log.err("Failed to read request: {s}", .{@errorName(err)});
         self.responser.writeError("Failed to read request: {s}", .{@errorName(err)});
         return;
     };
@@ -56,6 +62,7 @@ pub fn handle(self: *Handler) !void {
         buf,
         .{},
     ) catch |err| {
+        log.err("Failed to parse request: {s}", .{@errorName(err)});
         self.responser.writeError("Failed to parse request: {s}", .{@errorName(err)});
         return;
     };
@@ -85,19 +92,44 @@ pub fn handle(self: *Handler) !void {
         traffic_log.debug("{s}", .{raw_request});
     }
 
-    try self.authClient(client_info, &request);
-    try self.checkNetns(client_info, &request);
+    self.authClient(client_info, &request) catch |err| {
+        log.err("Auth failed for uid={d}, gid={d}, resource={s}: {s}", .{
+            client_info.uid,
+            client_info.gid,
+            request.resource(),
+            @errorName(err),
+        });
+        return;
+    };
+
+    self.checkNetns(client_info, &request) catch |err| {
+        log.err("Netns check failed for uid={d}, netns={s}: {s}", .{
+            client_info.uid,
+            request.netns orelse "none",
+            @errorName(err),
+        });
+        return;
+    };
 
     const cni = self.cni_manager.loadCni(request.resource()) catch |err| {
+        log.err("Failed to load CNI for resource={s}: {s}", .{
+            request.resource(),
+            @errorName(err),
+        });
         self.responser.writeError("Failed to load CNI: {s}", .{@errorName(err)});
         return;
     };
 
     self.execAction(tentative_allocator, cni, request) catch |err| {
         if (!self.responser.done) {
+            log.err("Failed to execute action={s} for container={s}: {s}", .{
+                @tagName(request.action),
+                container_name,
+                @errorName(err),
+            });
             self.responser.writeError("Failed to execute action: {s}", .{@errorName(err)});
             if (@errorReturnTrace()) |trace| {
-                std.log.warn("Trace: {}", .{trace});
+                std.log.warn("Trace: {any}", .{trace});
             }
         }
     };
@@ -113,7 +145,13 @@ fn execAction(
     cni: *Cni,
     request: plugin.Request,
 ) !void {
-    try self.dhcp_service.ensureStarted();
+    // Only start DHCP service for create and setup actions.
+    // During teardown, the DHCP daemon may have crashed or the last
+    // container (catatonit) may already be gone, causing ensureStarted()
+    // to fail. Teardown should still proceed to clean up whatever it can.
+    if (request.action != .teardown) {
+        try self.dhcp_service.ensureStarted();
+    }
     switch (request.action) {
         .create => try cni.create(allocator, request, &self.responser),
         .setup => try cni.setup(allocator, request, &self.responser),
@@ -213,10 +251,11 @@ fn dumpEnv(self: Handler, allocator: std.mem.Allocator, request: plugin.Request)
 
     env_map.put(
         "CLIENT_PID",
-        std.fmt.allocPrintZ(
+        std.fmt.allocPrintSentinel(
             allocator,
             "{d}",
             .{request.process_id.?},
+            0,
         ) catch unreachable,
     ) catch unreachable;
 
@@ -234,7 +273,7 @@ fn dumpEnv(self: Handler, allocator: std.mem.Allocator, request: plugin.Request)
     }
 
     const exec_request = request.requestExec();
-    const file_path = std.fmt.allocPrintZ(
+    const file_path = std.fmt.allocPrintSentinel(
         allocator,
         "{s}/{s}-{s}.log",
         .{
@@ -242,6 +281,7 @@ fn dumpEnv(self: Handler, allocator: std.mem.Allocator, request: plugin.Request)
             exec_request.container_name,
             exec_request.container_id,
         },
+        0,
     ) catch unreachable;
     defer allocator.free(file_path);
     env_log.info("Dumping env to {s}", .{file_path});
@@ -273,14 +313,16 @@ fn dumpEnv(self: Handler, allocator: std.mem.Allocator, request: plugin.Request)
 }
 
 fn dumpToFile(allocator: std.mem.Allocator, in: std.fs.File, out: std.fs.File) void {
+    _ = allocator;
     const env_log = std.log.scoped(.dump_env);
-    const Fifo = std.fifo.LinearFifo(u8, .Dynamic);
 
-    var fifo: Fifo = Fifo.init(allocator);
-    fifo.ensureTotalCapacity(4096) catch unreachable;
-    defer fifo.deinit();
+    var read_buffer: [4096]u8 = undefined;
+    var write_buffer: [4096]u8 = undefined;
+    var file_reader = in.reader(&read_buffer);
+    var file_writer = out.writer(&write_buffer);
 
-    fifo.pump(in.reader(), out.writer()) catch |err| {
+    _ = file_reader.interface.stream(&file_writer.interface, .unlimited) catch |err| {
         env_log.warn("Failed to dump env: {s}", .{@errorName(err)});
     };
+    file_writer.end() catch {};
 }

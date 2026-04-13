@@ -9,6 +9,10 @@ log_response: bool = false,
 done: bool = false,
 is_error: bool = false,
 
+const stringify_options = json.Stringify.Options{
+    .whitespace = .indent_2,
+};
+
 pub fn writeError(self: *Responser, comptime fmt: []const u8, args: anytype) void {
     if (self.done) {
         log.info("Response already sent, ignoring error: {s}", .{fmt});
@@ -24,13 +28,18 @@ pub fn writeError(self: *Responser, comptime fmt: []const u8, args: anytype) voi
 
     log.warn("{s}", .{error_msg});
 
-    json.stringify(
+    var write_buffer: [4096]u8 = undefined;
+    var stream_writer = self.stream.writer(&write_buffer);
+    json.Stringify.value(
         .{ .@"error" = error_msg },
-        .{ .whitespace = .indent_2 },
-        self.stream.writer(),
+        stringify_options,
+        &stream_writer.interface,
     ) catch |err| {
         log.warn("Failed to send error message: {s}", .{@errorName(err)});
         return;
+    };
+    stream_writer.interface.flush() catch |err| {
+        log.warn("Failed to flush error message: {s}", .{@errorName(err)});
     };
 
     self.is_error = true;
@@ -51,22 +60,31 @@ pub fn write(self: *Responser, response: anytype) void {
         return;
     }
 
-    json.stringify(
+    var write_buffer: [4096]u8 = undefined;
+    var stream_writer = self.stream.writer(&write_buffer);
+    json.Stringify.value(
         response,
-        .{ .whitespace = .indent_2 },
-        self.stream.writer(),
+        stringify_options,
+        &stream_writer.interface,
     ) catch |err| {
         self.writeError("Failed to format response: {s}", .{@errorName(err)});
+        return;
+    };
+    stream_writer.interface.flush() catch |err| {
+        self.writeError("Failed to flush response: {s}", .{@errorName(err)});
         return;
     };
 
     self.done = true;
 
     if (self.log_response) {
-        json.stringify(
+        var log_buffer: [4096]u8 = undefined;
+        var file_writer = std.fs.File.stdout().writer(&log_buffer);
+        json.Stringify.value(
             response,
-            .{ .whitespace = .indent_2 },
-            std.io.getStdOut().writer(),
+            stringify_options,
+            &file_writer.interface,
         ) catch {};
+        file_writer.end() catch {};
     }
 }

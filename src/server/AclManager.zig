@@ -24,18 +24,19 @@ pub fn init(root_allocator: Allocator, config: Config, accepted_uid: std.posix.u
             acl_manager.acls = try std.ArrayList(Acl).initCapacity(allocator, resources.len);
         }
         for (resources) |resource| {
-            try acl_manager.acls.?.append(try Acl.fromResource(allocator, resource));
+            try acl_manager.acls.?.append(allocator, try Acl.fromResource(allocator, resource));
         }
     }
     return acl_manager;
 }
 
-pub fn deinit(self: AclManager) void {
-    if (self.acls) |acls| {
-        for (acls.items) |acl| {
+pub fn deinit(self: *AclManager) void {
+    const allocator = self.arena.allocator();
+    if (self.acls) |*acls| {
+        for (acls.items) |*acl| {
             acl.deinit();
         }
-        acls.deinit();
+        acls.deinit(allocator);
     }
 
     self.arena.deinit();
@@ -58,7 +59,7 @@ pub fn isAllowed(self: AclManager, name: []const u8, uid: u32, gid: u32) bool {
 test "isAllowed" {
     const Resource = @import("../config.zig").Resource;
     const allocator = std.testing.allocator;
-    const runtime = try init(allocator, Config{
+    var runtime = try init(allocator, Config{
         .resources = &[_]Resource{
             Resource{ .name = "test", .allow_users = &[_][:0]const u8{"root"} },
         },
