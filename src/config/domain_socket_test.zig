@@ -9,11 +9,11 @@ test "postInit sets path and uid correctly" {
         .uid = null,
     };
 
-    try ds.postInit(gpa, 1000);
+    try ds.postInit(gpa);
     defer gpa.free(ds.path);
 
-    try std.testing.expect(std.mem.eql(u8, ds.path, "/run/user/1000/net-porter.sock"));
-    try std.testing.expect(ds.uid == 1000);
+    try std.testing.expect(std.mem.eql(u8, ds.path, "/run/net-porter.sock"));
+    try std.testing.expect(ds.uid == 0); // Default to root
 }
 
 test "postInit does not change path if already set" {
@@ -25,10 +25,10 @@ test "postInit does not change path if already set" {
         .uid = null,
     };
 
-    try ds.postInit(gpa, 1000);
+    try ds.postInit(gpa);
 
     try std.testing.expect(std.mem.eql(u8, ds.path, "/custom/path.sock"));
-    try std.testing.expect(ds.uid == 1000);
+    try std.testing.expect(ds.uid == 0); // Default to root
 }
 
 test "postInit does not change uid if already set" {
@@ -39,9 +39,9 @@ test "postInit does not change uid if already set" {
         .uid = 2000,
     };
 
-    try ds.postInit(gpa, 1000);
+    try ds.postInit(gpa);
 
-    try std.testing.expect(ds.uid == 2000);
+    try std.testing.expect(ds.uid == 2000); // Remains 2000
 }
 
 test "postInit does not change uid if owner is already set" {
@@ -51,8 +51,8 @@ test "postInit does not change uid if owner is already set" {
         .owner = "root",
         .uid = null,
     };
-    try ds.postInit(gpa, 1000);
-    try std.testing.expect(ds.uid == null);
+    try ds.postInit(gpa);
+    try std.testing.expect(ds.uid == null); // Owner set, uid remains null
 }
 
 test "connect() will failed if the socket path not exists" {

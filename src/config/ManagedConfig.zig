@@ -77,7 +77,6 @@ test "load() should return config if the config file exists" {
     const managed_config = try ManagedConfig.load(
         allocator,
         "src/config/tests/config.json",
-        0,
     );
     defer managed_config.deinit();
 
