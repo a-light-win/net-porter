@@ -56,18 +56,106 @@ pacman -U /path/to/net-porter.pkg.tar.zst
 
 ### Build from source
 If you want to build and package `net-porter` from source,
-you may need following program installed:
+you have two options:
 
+#### Option 1: Containerized build (recommended)
+This method uses podman to run all build steps inside a consistent container environment, no need to install dependencies locally:
+
+**Dependencies required:**
 - [git](https://git-scm.com/)
-- [just](https://github.com/casey/just)
-- [podman](https://github.com/containers/podman)
-- [Zig](https://ziglang.org/) >= 0.15.2
+- [just](https://github.com/casey/just) (task runner)
+- [podman](https://github.com/containers/podman) (container runtime)
 
-After install the above program, running following command to build the package:
+Build all packages:
 ```bash
 just pack-all
 ```
-And you will find the packages in the `zig-out/` directory.
+Packages will be output to `zig-out/` directory.
+
+#### Option 2: Local build
+If you want to build directly on your host:
+
+**Dependencies required:**
+- [Zig](https://ziglang.org/) >= 0.15.2 (compiler)
+- [nfpm](https://nfpm.goreleaser.com/) >= 2.30 (packaging tool, required only for building packages)
+- git
+- just
+
+##### 1. Compile binary only
+```bash
+# Compile debug binary
+zig build
+
+# Compile optimized release binary
+zig build -Doptimize=ReleaseSafe
+
+# Output binary will be at: zig-out/bin/net-porter
+```
+
+Build for specific architecture:
+```bash
+# Build for x86_64
+zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
+
+# Build for aarch64
+zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux-musl
+```
+
+##### 2. Run tests
+```bash
+zig build test
+```
+
+##### 3. Build packages
+```bash
+# Build deb package
+just pack-deb
+
+# Build rpm package
+just pack-rpm
+
+# Build archlinux package
+just pack-arch
+```
+
+All packages will be placed in `zig-out/` directory.
+
+#### Build options
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-Doptimize=Debug` | Unoptimized build with debug symbols | ✓ |
+| `-Doptimize=ReleaseSafe` | Optimized build with runtime safety checks | Recommended for production |
+| `-Doptimize=ReleaseFast` | Maximum optimized build without runtime safety checks | |
+| `-Dtarget=<triplet>` | Cross compile to target architecture | Native host |
+| `-Dstrip=true` | Strip debug symbols from binary | `false` |
+
+## Project Structure
+```
+net-porter/
+├── src/
+│   ├── main.zig                  # Program entry point
+│   ├── server/                   # Server implementation
+│   │   ├── Server.zig            # Server core
+│   │   ├── Handler.zig           # Request handler
+│   │   ├── AclManager.zig        # ACL management
+│   │   └── Acl.zig               # ACL validation
+│   ├── cni/                      # CNI integration
+│   │   ├── Cni.zig               # CNI execution logic
+│   │   ├── CniManager.zig        # CNI config management
+│   │   ├── DhcpService.zig       # Per-user DHCP service
+│   │   └── DhcpManager.zig       # DHCP service manager
+│   ├── config/                   # Configuration
+│   │   ├── Config.zig            # Config struct
+│   │   ├── ManagedConfig.zig     # Config loader
+│   │   └── DomainSocket.zig      # Socket configuration
+│   ├── plugin/                   # Netavark plugin implementation
+│   └── utils/                    # Utilities
+├── misc/
+│   ├── systemd/                  # Systemd service files
+│   └── nfpm/                     # nfpm packaging configuration
+├── build.zig                     # Zig build configuration
+└── justfile                      # Just task definitions
+```
 
 ## Quick Start
 
