@@ -191,6 +191,15 @@ This will allow users in the `net-porter` group to connect to the service socket
 > ```bash
 > systemctl --user restart podman
 > ```
+> ⚠️ **Important**: `catatonit` (podman infra container init process) will retain the old group permissions until they are restarted. If you have running containers and want the new group to take effect for them:
+> ```bash
+> # Stop all containers
+> podman stop -a
+> # Kill all existing catatonit processes
+> pkill -u $USER catatonit
+> # Restart podman service
+> systemctl --user restart podman
+> ```
 > For desktop environments, a full re-login is recommended to ensure all applications get the new group permissions.
 
 ### 3. Configure network resource
