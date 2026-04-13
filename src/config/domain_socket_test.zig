@@ -90,10 +90,18 @@ test "connect() will success if the socket path exists" {
     var server = Server{ .socket = socket, .server = s };
 
     const thread = try std.Thread.spawn(.{}, Server.serve, .{&server});
-    // Wait a little for server to be ready to accept connections
-    std.os.nanosleep(0, 50 * std.time.ns_per_ms) catch {};
-
-    const conn = try server.socket.connect();
+    // Retry connecting a few times to avoid race condition
+    var conn: std.net.Stream = undefined;
+    var attempts: u8 = 0;
+    while (attempts < 5) : (attempts += 1) {
+        conn = server.socket.connect() catch |err| {
+            if (attempts == 4) return err;
+            // Yield CPU to give server time to start
+            std.Thread.yield() catch {};
+            continue;
+        };
+        break;
+    }
     try std.testing.expectEqual(std.net.Stream, @TypeOf(conn));
     conn.close();
 
