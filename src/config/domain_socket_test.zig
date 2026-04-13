@@ -91,7 +91,7 @@ test "connect() will success if the socket path exists" {
 
     const thread = try std.Thread.spawn(.{}, Server.serve, .{&server});
     // Wait a little for server to be ready to accept connections
-    std.time.sleep(10 * std.time.ns_per_ms);
+    std.time.sleep(50 * std.time.ns_per_ms);
 
     const conn = try server.socket.connect();
     try std.testing.expectEqual(std.net.Stream, @TypeOf(conn));
