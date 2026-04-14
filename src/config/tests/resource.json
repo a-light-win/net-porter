@@ -1,4 +1,14 @@
 {
   "name": "test",
-  "allow_users": ["root", "1000"]
+  "interface": {
+    "type": "macvlan",
+    "master": "eth0"
+  },
+  "ipam": {
+    "type": "dhcp"
+  },
+  "acl": [
+    { "user": "root" },
+    { "user": "1000" }
+  ]
 }

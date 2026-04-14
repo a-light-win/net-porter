@@ -120,6 +120,20 @@ pub fn handle(self: *Handler) !void {
         return;
     };
 
+    // Static IP validation for setup action
+    if (request.action == .setup) {
+        if (self.acl_manager.isStaticResource(request.resource())) {
+            self.validateStaticIp(client_info.uid, &request) catch |err| {
+                log.err("Static IP validation failed for uid={d}, resource={s}: {s}", .{
+                    client_info.uid,
+                    request.resource(),
+                    @errorName(err),
+                });
+                return;
+            };
+        }
+    }
+
     self.execAction(tentative_allocator, cni, request, client_info.uid) catch |err| {
         if (!self.responser.done) {
             log.err("Failed to execute action={s} for container={s}: {s}", .{
@@ -146,12 +160,14 @@ fn execAction(
     request: plugin.Request,
     caller_uid: u32,
 ) !void {
-    // Only start DHCP service for create and setup actions.
+    // Only start DHCP service for DHCP resources (not static).
     // During teardown, the DHCP daemon may have crashed or the last
     // container (catatonit) may already be gone, causing ensureStarted()
     // to fail. Teardown should still proceed to clean up whatever it can.
     if (request.action != .teardown) {
-        try self.dhcp_manager.ensureStarted(caller_uid);
+        if (!self.acl_manager.isStaticResource(request.resource())) {
+            try self.dhcp_manager.ensureStarted(caller_uid);
+        }
     }
     switch (request.action) {
         .create => try cni.create(allocator, request, &self.responser),
@@ -222,6 +238,28 @@ fn checkNetns(self: *Handler, client_info: ClientInfo, request: *const plugin.Re
             self.responser.writeError("Netns file {s} doesn't belong to client", .{netns});
             return error.AccessDenied;
         }
+    }
+}
+
+fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !void {
+    const exec_request = request.requestExec();
+    const static_ips = exec_request.network_options.static_ips orelse {
+        self.responser.writeError("Static IP is required for resource '{s}'", .{request.resource()});
+        return error.StaticIpRequired;
+    };
+    if (static_ips.len == 0) {
+        self.responser.writeError("Static IP is required for resource '{s}'", .{request.resource()});
+        return error.StaticIpRequired;
+    }
+
+    const requested_ip = static_ips[0];
+    if (!self.acl_manager.isIpAllowed(request.resource(), uid, requested_ip)) {
+        self.responser.writeError("IP '{s}' is not allowed for uid={d} on resource '{s}'", .{
+            requested_ip,
+            uid,
+            request.resource(),
+        });
+        return error.IpNotAllowed;
     }
 }
 

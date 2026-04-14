@@ -3,42 +3,68 @@ const json = std.json;
 const log = std.log.scoped(.cni);
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
+const config_mod = @import("../config.zig");
 const plugin = @import("../plugin.zig");
 const Responser = plugin.Responser;
 const managed_type = @import("managed_type.zig");
 const Cni = @This();
 
-const max_cni_config_size = 16 * 1024;
-
 arena: ArenaAllocator,
 cni_plugin_dir: []const u8,
-config: ?json.Parsed(CniConfig) = null,
+config: CniConfig,
+ipam_config: config_mod.Ipam,
 
 mutex: std.Thread.Mutex = std.Thread.Mutex{},
 user_sessions: UserAttachmentMap,
 
-pub fn load(root_allocator: Allocator, path: []const u8, cni_plugin_dir: []const u8) !*Cni {
+pub fn init(root_allocator: Allocator, resource: config_mod.Resource, cni_plugin_dir: []const u8) !*Cni {
     var arena = try ArenaAllocator.init(root_allocator);
     errdefer arena.deinit();
 
-    const file = try std.fs.cwd().openFile(path, .{});
-
     const allocator = arena.allocator();
-    const buf = try file.readToEndAlloc(allocator, max_cni_config_size);
 
-    const parsed = try json.parseFromSlice(CniConfig, allocator, buf, .{});
-    errdefer parsed.deinit();
-
-    try parsed.value.validate();
+    const cni_config = try buildCniConfigFromResource(allocator, resource);
+    try cni_config.validate();
 
     const cni = try allocator.create(Cni);
     cni.* = Cni{
         .arena = arena,
         .cni_plugin_dir = cni_plugin_dir,
-        .config = parsed,
+        .config = cni_config,
+        .ipam_config = resource.ipam,
         .user_sessions = UserAttachmentMap.init(allocator),
     };
     return cni;
+}
+
+fn buildCniConfigFromResource(allocator: Allocator, resource: config_mod.Resource) !CniConfig {
+    // Build ipam object
+    var ipam_obj = json.ObjectMap.init(allocator);
+    try ipam_obj.put("type", .{ .string = resource.ipam.type });
+
+    // Build plugin object
+    var plugin_obj = json.ObjectMap.init(allocator);
+    try plugin_obj.put("type", .{ .string = resource.interface.type });
+    try plugin_obj.put("master", .{ .string = resource.interface.master });
+
+    if (resource.interface.mode) |mode| {
+        try plugin_obj.put("mode", .{ .string = mode });
+    }
+    if (resource.interface.mtu) |mtu| {
+        try plugin_obj.put("mtu", .{ .integer = @intCast(mtu) });
+    }
+
+    try plugin_obj.put("ipam", .{ .object = ipam_obj });
+
+    // Build plugins array
+    var plugins = json.Array.initCapacity(allocator, 1) catch unreachable;
+    plugins.appendAssumeCapacity(.{ .object = plugin_obj });
+
+    return CniConfig{
+        .cniVersion = "1.0.0",
+        .name = resource.name,
+        .plugins = .{ .array = plugins },
+    };
 }
 
 pub fn deinit(self: *Cni) void {
@@ -47,10 +73,6 @@ pub fn deinit(self: *Cni) void {
         entry.value_ptr.*.deinit();
     }
     self.user_sessions.deinit();
-
-    if (self.config) |parsed| {
-        parsed.deinit();
-    }
 
     const allocator = self.arena.childAllocator();
     self.arena.deinit();
@@ -84,8 +106,9 @@ fn loadAttachment(self: *Cni, session: *UserSession, request: plugin.Request) !*
     if (!result.found_existing) {
         result.value_ptr.* = try Attachment.init(
             allocator,
-            self.config.?.value,
+            self.config,
             self.cni_plugin_dir,
+            self.ipam_config,
         );
     }
     return result.value_ptr;
@@ -260,15 +283,6 @@ fn responseResult(allocator: Allocator, responser: *Responser, stdout: std.Array
     defer managed_response.deinit();
 
     responser.write(managed_response.v);
-}
-
-fn parseExecRequest(allocator: Allocator, request: json.Value) !json.Parsed(plugin.NetworkPluginExec) {
-    return try json.parseFromValue(
-        plugin.NetworkPluginExec,
-        allocator,
-        request,
-        .{ .ignore_unknown_fields = true },
-    );
 }
 
 const CniConfig = struct {
@@ -643,6 +657,68 @@ const PluginConf = struct {
         return false;
     }
 
+    pub fn isStatic(self: PluginConf) bool {
+        if (self.conf.get("ipam")) |ipam| {
+            switch (ipam) {
+                .object => |ipam_obj| {
+                    if (ipam_obj.get("type")) |ipam_type| {
+                        switch (ipam_type) {
+                            .string => |type_str| {
+                                return std.mem.eql(u8, "static", type_str);
+                            },
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    fn setStaticIp(self: *PluginConf, ip: []const u8, ipam_config: config_mod.Ipam) !void {
+        const allocator = self.arena.?.allocator();
+
+        // Extract prefix length from subnet (e.g., "192.168.1.0/24" -> "24")
+        const subnet = ipam_config.subnet orelse return error.InvalidSubnet;
+        const slash_pos = std.mem.lastIndexOf(u8, subnet, "/") orelse return error.InvalidSubnet;
+        const prefix = subnet[slash_pos + 1 ..];
+
+        // Build address string with prefix
+        const address = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ip, prefix });
+
+        // Build address object
+        var addr_obj = json.ObjectMap.init(allocator);
+        try addr_obj.put("address", .{ .string = address });
+        if (ipam_config.gateway) |gw| {
+            try addr_obj.put("gateway", .{ .string = gw });
+        }
+
+        // Inject into ipam
+        if (self.conf.getPtr("ipam")) |ipam| {
+            switch (ipam.*) {
+                .object => |*ipam_obj| {
+                    // Set addresses
+                    var addresses = json.Array.initCapacity(allocator, 1) catch unreachable;
+                    addresses.appendAssumeCapacity(.{ .object = addr_obj });
+                    try ipam_obj.put("addresses", .{ .array = addresses });
+
+                    // Set routes if present
+                    if (ipam_config.routes) |rts| {
+                        var routes_arr = json.Array.initCapacity(allocator, rts.len) catch unreachable;
+                        for (rts) |r| {
+                            var route_obj = json.ObjectMap.init(allocator);
+                            try route_obj.put("dst", .{ .string = r.dst });
+                            routes_arr.appendAssumeCapacity(.{ .object = route_obj });
+                        }
+                        try ipam_obj.put("routes", .{ .array = routes_arr });
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
     test "isDhcp() will return false if the ipam type is not dhcp" {
         const root_allocator = std.testing.allocator;
         var arena = try ArenaAllocator.init(root_allocator);
@@ -681,6 +757,32 @@ const PluginConf = struct {
         try plugin_conf.conf.getPtr("ipam").?.object.put("type", json.Value{ .string = "dhcp" });
 
         try std.testing.expect(plugin_conf.isDhcp());
+    }
+
+    test "isStatic() will return true if the type is static" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        const allocator = arena.allocator();
+        defer arena.deinit();
+
+        var plugin_conf = PluginConf{ .conf = json.ObjectMap.init(allocator) };
+        try plugin_conf.conf.put("ipam", json.Value{ .object = json.ObjectMap.init(allocator) });
+        try plugin_conf.conf.getPtr("ipam").?.object.put("type", json.Value{ .string = "static" });
+
+        try std.testing.expect(plugin_conf.isStatic());
+    }
+
+    test "isStatic() will return false if the type is dhcp" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        const allocator = arena.allocator();
+        defer arena.deinit();
+
+        var plugin_conf = PluginConf{ .conf = json.ObjectMap.init(allocator) };
+        try plugin_conf.conf.put("ipam", json.Value{ .object = json.ObjectMap.init(allocator) });
+        try plugin_conf.conf.getPtr("ipam").?.object.put("type", json.Value{ .string = "dhcp" });
+
+        try std.testing.expect(!plugin_conf.isStatic());
     }
 
     fn stringify(self: PluginConf, stream: std.fs.File) !void {
@@ -810,7 +912,7 @@ const AttachmentKey = struct {
     }
 
     pub fn copy(self: AttachmentKey, allocator: Allocator) !AttachmentKey {
-        return try init(allocator, self.container_id, self.ifname);
+        return try AttachmentKey.init(allocator, self.container_id, self.ifname);
     }
 
     pub fn deinit(self: AttachmentKey) void {
@@ -912,14 +1014,16 @@ const Attachment = struct {
     arena: ArenaAllocator,
     exec_configs: std.ArrayList(PluginConf),
     cni_plugin_dir: []const u8,
+    ipam_config: config_mod.Ipam,
 
-    pub fn init(root_allocator: Allocator, cni_config: CniConfig, cni_plugin_dir: []const u8) !Attachment {
+    pub fn init(root_allocator: Allocator, cni_config: CniConfig, cni_plugin_dir: []const u8, ipam_config: config_mod.Ipam) !Attachment {
         const arena = try ArenaAllocator.init(root_allocator);
 
         var attachment = Attachment{
             .arena = arena,
             .exec_configs = std.ArrayList(PluginConf).empty,
             .cni_plugin_dir = cni_plugin_dir,
+            .ipam_config = ipam_config,
         };
         errdefer attachment.deinit();
 
@@ -959,7 +1063,8 @@ const Attachment = struct {
         const cni_config = parsed_cni_config.value;
         defer parsed_cni_config.deinit();
 
-        var attachment = try Attachment.init(allocator, cni_config, "");
+        const ipam = config_mod.Ipam{ .type = "dhcp" };
+        var attachment = try Attachment.init(allocator, cni_config, "", ipam);
         defer attachment.deinit();
 
         try std.testing.expect(attachment.exec_configs.items.len == 1);
@@ -1020,6 +1125,13 @@ const Attachment = struct {
         for (self.exec_configs.items) |*exec_config| {
             if (exec_config.isDhcp()) {
                 try exec_config.setDhcpSocketPath(request.user_id.?);
+            } else if (exec_config.isStatic()) {
+                const exec_request = request.requestExec();
+                if (exec_request.network_options.static_ips) |static_ips| {
+                    if (static_ips.len > 0) {
+                        try exec_config.setStaticIp(static_ips[0], self.ipam_config);
+                    }
+                }
             }
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
             const result = try exec_config.exec(tentative_allocator, cmd, pid, env_map);
@@ -1059,9 +1171,6 @@ const Attachment = struct {
                         exec_config.result.?.items,
                     },
                 );
-                // Do not send failed to the client, so client can normal stopped
-                // try responseError(tentative_allocator, responser, exec_config.result.?);
-                // return error.UnexpectedError;
             }
         }
     }
@@ -1101,6 +1210,7 @@ const Attachment = struct {
             .arena = try ArenaAllocator.init(allocator),
             .cni_plugin_dir = "/path/to/cni/plugins",
             .exec_configs = std.ArrayList(PluginConf).empty,
+            .ipam_config = .{ .type = "dhcp" },
         };
         defer attachment.deinit();
         const bin = try attachment.cni_plugin_binary(allocator, "macvlan");
@@ -1115,4 +1225,290 @@ test {
     _ = AttachmentKeyContext;
     _ = Attachment;
     _ = PluginConf;
+}
+
+// -- Tests for buildCniConfigFromResource --
+
+test "buildCniConfigFromResource creates correct CNI config for DHCP resource" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const resource = config_mod.Resource{
+        .name = "test-dhcp",
+        .interface = .{ .type = "macvlan", .master = "eth0" },
+        .ipam = .{ .type = "dhcp" },
+        .acl = &[_]config_mod.Resource.Grant{
+            .{ .user = "1000" },
+        },
+    };
+
+    const cni_config = try buildCniConfigFromResource(allocator, resource);
+
+    try std.testing.expectEqualSlices(u8, "1.0.0", cni_config.cniVersion);
+    try std.testing.expectEqualSlices(u8, "test-dhcp", cni_config.name);
+
+    // Verify plugins structure
+    const plugins = cni_config.plugins.array;
+    try std.testing.expectEqual(@as(usize, 1), plugins.items.len);
+
+    const plugin_val = plugins.items[0];
+    const plugin_obj = plugin_val.object;
+
+    try std.testing.expectEqualSlices(u8, "macvlan", plugin_obj.get("type").?.string);
+    try std.testing.expectEqualSlices(u8, "eth0", plugin_obj.get("master").?.string);
+
+    // Verify ipam
+    const ipam = plugin_obj.get("ipam").?.object;
+    try std.testing.expectEqualSlices(u8, "dhcp", ipam.get("type").?.string);
+
+    // mode should not be present (was null)
+    try std.testing.expect(plugin_obj.get("mode") == null);
+    // mtu should not be present (was null)
+    try std.testing.expect(plugin_obj.get("mtu") == null);
+}
+
+test "buildCniConfigFromResource creates correct CNI config with mode and mtu" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const resource = config_mod.Resource{
+        .name = "test-mode",
+        .interface = .{ .type = "macvlan", .master = "bond0", .mode = "bridge", .mtu = 9000 },
+        .ipam = .{ .type = "static" },
+        .acl = &[_]config_mod.Resource.Grant{
+            .{ .user = "1000", .ips = &[_][:0]const u8{"10.0.0.5-10.0.0.10"} },
+        },
+    };
+
+    const cni_config = try buildCniConfigFromResource(allocator, resource);
+    const plugin_obj = cni_config.plugins.array.items[0].object;
+
+    try std.testing.expectEqualSlices(u8, "bond0", plugin_obj.get("master").?.string);
+    try std.testing.expectEqualSlices(u8, "bridge", plugin_obj.get("mode").?.string);
+    try std.testing.expectEqual(@as(i64, 9000), plugin_obj.get("mtu").?.integer);
+
+    // ipam should be static (no gateway/subnet at build time — injected at runtime)
+    const ipam = plugin_obj.get("ipam").?.object;
+    try std.testing.expectEqualSlices(u8, "static", ipam.get("type").?.string);
+    try std.testing.expect(ipam.get("gateway") == null);
+    try std.testing.expect(ipam.get("addresses") == null);
+}
+
+// -- Tests for setStaticIp --
+
+test "setStaticIp injects address with subnet prefix" {
+    const allocator = std.testing.allocator;
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    // Build a plugin conf with static ipam
+    var ipam_obj = json.ObjectMap.init(arena_alloc);
+    try ipam_obj.put("type", .{ .string = "static" });
+
+    var conf = json.ObjectMap.init(arena_alloc);
+    try conf.put("type", .{ .string = "macvlan" });
+    try conf.put("name", .{ .string = "test" });
+    try conf.put("cniVersion", .{ .string = "1.0.0" });
+    try conf.put("ipam", .{ .object = ipam_obj });
+
+    var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
+
+    const ipam_config = config_mod.Ipam{
+        .type = "static",
+        .gateway = "192.168.1.1",
+        .subnet = "192.168.1.0/24",
+        .routes = &[_]config_mod.Resource.Route{
+            .{ .dst = "0.0.0.0/0" },
+        },
+    };
+
+    try plugin_conf.setStaticIp("192.168.1.15", ipam_config);
+
+    // Verify addresses were injected
+    const result_ipam = plugin_conf.conf.get("ipam").?.object;
+    const addresses = result_ipam.get("addresses").?.array;
+    try std.testing.expectEqual(@as(usize, 1), addresses.items.len);
+
+    const addr_obj = addresses.items[0].object;
+    try std.testing.expectEqualSlices(u8, "192.168.1.15/24", addr_obj.get("address").?.string);
+    try std.testing.expectEqualSlices(u8, "192.168.1.1", addr_obj.get("gateway").?.string);
+
+    // Verify routes were injected
+    const routes = result_ipam.get("routes").?.array;
+    try std.testing.expectEqual(@as(usize, 1), routes.items.len);
+    try std.testing.expectEqualSlices(u8, "0.0.0.0/0", routes.items[0].object.get("dst").?.string);
+}
+
+test "setStaticIp with no gateway omits gateway field" {
+    const allocator = std.testing.allocator;
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var ipam_obj = json.ObjectMap.init(arena_alloc);
+    try ipam_obj.put("type", .{ .string = "static" });
+
+    var conf = json.ObjectMap.init(arena_alloc);
+    try conf.put("type", .{ .string = "macvlan" });
+    try conf.put("name", .{ .string = "test" });
+    try conf.put("cniVersion", .{ .string = "1.0.0" });
+    try conf.put("ipam", .{ .object = ipam_obj });
+
+    var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
+
+    const ipam_config = config_mod.Ipam{
+        .type = "static",
+        .subnet = "10.0.0.0/8",
+    };
+
+    try plugin_conf.setStaticIp("10.0.0.5", ipam_config);
+
+    const result_ipam = plugin_conf.conf.get("ipam").?.object;
+    const addr_obj = result_ipam.get("addresses").?.array.items[0].object;
+    try std.testing.expectEqualSlices(u8, "10.0.0.5/8", addr_obj.get("address").?.string);
+    try std.testing.expect(addr_obj.get("gateway") == null);
+
+    // No routes configured — routes key should not exist
+    try std.testing.expect(result_ipam.get("routes") == null);
+}
+
+test "setStaticIp with multiple routes injects all" {
+    const allocator = std.testing.allocator;
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var ipam_obj = json.ObjectMap.init(arena_alloc);
+    try ipam_obj.put("type", .{ .string = "static" });
+
+    var conf = json.ObjectMap.init(arena_alloc);
+    try conf.put("type", .{ .string = "macvlan" });
+    try conf.put("name", .{ .string = "test" });
+    try conf.put("cniVersion", .{ .string = "1.0.0" });
+    try conf.put("ipam", .{ .object = ipam_obj });
+
+    var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
+
+    const ipam_config = config_mod.Ipam{
+        .type = "static",
+        .subnet = "192.168.1.0/24",
+        .gateway = "192.168.1.1",
+        .routes = &[_]config_mod.Resource.Route{
+            .{ .dst = "0.0.0.0/0" },
+            .{ .dst = "10.0.0.0/8" },
+        },
+    };
+
+    try plugin_conf.setStaticIp("192.168.1.50", ipam_config);
+
+    const result_ipam = plugin_conf.conf.get("ipam").?.object;
+    const routes = result_ipam.get("routes").?.array;
+    try std.testing.expectEqual(@as(usize, 2), routes.items.len);
+    try std.testing.expectEqualSlices(u8, "0.0.0.0/0", routes.items[0].object.get("dst").?.string);
+    try std.testing.expectEqualSlices(u8, "10.0.0.0/8", routes.items[1].object.get("dst").?.string);
+}
+
+test "setStaticIp returns error when subnet is null" {
+    const allocator = std.testing.allocator;
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var ipam_obj = json.ObjectMap.init(arena_alloc);
+    try ipam_obj.put("type", .{ .string = "static" });
+
+    var conf = json.ObjectMap.init(arena_alloc);
+    try conf.put("type", .{ .string = "macvlan" });
+    try conf.put("name", .{ .string = "test" });
+    try conf.put("cniVersion", .{ .string = "1.0.0" });
+    try conf.put("ipam", .{ .object = ipam_obj });
+
+    var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
+
+    const ipam_config = config_mod.Ipam{
+        .type = "static",
+        // subnet is null
+    };
+
+    try std.testing.expectError(error.InvalidSubnet, plugin_conf.setStaticIp("192.168.1.50", ipam_config));
+}
+
+test "setStaticIp returns error when subnet has no slash" {
+    const allocator = std.testing.allocator;
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var ipam_obj = json.ObjectMap.init(arena_alloc);
+    try ipam_obj.put("type", .{ .string = "static" });
+
+    var conf = json.ObjectMap.init(arena_alloc);
+    try conf.put("type", .{ .string = "macvlan" });
+    try conf.put("name", .{ .string = "test" });
+    try conf.put("cniVersion", .{ .string = "1.0.0" });
+    try conf.put("ipam", .{ .object = ipam_obj });
+
+    var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
+
+    const ipam_config = config_mod.Ipam{
+        .type = "static",
+        .subnet = "192.168.1.0", // no slash
+    };
+
+    try std.testing.expectError(error.InvalidSubnet, plugin_conf.setStaticIp("192.168.1.50", ipam_config));
+}
+
+// -- Tests for Cni.init --
+
+test "Cni.init creates CNI from resource config" {
+    // Use ArenaAllocator as root so Cni.deinit's arena.deinit() + destroy(self) is safe:
+    // arena.deinit() frees all memory; subsequent destroy() is a no-op on arena allocator.
+    var root_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer root_arena.deinit();
+    const allocator = root_arena.allocator();
+    const resource = config_mod.Resource{
+        .name = "test-cni-init",
+        .interface = .{ .type = "macvlan", .master = "eth0", .mode = "bridge" },
+        .ipam = .{ .type = "dhcp" },
+        .acl = &[_]config_mod.Resource.Grant{
+            .{ .user = "1000" },
+        },
+    };
+
+    var cni = try Cni.init(allocator, resource, "/usr/lib/cni");
+    defer cni.deinit();
+
+    try std.testing.expectEqualSlices(u8, "test-cni-init", cni.config.name);
+    try std.testing.expectEqualSlices(u8, "dhcp", cni.ipam_config.type);
+    try std.testing.expectEqualSlices(u8, "/usr/lib/cni", cni.cni_plugin_dir);
+}
+
+test "Cni.init with static ipam stores ipam_config" {
+    var root_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer root_arena.deinit();
+    const allocator = root_arena.allocator();
+    const resource = config_mod.Resource{
+        .name = "test-static-cni",
+        .interface = .{ .type = "macvlan", .master = "eth0" },
+        .ipam = .{
+            .type = "static",
+            .gateway = "192.168.1.1",
+            .subnet = "192.168.1.0/24",
+            .routes = &[_]config_mod.Resource.Route{
+                .{ .dst = "0.0.0.0/0" },
+            },
+        },
+        .acl = &[_]config_mod.Resource.Grant{
+            .{ .user = "1000", .ips = &[_][:0]const u8{"192.168.1.10-192.168.1.20"} },
+        },
+    };
+
+    var cni = try Cni.init(allocator, resource, "/usr/lib/cni");
+    defer cni.deinit();
+
+    try std.testing.expectEqualSlices(u8, "static", cni.ipam_config.type);
+    try std.testing.expectEqualSlices(u8, "192.168.1.1", cni.ipam_config.gateway.?);
+    try std.testing.expectEqualSlices(u8, "192.168.1.0/24", cni.ipam_config.subnet.?);
+    try std.testing.expectEqual(@as(usize, 1), cni.ipam_config.routes.?.len);
 }

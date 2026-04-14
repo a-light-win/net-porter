@@ -1,6 +1,7 @@
 const std = @import("std");
 const Cni = @import("Cni.zig");
 const Config = @import("../config.zig").Config;
+const Resource = @import("../config.zig").Resource;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 
@@ -8,8 +9,8 @@ const CniMap = std.StringHashMap(*Cni);
 const CniManager = @This();
 
 arena: ArenaAllocator,
-cni_dir: []const u8,
 cni_plugin_dir: []const u8,
+resources: []const Resource,
 cni_plugins: CniMap,
 
 mutex: std.Thread.Mutex = std.Thread.Mutex{},
@@ -18,12 +19,13 @@ pub fn init(root_allocator: Allocator, config: Config) Allocator.Error!CniManage
     var arena = try ArenaAllocator.init(root_allocator);
     errdefer arena.deinit();
 
-    const allocator = arena.allocator();
+    const resources = config.resources orelse &[_]Resource{};
+
     return CniManager{
         .arena = arena,
-        .cni_dir = try genCniDir(allocator, config),
         .cni_plugin_dir = config.cni_plugin_dir,
-        .cni_plugins = CniMap.init(allocator),
+        .resources = resources,
+        .cni_plugins = CniMap.init(arena.allocator()),
     };
 }
 
@@ -37,15 +39,6 @@ pub fn deinit(self: *CniManager) void {
     self.arena.deinit();
 }
 
-fn genCniDir(allocator: std.mem.Allocator, config: Config) Allocator.Error![]const u8 {
-    if (config.cni_dir) |dir| {
-        return dir;
-    }
-
-    const buf = try allocator.alloc(u8, config.config_dir.len + 6);
-    return std.fmt.bufPrint(buf, "{s}/cni.d", .{config.config_dir}) catch unreachable;
-}
-
 pub fn loadCni(self: *CniManager, name: []const u8) !*Cni {
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -54,19 +47,99 @@ pub fn loadCni(self: *CniManager, name: []const u8) !*Cni {
         return plugin;
     }
 
+    // Find resource by name
+    const resource = self.findResource(name) orelse {
+        std.log.warn("Resource '{s}' not found in config", .{name});
+        return error.ResourceNotFound;
+    };
+
     const allocator = self.arena.allocator();
 
-    const path = try self.getCniPath(allocator, name);
-    defer allocator.free(path);
+    const cni = try Cni.init(self.arena.childAllocator(), resource, self.cni_plugin_dir);
+    errdefer cni.deinit();
 
-    const plugin = try Cni.load(self.arena.childAllocator(), path, self.cni_plugin_dir);
-    errdefer plugin.deinit();
-
-    try self.cni_plugins.put(try allocator.dupe(u8, name), plugin);
-    return plugin;
+    try self.cni_plugins.put(try allocator.dupe(u8, name), cni);
+    return cni;
 }
 
-fn getCniPath(self: *CniManager, allocator: Allocator, name: []const u8) Allocator.Error![]const u8 {
-    const buf = try allocator.alloc(u8, self.cni_dir.len + 1 + name.len + 5);
-    return std.fmt.bufPrint(buf, "{s}/{s}.json", .{ self.cni_dir, name }) catch unreachable;
+fn findResource(self: CniManager, name: []const u8) ?Resource {
+    for (self.resources) |resource| {
+        if (std.mem.eql(u8, resource.name, name)) {
+            return resource;
+        }
+    }
+    return null;
+}
+
+test "CniManager: findResource returns matching resource" {
+    const allocator = std.testing.allocator;
+    const config = Config{
+        .resources = &[_]Resource{
+            Resource{
+                .name = "net-a",
+                .interface = .{ .type = "macvlan", .master = "eth0" },
+                .ipam = .{ .type = "dhcp" },
+                .acl = &[_]Resource.Grant{
+                    .{ .user = "1000" },
+                },
+            },
+            Resource{
+                .name = "net-b",
+                .interface = .{ .type = "macvlan", .master = "eth1" },
+                .ipam = .{ .type = "dhcp" },
+                .acl = &[_]Resource.Grant{
+                    .{ .user = "2000" },
+                },
+            },
+        },
+    };
+
+    var manager = try init(allocator, config);
+    defer manager.deinit();
+
+    const found = manager.findResource("net-a");
+    try std.testing.expect(found != null);
+    try std.testing.expectEqualSlices(u8, "eth0", found.?.interface.master);
+
+    const found_b = manager.findResource("net-b");
+    try std.testing.expect(found_b != null);
+    try std.testing.expectEqualSlices(u8, "eth1", found_b.?.interface.master);
+
+    const not_found = manager.findResource("not-exists");
+    try std.testing.expect(not_found == null);
+}
+
+test "CniManager: loadCni returns ResourceNotFound for unknown resource" {
+    const allocator = std.testing.allocator;
+    const config = Config{
+        .resources = &[_]Resource{
+            Resource{
+                .name = "net-a",
+                .interface = .{ .type = "macvlan", .master = "eth0" },
+                .ipam = .{ .type = "dhcp" },
+                .acl = &[_]Resource.Grant{
+                    .{ .user = "1000" },
+                },
+            },
+        },
+    };
+
+    var manager = try init(allocator, config);
+    defer manager.deinit();
+
+    const result = manager.loadCni("not-exists");
+    try std.testing.expectError(error.ResourceNotFound, result);
+}
+
+test "CniManager: loadCni with null resources returns ResourceNotFound" {
+    const allocator = std.testing.allocator;
+    const config = Config{
+        .resources = null,
+    };
+
+    var manager = try init(allocator, config);
+    defer manager.deinit();
+
+    const result = manager.loadCni("anything");
+    try std.testing.expectError(error.ResourceNotFound, result);
 }

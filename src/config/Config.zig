@@ -5,9 +5,7 @@ const Config = @This();
 
 config_dir: []const u8 = "",
 config_path: []const u8 = "",
-// CNI configuration directory
-cni_dir: ?[]const u8 = null,
-// CNI plugin directory
+// CNI plugin directory (auto-detected if not set)
 cni_plugin_dir: []const u8 = "",
 
 resources: ?[]const Resource = null,
