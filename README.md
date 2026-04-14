@@ -181,6 +181,7 @@ Edit `/etc/net-porter/config.json` to define resources. Each resource combines i
 
 ```json
 {
+  "users": ["alice"],
   "resources": [
     {
       "name": "macvlan-dhcp",
@@ -227,6 +228,7 @@ You should see the macvlan interface with an IP address from your DHCP server.
 ### Server Configuration (`/etc/net-porter/config.json`)
 ```json
 {
+  "users": ["alice", "bob"],
   "cni_plugin_dir": "/usr/lib/cni",
   "resources": [
     {
@@ -322,6 +324,7 @@ When IPAM type is `static`, the caller must request a specific IP (via podman `-
 
 | Option | Description | Default |
 |--------|-------------|---------|
+| `users` | Array of usernames or numeric UIDs that need a `net-porter.sock` entry. The server creates per-user sockets only for users listed here. | `[]` (empty) |
 | `cni_plugin_dir` | Directory containing CNI plugin binaries | auto-detected (`/usr/lib/cni` or `/opt/cni/bin`) |
 | `log.level` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 | `log.dump_env` | Environment dump for debugging | disabled |
@@ -331,6 +334,7 @@ When IPAM type is `static`, the caller must request a specific IP (via podman `-
 ### Example 1: Multiple users with different networks
 ```json
 {
+  "users": ["alice", "bob"],
   "resources": [
     {
       "name": "vlan-100",
@@ -363,6 +367,7 @@ podman network create -d net-porter -o net_porter_resource=vlan-100 vlan100
 ### Example 2: Static IP with per-user ranges
 ```json
 {
+  "users": ["alice", "bob"],
   "resources": [
     {
       "name": "static-net",
@@ -393,6 +398,7 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 ### Example 3: Mixed DHCP and static resources
 ```json
 {
+  "users": ["alice"],
   "resources": [
     {
       "name": "macvlan-dhcp",

@@ -43,7 +43,7 @@ pub fn new(opts: Opts) !Server {
     var acl_manager = try AclManager.init(allocator, conf);
     errdefer acl_manager.deinit();
 
-    const allowed_uids = try acl_manager.allAllowedUids(allocator);
+    const allowed_uids = try conf.resolveUserUids(allocator);
 
     var socket_manager = try SocketManager.init(allocator, allowed_uids);
     socket_manager.scanExisting();
