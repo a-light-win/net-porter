@@ -10,14 +10,16 @@ It consists with two major part:
 - `net-porter server`: the rootful server that responsible for creating
   the macvlan network via CNI plugins.
 
-The `net-porter server` runs as a single global systemd service, listens on a unix socket. When the container starts,
+The `net-porter server` runs as a single global systemd service, listens on an **abstract unix socket**. When the container starts,
 netavark will call the `net-porter plugin`. The plugin then
-will connect to the `net-porter server` via the unix socket,
+will connect to the `net-porter server` via the abstract socket,
 and pass the required information to the `net-porter server`.
 
 The `net-porter server` will authenticate the request
 by the `uid/gid` of the caller (obtained via kernel `SO_PEERCRED`, cannot be forged). And then creates the macvlan network
 if the user has the permission.
+
+> **Why abstract socket?** Rootless podman runs in an isolated mount namespace where filesystem unix sockets (e.g. `/run/net-porter.sock`) are invisible. Abstract sockets exist in the kernel's network namespace, not on the filesystem, so they are accessible across mount namespace boundaries while still supporting `SO_PEERCRED` authentication.
 
 ## Features
 
@@ -170,39 +172,7 @@ Check service status:
 systemctl status net-porter
 ```
 
-### 2. Configure user group (optional)
-If you want to allow multiple users to access the service, create a `net-porter` group and add users to it:
-```bash
-groupadd net-porter
-usermod -aG net-porter alice
-usermod -aG net-porter bob
-```
-This will allow users in the `net-porter` group to connect to the service socket.
-
-> ℹ️ **Note**: User group changes take effect only after the user re-login. To make it effective immediately without re-login:
-> ```bash
-> # Method 1: Switch to the new group in current shell
-> newgrp net-porter
-> 
-> # Verify group membership
-> id
-> ```
-> If you have running podman processes, you also need to restart the podman user service to pick up the new group:
-> ```bash
-> systemctl --user restart podman
-> ```
-> ⚠️ **Important**: `catatonit` (podman infra container init process) will retain the old group permissions until they are restarted. If you have running containers and want the new group to take effect for them:
-> ```bash
-> # Stop all containers
-> podman stop -a
-> # Kill all existing catatonit processes
-> pkill -u $USER catatonit
-> # Restart podman service
-> systemctl --user restart podman
-> ```
-> For desktop environments, a full re-login is recommended to ensure all applications get the new group permissions.
-
-### 3. Configure network resource
+### 2. Configure network resource
 Create CNI configuration for your macvlan network at `/etc/net-porter/cni.d/macvlan-dhcp.json`:
 ```json
 {
@@ -221,15 +191,10 @@ Create CNI configuration for your macvlan network at `/etc/net-porter/cni.d/macv
 }
 ```
 
-### 4. Configure ACL
+### 3. Configure ACL
 Edit `/etc/net-porter/config.json` to configure access permissions:
 ```json
 {
-  "domain_socket": {
-    "path": "/run/net-porter.sock",
-    "group": "net-porter", // Group that can access the socket
-    "mode": "0660"
-  },
   "resources": [
     {
       "name": "macvlan-dhcp",
@@ -244,17 +209,17 @@ Restart service after modifying configuration:
 systemctl restart net-porter
 ```
 
-### 5. Create podman network
+### 4. Create podman network
 Run this command as the rootless user (e.g., `alice`):
 ```bash
 podman network create \
   -d net-porter \
   -o net_porter_resource=macvlan-dhcp \
-  -o net_porter_socket=/run/net-porter.sock \
+  -o net_porter_socket=@net-porter \
   macvlan-net
 ```
 
-### 6. Test it out
+### 5. Test it out
 Run a test container:
 ```bash
 podman run -it --rm --network macvlan-net alpine ip addr
@@ -267,10 +232,7 @@ You should see the macvlan interface with an IP address from your DHCP server.
 ```json
 {
   "domain_socket": {
-    "path": "/run/net-porter.sock",    // Socket path, default: /run/net-porter.sock
-    "user": "root",                     // Socket owner, default: root
-    "group": "net-porter",              // Socket group, default: root
-    "mode": "0660"                      // Socket permission, default: 0660
+    "path": "@net-porter"                // Abstract socket path, default: @net-porter
   },
   "cni_dir": "/etc/net-porter/cni.d",   // CNI config directory, optional
   "cni_plugin_dir": "/usr/lib/cni",     // CNI plugin directory, optional (auto detected)
@@ -315,9 +277,6 @@ Configuration:
 ```json
 // /etc/net-porter/config.json
 {
-  "domain_socket": {
-    "group": "net-porter"
-  },
   "resources": [
     {
       "name": "vlan-100",
@@ -400,7 +359,17 @@ Version 1.0 uses single global service instead of per-user service instances. To
    ```bash
    systemctl enable --now net-porter
    ```
-5. No changes needed for podman network configurations, they will work as before.
+5. Recreate podman networks with the new abstract socket path:
+   ```bash
+   # Remove old network
+   podman network rm macvlan-net
+   # Recreate with abstract socket
+   podman network create \
+     -d net-porter \
+     -o net_porter_resource=macvlan-dhcp \
+     -o net_porter_socket=@net-porter \
+     macvlan-net
+   ```
 
 ## Troubleshooting
 
@@ -409,18 +378,24 @@ Version 1.0 uses single global service instead of per-user service instances. To
 #### 1. Permission denied when connecting to socket
 **Error**: `Access denied for uid=1000`
 **Solutions**:
-- Check if the user is in the socket group (`groups alice`)
 - Check if the user has permission for the requested resource in the config
 - Verify the ACL configuration in `/etc/net-porter/config.json`
 
-#### 2. DHCP failed to get IP
+#### 2. Plugin cannot connect to server
+**Error**: `Failed to connect to domain socket @net-porter: ConnectionRefused`
+**Solutions**:
+- Verify the server is running: `systemctl status net-porter`
+- Check the socket path matches between server config and podman network options
+- Verify both server and podman are in the same network namespace
+
+#### 3. DHCP failed to get IP
 **Error**: `dhcp client: no ack received`
 **Solutions**:
 - Verify DHCP server is running on your network
 - Check if the master interface is connected to the correct network
 - Ensure macvlan mode is supported by your network switch
 
-#### 3. CNI configuration not found
+#### 4. CNI configuration not found
 **Error**: `Failed to load CNI for resource=xxx`
 **Solutions**:
 - Check if `/etc/net-porter/cni.d/xxx.json` exists
@@ -445,14 +420,14 @@ Restart service: `systemctl restart net-porter`
 ## Security
 
 ### Security Model
-1. **Identity Authentication**: Caller UID/GID is obtained via `SO_PEERCRED` from kernel, cannot be forged
-2. **Socket Filtering**: Connection is immediately rejected if the user has no permission on any resource
-3. **Resource ACL Check**: Each request is validated against the resource's allow list
-4. **Netns Verification**: The network namespace file owner must match the caller UID
-5. **Default Deny**: Any request that doesn't explicitly match a policy is rejected
+1. **Network Namespace Isolation**: Abstract sockets are only accessible within the same network namespace, providing kernel-level connection filtering
+2. **Identity Authentication**: Caller UID/GID is obtained via `SO_PEERCRED` from kernel, cannot be forged
+3. **Socket Filtering**: Connection is immediately rejected if the user has no permission on any resource
+4. **Resource ACL Check**: Each request is validated against the resource's allow list
+5. **Netns Verification**: The network namespace file owner must match the caller UID
+6. **Default Deny**: Any request that doesn't explicitly match a policy is rejected
 
 ### Hardening Recommendations
-- Restrict socket access to a dedicated `net-porter` group
 - Follow the principle of least privilege when configuring ACLs
 - Regularly audit access logs for unusual activity
 - Keep CNI plugins updated to latest version
@@ -462,13 +437,13 @@ Restart service: `systemctl restart net-porter`
 Create a container network with `net-porter` driver, and use it with `podman`.
 
 ```bash
-podman network create -d net-porter -o net_porter_resource=macvlan-dhcp -o net_porter_socket=/run/net-porter.sock net-porter
+podman network create -d net-porter -o net_porter_resource=macvlan-dhcp -o net_porter_socket=@net-porter macvlan-net
 ```
 
 - `-d net-porter`: use the `net-porter` driver.
 - `-o net_porter_resource=macvlan-dhcp`: specify the resource name, should be
   the same with server configuration.
-- `-o net_porter_socket=/run/net-porter.sock`: specify the unix socket path
-  of `net-porter server` listens on.
-- `net-porter`: the network name.
-
+- `-o net_porter_socket=@net-porter`: specify the abstract socket name
+  of `net-porter server` listens on. The `@` prefix indicates an abstract
+  unix socket (not a filesystem path).
+- `macvlan-net`: the network name.

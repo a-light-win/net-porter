@@ -1,109 +1,43 @@
 const std = @import("std");
 const DomainSocket = @import("DomainSocket.zig");
 
-test "postInit sets path and uid correctly" {
+test "postInit sets path correctly" {
     const gpa = std.testing.allocator;
     var ds = DomainSocket{
         .path = "",
-        .owner = null,
-        .uid = null,
     };
 
     try ds.postInit(gpa);
     defer gpa.free(ds.path);
 
-    try std.testing.expect(std.mem.eql(u8, ds.path, "/run/net-porter.sock"));
-    try std.testing.expect(ds.uid == 0); // Default to root
+    try std.testing.expect(std.mem.eql(u8, ds.path, "@net-porter"));
 }
 
 test "postInit does not change path if already set" {
     const gpa = std.testing.allocator;
 
     var ds = DomainSocket{
-        .path = "/custom/path.sock",
-        .owner = null,
-        .uid = null,
+        .path = "@custom",
     };
 
     try ds.postInit(gpa);
 
-    try std.testing.expect(std.mem.eql(u8, ds.path, "/custom/path.sock"));
-    try std.testing.expect(ds.uid == 0); // Default to root
+    try std.testing.expect(std.mem.eql(u8, ds.path, "@custom"));
 }
 
-test "postInit does not change uid if already set" {
+test "postInit rejects filesystem path" {
     const gpa = std.testing.allocator;
     var ds = DomainSocket{
-        .path = "/custom/path.sock",
-        .owner = null,
-        .uid = 2000,
+        .path = "/run/test.sock",
     };
 
-    try ds.postInit(gpa);
-
-    try std.testing.expect(ds.uid == 2000); // Remains 2000
+    const result = ds.postInit(gpa);
+    try std.testing.expectError(error.UnsupportedSocketType, result);
 }
 
-test "postInit does not change uid if owner is already set" {
-    const gpa = std.testing.allocator;
-    var ds = DomainSocket{
-        .path = "/custom/path.sock",
-        .owner = "root",
-        .uid = null,
-    };
-    try ds.postInit(gpa);
-    try std.testing.expect(ds.uid == null); // Owner set, uid remains null
-}
-
-test "connect() will failed if the socket path not exists" {
-    const socket = DomainSocket{ .path = "/tmp/this-socket-not-exists" };
+test "connect() will fail if the socket does not exist" {
+    const socket = DomainSocket{ .path = "@this-socket-not-exists" };
     _ = socket.connect() catch |err| {
-        try std.testing.expectEqual(error.FileNotFound, err);
+        try std.testing.expect(err == error.ConnectionRefused or err == error.FileNotFound);
     };
-}
-
-const Server = struct {
-    socket: DomainSocket = DomainSocket{
-        .path = "/tmp/test-DomainSocket-connect.sock",
-    },
-
-    server: std.net.Server,
-
-    fn serve(self: *Server) !void {
-        defer self.deinit();
-
-        const conn = try self.server.accept();
-        defer conn.stream.close();
-    }
-
-    fn deinit(self: *Server) void {
-        self.server.deinit();
-        std.fs.cwd().deleteFile(self.socket.path) catch {};
-    }
-};
-
-test "connect() will success if the socket path exists" {
-    const socket = DomainSocket{
-        .path = "/tmp/test-DomainSocket-connect.sock",
-    };
-    const s = try socket.listen();
-    var server = Server{ .socket = socket, .server = s };
-
-    const thread = try std.Thread.spawn(.{}, Server.serve, .{&server});
-    // Retry connecting a few times to avoid race condition
-    var conn: std.net.Stream = undefined;
-    var attempts: u8 = 0;
-    while (attempts < 5) : (attempts += 1) {
-        conn = server.socket.connect() catch |err| {
-            if (attempts == 4) return err;
-            // Yield CPU to give server time to start
-            std.Thread.yield() catch {};
-            continue;
-        };
-        break;
-    }
-    try std.testing.expectEqual(std.net.Stream, @TypeOf(conn));
-    conn.close();
-
-    thread.join();
 }

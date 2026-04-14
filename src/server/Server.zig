@@ -1,7 +1,6 @@
 const std = @import("std");
 const log = std.log.scoped(.server);
 const net = std.net;
-const fs = std.fs;
 const config_mod = @import("../config.zig");
 const AclManager = @import("AclManager.zig");
 const CniManager = @import("../cni/CniManager.zig");
@@ -58,16 +57,8 @@ pub fn new(opts: Opts) !Server {
 
 pub fn deinit(self: *Server) void {
     log.info("Server shutting down...", .{});
-    // Clean up the socket file
-    fs.cwd().deleteFile(self.config.domain_socket.path) catch |e| {
-        if (e == error.FileNotFound) {
-            return;
-        }
-        log.warn(
-            "Failed to delete socket file: {s}, error: {s}",
-            .{ self.config.domain_socket.path, @errorName(e) },
-        );
-    };
+    // Abstract sockets are automatically cleaned up when the socket fd is closed,
+    // no filesystem cleanup needed.
 
     self.server.deinit();
 

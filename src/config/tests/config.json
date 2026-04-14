@@ -1,7 +1,5 @@
 {
   "domain_socket": {
-    "path": "/run/test.sock",
-    "uid": 0,
-    "group": "root"
+    "path": "@net-porter-test"
   }
 }

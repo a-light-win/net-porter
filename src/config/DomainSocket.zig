@@ -1,229 +1,143 @@
 const std = @import("std");
-const user = @import("../user.zig");
-const c = @cImport({
-    @cInclude("unistd.h");
-});
-
+const log = std.log.scoped(.domain_socket);
 const DomainSocket = @This();
 
+/// Maximum length of a unix socket path (Linux UNIX_PATH_MAX).
+/// Abstract socket names can use at most `unix_path_max - 1` bytes
+/// (one byte is consumed by the leading null byte).
+const unix_path_max = 108;
+
+/// Abstract unix socket path (with '@' prefix).
+/// The '@' prefix is the conventional human-readable representation of the null byte
+/// that distinguishes abstract sockets from filesystem sockets in Linux.
+/// At runtime, the '@' is replaced with '\0' before passing to the kernel.
 path: [:0]const u8 = "",
-owner: ?[:0]const u8 = null,
-group: ?[:0]const u8 = null,
-uid: ?std.posix.uid_t = null,
-gid: ?std.posix.gid_t = null,
-mode: std.posix.mode_t = 0o660,
 
 pub fn postInit(self: *DomainSocket, allocator: std.mem.Allocator) !void {
-    if (std.mem.eql(u8, self.path, "")) {
-        self.path = try allocator.dupeZ(u8, "/run/net-porter.sock");
+    if (self.path.len == 0) {
+        self.path = try allocator.dupeZ(u8, "@net-porter");
     }
-    if (self.owner == null and self.uid == null) {
-        self.uid = 0; // root owns the socket by default
+
+    if (!self.isAbstract()) {
+        log.warn(
+            \\Socket path '{s}' does not use abstract socket ('@' prefix).
+            \\Filesystem unix sockets are not supported because rootless podman
+            \\runs in an isolated mount namespace where the socket file is invisible.
+            \\Please use an abstract socket path like '@net-porter'.
+        , .{self.path});
+        return error.UnsupportedSocketType;
     }
+}
+
+pub fn isAbstract(self: DomainSocket) bool {
+    return self.path.len > 0 and self.path[0] == '@';
+}
+
+/// Build the kernel-level abstract socket address.
+/// Replaces the '@' prefix with '\0' and constructs a `sockaddr.un` struct.
+fn initAddress(self: DomainSocket) !std.net.Address {
+    const path = self.path;
+    // +1 to ensure a terminating 0 is present for maximum portability
+    if (path.len + 1 > unix_path_max) return error.NameTooLong;
+
+    var sock_addr: std.posix.sockaddr.un = .{
+        .family = std.posix.AF.UNIX,
+        .path = undefined,
+    };
+    @memset(&sock_addr.path, 0);
+    @memcpy(sock_addr.path[0..path.len], path);
+    // Replace '@' with '\0' to form an abstract socket address
+    sock_addr.path[0] = 0;
+
+    return .{ .un = sock_addr };
 }
 
 pub fn connect(self: DomainSocket) !std.net.Stream {
-    return try std.net.connectUnixSocket(self.path);
+    const addr = try self.initAddress();
+
+    const sockfd = try std.posix.socket(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC,
+        0,
+    );
+    errdefer std.net.Stream.close(.{ .handle = sockfd });
+
+    try std.posix.connect(sockfd, &addr.any, addr.getOsSockLen());
+
+    return .{ .handle = sockfd };
 }
 
 pub fn listen(self: DomainSocket) !std.net.Server {
-    const address = std.net.Address.initUnix(self.path) catch |e| {
-        std.log.err(
-            "Failed to create address: {s}, error: {s}",
+    const addr = try self.initAddress();
+
+    const server = addr.listen(.{}) catch |e| {
+        log.err(
+            "Failed to listen on abstract socket {s}: {s}",
             .{ self.path, @errorName(e) },
         );
         return e;
     };
-
-    // Bind the socket to a file path
-    std.fs.cwd().deleteFile(self.path) catch {};
-    const server = address.listen(.{}) catch |e| {
-        std.log.err(
-            "Failed to bind address: {s}, error: {s}",
-            .{ self.path, @errorName(e) },
-        );
-        return e;
-    };
-
-    self.setSocketPermissions();
 
     return server;
 }
 
-test "listen() should change the mode of socket to 660" {
-    const socket = DomainSocket{
-        .path = "/tmp/test-listen.sock",
-    };
+test "postInit sets default path to @net-porter" {
+    const gpa = std.testing.allocator;
+    var ds = DomainSocket{ .path = "" };
+    try ds.postInit(gpa);
+    defer gpa.free(ds.path);
+
+    try std.testing.expect(std.mem.eql(u8, ds.path, "@net-porter"));
+    try std.testing.expect(ds.isAbstract());
+}
+
+test "postInit does not change path if already set" {
+    const gpa = std.testing.allocator;
+    var ds = DomainSocket{ .path = "@custom" };
+    try ds.postInit(gpa);
+
+    try std.testing.expect(std.mem.eql(u8, ds.path, "@custom"));
+}
+
+test "postInit rejects filesystem socket path" {
+    const gpa = std.testing.allocator;
+    var ds = DomainSocket{ .path = "/run/test.sock" };
+    const result = ds.postInit(gpa);
+    try std.testing.expectError(error.UnsupportedSocketType, result);
+}
+
+test "isAbstract returns true for '@' prefix" {
+    const ds = DomainSocket{ .path = "@net-porter" };
+    try std.testing.expect(ds.isAbstract());
+}
+
+test "isAbstract returns false for filesystem path" {
+    const ds = DomainSocket{ .path = "/run/net-porter.sock" };
+    try std.testing.expect(!ds.isAbstract());
+}
+
+test "isAbstract returns false for empty path" {
+    const ds = DomainSocket{ .path = "" };
+    try std.testing.expect(!ds.isAbstract());
+}
+
+test "listen and connect with abstract socket" {
+    const socket = DomainSocket{ .path = "@test-net-porter-listen-connect" };
 
     var server = try socket.listen();
     defer server.deinit();
-    defer std.fs.cwd().deleteFile(socket.path) catch {};
+    // No file cleanup needed for abstract sockets
 
-    var stat: std.os.linux.Statx = undefined;
-
-    // Call the statx function to get file metadata
-    _ = std.os.linux.statx(std.posix.AT.FDCWD, // dirfd (use current directory)
-        socket.path, // path to the socket
-        0, // flags (0 for default)
-        std.os.linux.STATX_BASIC_STATS, // what (basic stats)
-        &stat // where to store the result
-    );
-    const mode = stat.mode & 0o777;
-    std.debug.print("path: {s}, mode: {o}, stat.mode: {o}\n", .{ socket.path, mode, stat.mode });
-    try std.testing.expectEqual(socket.mode, mode);
+    const stream = try socket.connect();
+    stream.close();
 }
 
-fn setSocketPermissions(self: DomainSocket) void {
-    const uid = self.getUid();
-    const gid = self.getGid();
-    if (uid != null or gid != null) {
-        setOwner(self.path, uid, gid);
-    }
-
-    std.posix.fchmodat(std.posix.AT.FDCWD, self.path, self.mode, 0) catch |e| {
-        std.log.warn(
-            "Failed to set socket permissions: file: {s}, error: {s}",
-            .{ self.path, @errorName(e) },
-        );
+test "connect() will fail if the abstract socket does not exist" {
+    const socket = DomainSocket{ .path = "@this-socket-not-exists" };
+    _ = socket.connect() catch |err| {
+        // Abstract socket returns ConnectionRefused or similar when not listening
+        try std.testing.expect(err == error.ConnectionRefused or err == error.FileNotFound);
     };
-}
-
-fn setOwner(path: [:0]const u8, uid: ?std.posix.uid_t, gid: ?std.posix.gid_t) void {
-    const stat = std.posix.fstatat(std.posix.AT.FDCWD, path, 0) catch |e| {
-        std.log.warn(
-            "Failed to get socket owner: file: {s}, error: {s}",
-            .{ path, @errorName(e) },
-        );
-        return;
-    };
-
-    const ret_chown = c.fchownat(
-        std.posix.AT.FDCWD,
-        path,
-        uid orelse stat.uid,
-        gid orelse stat.gid,
-        0,
-    );
-
-    if (ret_chown != 0) {
-        const err = std.posix.errno(ret_chown);
-        std.log.warn(
-            "Failed to set socket owner: file: {s}, error: {s}",
-            .{ path, @tagName(err) },
-        );
-    }
-}
-
-test "setSocketPermissions()" {
-    const socket = DomainSocket{
-        .path = "/tmp/test-setSocketPermissions.sock",
-        .uid = std.os.linux.getuid(),
-        .gid = std.os.linux.getgid(),
-    };
-
-    const address = try std.net.Address.initUnix(socket.path);
-    var server = try address.listen(.{});
-    defer server.deinit();
-    defer std.fs.cwd().deleteFile(socket.path) catch {};
-
-    socket.setSocketPermissions();
-    const stat = try std.posix.fstatat(std.posix.AT.FDCWD, socket.path, 0);
-    const mode = stat.mode & 0o777;
-    try std.testing.expectEqual(socket.mode, mode);
-}
-
-test "setSocketPermissions() will failed if the user can not change the owner" {
-    const socket = DomainSocket{
-        .path = "/tmp/test-setSocketPermissions.sock",
-        .owner = "root",
-        .group = "root",
-    };
-
-    if (std.os.linux.getuid() == 0) {
-        return error.SkipZigTest;
-    }
-
-    const address = try std.net.Address.initUnix(socket.path);
-    var server = try address.listen(.{});
-    defer server.deinit();
-    defer std.fs.cwd().deleteFile(socket.path) catch {};
-
-    socket.setSocketPermissions();
-}
-
-fn getUid(self: DomainSocket) ?std.posix.uid_t {
-    return self.uid orelse {
-        if (self.owner) |value| {
-            return user.getUid(value);
-        }
-        return null;
-    };
-}
-
-test "getUid() will return null if both owner and uid are not set" {
-    const socket = DomainSocket{};
-    try std.testing.expectEqual(null, socket.getUid());
-}
-
-test "getUid() will return the uid of the owner if only the owner is set" {
-    const socket = DomainSocket{ .owner = "root" };
-    try std.testing.expectEqual(0, socket.getUid().?);
-}
-
-test "getUid() will return uid if it is set" {
-    const socket = DomainSocket{ .uid = 1000 };
-    try std.testing.expectEqual(1000, socket.getUid().?);
-}
-
-test "getUid() will prefer uid over owner" {
-    const socket = DomainSocket{ .owner = "root", .uid = 1000 };
-    try std.testing.expectEqual(1000, socket.getUid().?);
-}
-
-fn getGid(self: DomainSocket) ?std.posix.gid_t {
-    return self.gid orelse {
-        if (self.group) |value| {
-            return user.getGid(value);
-        }
-        return null;
-    };
-}
-
-test "getGid() will return null if both group and gid are not set" {
-    const socket = DomainSocket{};
-    try std.testing.expectEqual(null, socket.getGid());
-}
-
-test "getGid() will return the gid of the group if only the group is set" {
-    const socket = DomainSocket{ .group = "root" };
-    try std.testing.expectEqual(0, socket.getGid().?);
-}
-
-test "getGid() will return gid if it is set" {
-    const socket = DomainSocket{ .gid = 1000 };
-    try std.testing.expectEqual(1000, socket.getGid().?);
-}
-
-test "getGid() will prefer gid over group" {
-    const socket = DomainSocket{ .group = "root", .gid = 1000 };
-    try std.testing.expectEqual(1000, socket.getGid().?);
-}
-
-test "can connect to domain socket without reuse_address" {
-    const test_path = "/tmp/test-connect-without-reuse.sock";
-    const socket = DomainSocket{
-        .path = test_path,
-    };
-
-    var server = try socket.listen();
-    defer server.deinit();
-    defer std.fs.cwd().deleteFile(test_path) catch {};
-
-    // Try to connect multiple times to verify connections work
-    for (0..3) |_| {
-        var stream = try socket.connect();
-        defer stream.close();
-    }
 }
 
 test {

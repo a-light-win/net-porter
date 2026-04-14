@@ -53,7 +53,7 @@ test "load() should return InvalidPath if the config path is invalid" {
 test "load() should return error if the config file is invalid" {
     const allocator = std.testing.allocator;
     _ = ManagedConfig.load(allocator, "src/config/tests/invalid-config.json") catch |err| switch (err) {
-        error.InvalidCharacter => ManagedConfig{ .config = Config{} },
+        error.SyntaxError => ManagedConfig{ .config = Config{} },
         else => unreachable,
     };
 }
@@ -66,7 +66,7 @@ test "load() should return default config if the config file does not exist" {
     );
     defer managed_config.deinit();
 
-    try std.testing.expectEqualSlices(u8, "/run/net-porter.sock", managed_config.config.domain_socket.path);
+    try std.testing.expectEqualSlices(u8, "@net-porter", managed_config.config.domain_socket.path);
     try std.testing.expectEqualSlices(u8, "src/config/tests", managed_config.config.config_dir);
     try std.testing.expectEqualSlices(u8, "src/config/tests/config-not-exists.json", managed_config.config.config_path);
 }
@@ -80,8 +80,7 @@ test "load() should return config if the config file exists" {
     );
     defer managed_config.deinit();
 
-    try std.testing.expectEqual(0, managed_config.config.domain_socket.uid);
-    try std.testing.expectEqualSlices(u8, "/run/test.sock", managed_config.config.domain_socket.path);
+    try std.testing.expectEqualSlices(u8, "@net-porter-test", managed_config.config.domain_socket.path);
     try std.testing.expectEqualSlices(u8, "src/config/tests", managed_config.config.config_dir);
     try std.testing.expectEqualSlices(u8, "src/config/tests/config.json", managed_config.config.config_path);
 }
@@ -124,7 +123,7 @@ test "parseConfig() should return an error if the config file is not valid JSON"
     if (config) |_| {
         unreachable;
     } else |err| switch (err) {
-        error.InvalidCharacter => {},
+        error.SyntaxError => {},
         else => unreachable,
     }
 }
@@ -134,6 +133,5 @@ test "parseConfig() should successfully parse a valid config file" {
     const config = try parseConfig(allocator, "src/config/tests/config.json");
     defer config.deinit();
 
-    try std.testing.expectEqual(0, config.value.domain_socket.uid);
-    try std.testing.expectEqualSlices(u8, "/run/test.sock", config.value.domain_socket.path);
+    try std.testing.expectEqualSlices(u8, "@net-porter-test", config.value.domain_socket.path);
 }
