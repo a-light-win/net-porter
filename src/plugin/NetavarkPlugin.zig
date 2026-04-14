@@ -345,7 +345,9 @@ fn sendRequest(self: *NetavarkPlugin, socket_path: [:0]const u8, request: *const
     };
 
     const stream = domain_socket.connect() catch |err| {
-        try self.writeError("Failed to connect to domain socket {s}: {s}", .{ socket_path, @errorName(err) });
+        var netns_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const netns = std.fs.readLinkAbsolute("/proc/self/ns/net", &netns_buf) catch "unknown";
+        try self.writeError("Failed to connect to domain socket {s}: {s}, plugin netns: {s}", .{ socket_path, @errorName(err), netns });
         return error.AlreadyHandled;
     };
     defer stream.close();
