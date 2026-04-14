@@ -55,6 +55,11 @@ fn initAddress(self: DomainSocket) !std.net.Address {
 pub fn connect(self: DomainSocket) !std.net.Stream {
     const addr = try self.initAddress();
 
+    // Debug: log plugin's current network namespace for troubleshooting
+    var netns_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const netns = std.fs.readLinkAbsolute("/proc/self/ns/net", &netns_buf) catch "unknown";
+    log.warn("Plugin connecting to {s}, plugin netns: {s}", .{ self.path, netns });
+
     const sockfd = try std.posix.socket(
         std.posix.AF.UNIX,
         std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC,
