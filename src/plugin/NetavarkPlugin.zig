@@ -340,14 +340,8 @@ fn getRequest(self: *NetavarkPlugin) ![]const u8 {
 }
 
 fn sendRequest(self: *NetavarkPlugin, socket_path: [:0]const u8, request: *const Request) !void {
-    const domain_socket = DomainSocket{
-        .path = socket_path,
-    };
-
-    const stream = domain_socket.connect() catch |err| {
-        var netns_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const netns = std.fs.readLinkAbsolute("/proc/self/ns/net", &netns_buf) catch "unknown";
-        try self.writeError("Failed to connect to domain socket {s}: {s}, plugin netns: {s}", .{ socket_path, @errorName(err), netns });
+    const stream = DomainSocket.connect(socket_path) catch |err| {
+        try self.writeError("Failed to connect to domain socket {s}: {s}", .{ socket_path, @errorName(err) });
         return error.AlreadyHandled;
     };
     defer stream.close();

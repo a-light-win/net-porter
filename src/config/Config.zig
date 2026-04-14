@@ -1,5 +1,4 @@
 const std = @import("std");
-const DomainSocket = @import("DomainSocket.zig");
 const Resource = @import("Resource.zig");
 const LogSettings = @import("../utils.zig").LogSettings;
 const Config = @This();
@@ -11,14 +10,12 @@ cni_dir: ?[]const u8 = null,
 // CNI plugin directory
 cni_plugin_dir: []const u8 = "",
 
-domain_socket: DomainSocket = DomainSocket{},
 resources: ?[]const Resource = null,
 log: LogSettings = .{},
 
 pub fn postInit(self: *Config, allocator: std.mem.Allocator, path: []const u8) !void {
+    _ = allocator;
     self.config_path = path;
-
-    // std.log.default_level = self.log.level;
 
     if (std.fs.path.dirname(path)) |dir| {
         self.config_dir = dir;
@@ -28,8 +25,6 @@ pub fn postInit(self: *Config, allocator: std.mem.Allocator, path: []const u8) !
     }
 
     self.setCNIPluginDir();
-
-    try self.domain_socket.postInit(allocator);
 }
 
 const cni_plugin_search_paths = &[_][]const u8{

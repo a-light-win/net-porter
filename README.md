@@ -10,19 +10,20 @@ It consists with two major part:
 - `net-porter server`: the rootful server that responsible for creating
   the macvlan network via CNI plugins.
 
-The `net-porter server` runs as a single global systemd service, listens on an **abstract unix socket**. When the container starts,
+The `net-porter server` runs as a single global systemd service. It monitors `/run/user/` directories and automatically creates per-user unix sockets for each ACL-allowed user. When the container starts,
 netavark will call the `net-porter plugin`. The plugin then
-will connect to the `net-porter server` via the abstract socket,
+will connect to the `net-porter server` via the per-user socket,
 and pass the required information to the `net-porter server`.
 
 The `net-porter server` will authenticate the request
 by the `uid/gid` of the caller (obtained via kernel `SO_PEERCRED`, cannot be forged). And then creates the macvlan network
 if the user has the permission.
 
-> **Why abstract socket?** Rootless podman runs in an isolated mount namespace where filesystem unix sockets (e.g. `/run/net-porter.sock`) are invisible. Abstract sockets exist in the kernel's network namespace, not on the filesystem, so they are accessible across mount namespace boundaries while still supporting `SO_PEERCRED` authentication.
+> **Why per-user sockets in `/run/user/<uid>/`?** Rootless podman runs in an isolated mount namespace and a separate network namespace (via pasta/slirp4netns). Neither filesystem sockets in `/run/` nor abstract sockets are visible across these boundaries. However, `/run/user/<uid>/` is a per-user tmpfs created by `systemd-logind` that is bind-mounted into the user namespace, making it accessible from both host and rootless podman.
 
 ## Features
 
+✅ **Dynamic Socket Management**: Automatically creates/removes per-user sockets via inotify when users log in/out
 ✅ **Single Service Architecture**: One global root service for all users, no need to manage per-user services
 ✅ **Fine-grained ACL Control**: Per resource allow lists for users and groups
 ✅ **Security Hardened**: Kernel level identity authentication, netns ownership verification, default deny policy
@@ -138,6 +139,7 @@ net-porter/
 │   ├── main.zig                  # Program entry point
 │   ├── server/                   # Server implementation
 │   │   ├── Server.zig            # Server core
+│   │   ├── SocketManager.zig     # Multi-socket management (inotify + poll)
 │   │   ├── Handler.zig           # Request handler
 │   │   ├── AclManager.zig        # ACL management
 │   │   └── Acl.zig               # ACL validation
@@ -149,7 +151,7 @@ net-porter/
 │   ├── config/                   # Configuration
 │   │   ├── Config.zig            # Config struct
 │   │   ├── ManagedConfig.zig     # Config loader
-│   │   └── DomainSocket.zig      # Socket configuration
+│   │   └── DomainSocket.zig      # Socket path helpers
 │   ├── plugin/                   # Netavark plugin implementation
 │   └── utils/                    # Utilities
 ├── misc/
@@ -215,7 +217,7 @@ Run this command as the rootless user (e.g., `alice`):
 podman network create \
   -d net-porter \
   -o net_porter_resource=macvlan-dhcp \
-  -o net_porter_socket=@net-porter \
+  -o net_porter_socket=/run/user/$(id -u)/net-porter.sock \
   macvlan-net
 ```
 
@@ -231,9 +233,6 @@ You should see the macvlan interface with an IP address from your DHCP server.
 ### Server Configuration (`/etc/net-porter/config.json`)
 ```json
 {
-  "domain_socket": {
-    "path": "@net-porter"                // Abstract socket path, default: @net-porter
-  },
   "cni_dir": "/etc/net-porter/cni.d",   // CNI config directory, optional
   "cni_plugin_dir": "/usr/lib/cni",     // CNI plugin directory, optional (auto detected)
   "resources": [
@@ -367,7 +366,7 @@ Version 1.0 uses single global service instead of per-user service instances. To
    podman network create \
      -d net-porter \
      -o net_porter_resource=macvlan-dhcp \
-     -o net_porter_socket=@net-porter \
+     -o net_porter_socket=/run/user/$(id -u)/net-porter.sock \
      macvlan-net
    ```
 
@@ -382,11 +381,11 @@ Version 1.0 uses single global service instead of per-user service instances. To
 - Verify the ACL configuration in `/etc/net-porter/config.json`
 
 #### 2. Plugin cannot connect to server
-**Error**: `Failed to connect to domain socket @net-porter: ConnectionRefused`
+**Error**: `Failed to connect to domain socket /run/user/1000/net-porter.sock: ConnectionRefused`
 **Solutions**:
 - Verify the server is running: `systemctl status net-porter`
-- Check the socket path matches between server config and podman network options
-- Verify both server and podman are in the same network namespace
+- Verify the per-user socket exists: `ls -la /run/user/$(id -u)/net-porter.sock`
+- Check your uid is in the ACL configuration
 
 #### 3. DHCP failed to get IP
 **Error**: `dhcp client: no ack received`
@@ -420,7 +419,7 @@ Restart service: `systemctl restart net-porter`
 ## Security
 
 ### Security Model
-1. **Network Namespace Isolation**: Abstract sockets are only accessible within the same network namespace, providing kernel-level connection filtering
+1. **Per-User Socket Isolation**: Each user gets their own socket under `/run/user/<uid>/` with 0600 permissions, ensuring only the owner can connect
 2. **Identity Authentication**: Caller UID/GID is obtained via `SO_PEERCRED` from kernel, cannot be forged
 3. **Socket Filtering**: Connection is immediately rejected if the user has no permission on any resource
 4. **Resource ACL Check**: Each request is validated against the resource's allow list
@@ -437,13 +436,13 @@ Restart service: `systemctl restart net-porter`
 Create a container network with `net-porter` driver, and use it with `podman`.
 
 ```bash
-podman network create -d net-porter -o net_porter_resource=macvlan-dhcp -o net_porter_socket=@net-porter macvlan-net
+podman network create -d net-porter -o net_porter_resource=macvlan-dhcp -o net_porter_socket=/run/user/$(id -u)/net-porter.sock macvlan-net
 ```
 
 - `-d net-porter`: use the `net-porter` driver.
 - `-o net_porter_resource=macvlan-dhcp`: specify the resource name, should be
   the same with server configuration.
-- `-o net_porter_socket=@net-porter`: specify the abstract socket name
-  of `net-porter server` listens on. The `@` prefix indicates an abstract
-  unix socket (not a filesystem path).
+- `-o net_porter_socket=/run/user/$(id -u)/net-porter.sock`: specify the
+  per-user socket path created by `net-porter server`. `$(id -u)` expands
+  to the current user's uid.
 - `macvlan-net`: the network name.

@@ -1,23 +1,21 @@
 const std = @import("std");
 const log = std.log.scoped(.server);
-const net = std.net;
 const config_mod = @import("../config.zig");
 const AclManager = @import("AclManager.zig");
 const CniManager = @import("../cni/CniManager.zig");
 const DhcpManager = @import("../cni/DhcpManager.zig");
-const json = std.json;
-const allocator = std.heap.page_allocator;
-const Responser = @import("../plugin/Responser.zig");
 const Handler = @import("Handler.zig");
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
+const SocketManager = @import("SocketManager.zig");
+const allocator = std.heap.page_allocator;
+const Responser = @import("../plugin/Responser.zig");
 const Server = @This();
 
 config: config_mod.Config,
 acl_manager: AclManager,
 cni_manager: CniManager,
 dhcp_manager: DhcpManager,
-server: net.Server,
-
+socket_manager: SocketManager,
 managed_config: config_mod.ManagedConfig,
 
 pub const Opts = struct {
@@ -42,40 +40,55 @@ pub fn new(opts: Opts) !Server {
     var logger = @import("root").logger;
     logger.log_settings = conf.log;
 
-    var server = try conf.domain_socket.listen();
-    errdefer server.deinit();
+    var acl_manager = try AclManager.init(allocator, conf);
+    errdefer acl_manager.deinit();
+
+    const allowed_uids = try acl_manager.allAllowedUids(allocator);
+
+    var socket_manager = try SocketManager.init(allocator, allowed_uids);
+    socket_manager.scanExisting();
 
     return Server{
         .config = conf,
-        .acl_manager = try AclManager.init(allocator, conf),
+        .acl_manager = acl_manager,
         .cni_manager = try CniManager.init(allocator, conf),
         .dhcp_manager = DhcpManager.init(allocator, conf.cni_plugin_dir),
-        .server = server,
+        .socket_manager = socket_manager,
         .managed_config = managed_config,
     };
 }
 
 pub fn deinit(self: *Server) void {
     log.info("Server shutting down...", .{});
-    // Abstract sockets are automatically cleaned up when the socket fd is closed,
-    // no filesystem cleanup needed.
-
-    self.server.deinit();
-
+    self.socket_manager.deinit();
     self.acl_manager.deinit();
     self.cni_manager.deinit();
     self.dhcp_manager.deinit();
-
     self.managed_config.deinit();
 }
 
 pub fn run(self: *Server) !void {
-    log.info("Server listening on {s}", .{self.config.domain_socket.path});
+    log.info("Server started, monitoring /run/user/ for ACL users", .{});
     const log_response = self.config.log.logEnabled(.debug, .traffic);
 
+    var event_buf: [4096]u8 = undefined;
+
     while (true) {
-        // Accept a client connection
-        var connection = try self.server.accept();
+        const poll_index = self.socket_manager.poll(-1) catch |err| {
+            log.err("poll failed: {s}", .{@errorName(err)});
+            return err;
+        };
+
+        const idx = poll_index orelse continue;
+
+        if (idx == 0) {
+            // inotify event
+            self.socket_manager.processInotifyEvents(&event_buf);
+            continue;
+        }
+
+        // Server socket event — accept connection
+        var conn = self.socket_manager.accept(idx) orelse continue;
 
         var handler = Handler{
             .arena = try ArenaAllocator.init(allocator),
@@ -83,19 +96,15 @@ pub fn run(self: *Server) !void {
             .cni_manager = &self.cni_manager,
             .dhcp_manager = &self.dhcp_manager,
             .config = &self.config,
-            .connection = connection,
+            .connection = conn,
             .responser = Responser{
-                .stream = &connection.stream,
+                .stream = &conn.stream,
                 .log_response = log_response,
             },
         };
 
-        // TODO: manage thread lifetime
         _ = std.Thread.spawn(.{}, handleRequests, .{&handler}) catch |e| {
-            log.warn(
-                "Failed to spawn thread: {s}",
-                .{@errorName(e)},
-            );
+            log.warn("Failed to spawn thread: {s}", .{@errorName(e)});
         };
     }
 }

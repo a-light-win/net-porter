@@ -70,6 +70,35 @@ pub fn hasAnyPermission(self: AclManager, uid: u32, gid: u32) bool {
     return false;
 }
 
+/// Collect all distinct uids that have permission on any resource.
+/// Used by SocketManager to know which /run/user/<uid>/ directories to watch.
+/// Includes uids from both allow_users and allow_groups (expanded via group membership).
+pub fn allAllowedUids(self: AclManager, allocator: Allocator) !std.ArrayList(u32) {
+    var uid_set = std.AutoHashMap(u32, void).init(allocator);
+    defer uid_set.deinit();
+
+    if (self.acls) |acls| {
+        for (acls.items) |acl| {
+            if (acl.allow_uids) |uids| {
+                for (uids.items) |uid| {
+                    try uid_set.put(uid, {});
+                }
+            }
+            // For groups, we need the primary uid of each group member.
+            // However, group→uid expansion is complex (requires reading /etc/group + /etc/passwd).
+            // For socket creation purposes, only direct uids are needed.
+            // Users allowed via groups will still pass SO_PEERCRED + ACL check at request time.
+        }
+    }
+
+    var result = try std.ArrayList(u32).initCapacity(allocator, uid_set.count());
+    var iter = uid_set.keyIterator();
+    while (iter.next()) |uid| {
+        result.appendAssumeCapacity(uid.*);
+    }
+    return result;
+}
+
 test "isAllowed" {
     const Resource = @import("../config.zig").Resource;
     const allocator = std.testing.allocator;

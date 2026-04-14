@@ -66,7 +66,6 @@ test "load() should return default config if the config file does not exist" {
     );
     defer managed_config.deinit();
 
-    try std.testing.expectEqualSlices(u8, "@net-porter", managed_config.config.domain_socket.path);
     try std.testing.expectEqualSlices(u8, "src/config/tests", managed_config.config.config_dir);
     try std.testing.expectEqualSlices(u8, "src/config/tests/config-not-exists.json", managed_config.config.config_path);
 }
@@ -80,7 +79,6 @@ test "load() should return config if the config file exists" {
     );
     defer managed_config.deinit();
 
-    try std.testing.expectEqualSlices(u8, "@net-porter-test", managed_config.config.domain_socket.path);
     try std.testing.expectEqualSlices(u8, "src/config/tests", managed_config.config.config_dir);
     try std.testing.expectEqualSlices(u8, "src/config/tests/config.json", managed_config.config.config_path);
 }
@@ -133,5 +131,7 @@ test "parseConfig() should successfully parse a valid config file" {
     const config = try parseConfig(allocator, "src/config/tests/config.json");
     defer config.deinit();
 
-    try std.testing.expectEqualSlices(u8, "@net-porter-test", config.value.domain_socket.path);
+    // Verify resources are parsed
+    try std.testing.expect(config.value.resources != null);
+    try std.testing.expectEqualSlices(u8, "macvlan-dhcp", config.value.resources.?[0].name);
 }

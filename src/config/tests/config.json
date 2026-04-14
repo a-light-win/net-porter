@@ -1,5 +1,8 @@
 {
-  "domain_socket": {
-    "path": "@net-porter-test"
-  }
+  "resources": [
+    {
+      "name": "macvlan-dhcp",
+      "allow_users": ["1000"]
+    }
+  ]
 }
