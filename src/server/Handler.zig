@@ -155,8 +155,8 @@ fn execAction(
     }
     switch (request.action) {
         .create => try cni.create(allocator, request, &self.responser),
-        .setup => try cni.setup(allocator, request, &self.responser),
-        .teardown => try cni.teardown(allocator, request, &self.responser),
+        .setup => try cni.setup(allocator, request, &self.responser, caller_uid),
+        .teardown => try cni.teardown(allocator, request, &self.responser, caller_uid),
     }
 }
 

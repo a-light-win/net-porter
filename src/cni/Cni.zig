@@ -15,7 +15,7 @@ cni_plugin_dir: []const u8,
 config: ?json.Parsed(CniConfig) = null,
 
 mutex: std.Thread.Mutex = std.Thread.Mutex{},
-attachments: AttachmentMap,
+user_sessions: UserAttachmentMap,
 
 pub fn load(root_allocator: Allocator, path: []const u8, cni_plugin_dir: []const u8) !*Cni {
     var arena = try ArenaAllocator.init(root_allocator);
@@ -36,18 +36,17 @@ pub fn load(root_allocator: Allocator, path: []const u8, cni_plugin_dir: []const
         .arena = arena,
         .cni_plugin_dir = cni_plugin_dir,
         .config = parsed,
-        .attachments = AttachmentMap.init(allocator),
+        .user_sessions = UserAttachmentMap.init(allocator),
     };
     return cni;
 }
 
 pub fn deinit(self: *Cni) void {
-    var it = self.attachments.iterator();
-    while (it.next()) |entry| {
-        entry.key_ptr.*.deinit();
+    var session_it = self.user_sessions.iterator();
+    while (session_it.next()) |entry| {
         entry.value_ptr.*.deinit();
     }
-    self.attachments.deinit();
+    self.user_sessions.deinit();
 
     if (self.config) |parsed| {
         parsed.deinit();
@@ -71,19 +70,20 @@ const CniCommand = enum {
     VERSION,
 };
 
-fn loadAttachment(self: *Cni, request: plugin.Request) !*Attachment {
+fn loadAttachment(self: *Cni, session: *UserSession, request: plugin.Request) !*Attachment {
     // ensure that the mutex is already locked outside
     const exec_request = request.requestExec();
+    const allocator = session.arena.allocator();
     const attachment_key = try AttachmentKey.init(
-        self.attachments.allocator,
+        allocator,
         exec_request.container_id,
         exec_request.network_options.interface_name,
     );
 
-    const result = try self.attachments.getOrPut(attachment_key);
+    const result = try session.attachments.getOrPut(attachment_key);
     if (!result.found_existing) {
         result.value_ptr.* = try Attachment.init(
-            self.attachments.allocator,
+            allocator,
             self.config.?.value,
             self.cni_plugin_dir,
         );
@@ -91,11 +91,21 @@ fn loadAttachment(self: *Cni, request: plugin.Request) !*Attachment {
     return result.value_ptr;
 }
 
-pub fn setup(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
+fn getOrCreateUserSession(self: *Cni, uid: std.posix.uid_t) !*UserSession {
+    const result = try self.user_sessions.getOrPut(uid);
+    if (!result.found_existing) {
+        const session = try UserSession.init(self.arena.childAllocator());
+        result.value_ptr.* = session;
+    }
+    return result.value_ptr.*;
+}
+
+pub fn setup(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser, caller_uid: std.posix.uid_t) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
 
-    const attachment = try self.loadAttachment(request);
+    const session = try self.getOrCreateUserSession(caller_uid);
+    const attachment = try self.loadAttachment(session, request);
     if (attachment.isExecuted()) {
         responser.writeError("The setup has been executed, teardown first", .{});
         return;
@@ -104,7 +114,7 @@ pub fn setup(self: *Cni, tentative_allocator: Allocator, request: plugin.Request
     try attachment.setup(tentative_allocator, request, responser);
 }
 
-pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
+pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser, caller_uid: std.posix.uid_t) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
 
@@ -114,7 +124,16 @@ pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Requ
         .ifname = exec_request.network_options.interface_name,
     };
 
-    if (self.attachments.fetchRemove(attachment_key)) |kv| {
+    const session = self.user_sessions.get(caller_uid) orelse {
+        log.warn(
+            "No session found for uid={d}, container_id={s}, skipping CNI DEL. This can happen if the server was restarted.",
+            .{ caller_uid, exec_request.container_id },
+        );
+        log.info("Teardown {s} is complete", .{request.request.exec.container_name});
+        return;
+    };
+
+    if (session.attachments.fetchRemove(attachment_key)) |kv| {
         var key = kv.key;
         var value = kv.value;
         defer {
@@ -125,12 +144,12 @@ pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Requ
         try value.teardown(tentative_allocator, request, responser);
     } else {
         log.warn(
-            "Attachment not found for container_id={s}, ifname={s}, skipping CNI DEL. This can happen if the server was restarted.",
-            .{ exec_request.container_id, exec_request.network_options.interface_name },
+            "Attachment not found for uid={d}, container_id={s}, ifname={s}, skipping CNI DEL. This can happen if the server was restarted.",
+            .{ caller_uid, exec_request.container_id, exec_request.network_options.interface_name },
         );
     }
 
-    log.info("Teardown {s} is complete", .{request.request.exec.container_name});
+    log.info("Teardown {s} for uid={d} is complete", .{ request.request.exec.container_name, caller_uid });
 }
 
 const CniErrorMsg = struct {
@@ -858,6 +877,36 @@ const AttachmentMap = std.HashMap(
     AttachmentKeyContext,
     80,
 );
+
+const UserSession = struct {
+    arena: ArenaAllocator,
+    attachments: AttachmentMap,
+
+    pub fn init(root_allocator: Allocator) !*UserSession {
+        var arena = try ArenaAllocator.init(root_allocator);
+        const allocator = arena.allocator();
+        const session = try allocator.create(UserSession);
+        session.* = .{
+            .arena = arena,
+            .attachments = AttachmentMap.init(allocator),
+        };
+        return session;
+    }
+
+    pub fn deinit(self: *UserSession) void {
+        var it = self.attachments.iterator();
+        while (it.next()) |entry| {
+            entry.key_ptr.*.deinit();
+            entry.value_ptr.*.deinit();
+        }
+        self.attachments.deinit();
+        const allocator = self.arena.childAllocator();
+        self.arena.deinit();
+        allocator.destroy(self);
+    }
+};
+
+const UserAttachmentMap = std.AutoHashMap(u32, *UserSession);
 
 const Attachment = struct {
     arena: ArenaAllocator,
