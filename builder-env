@@ -1,4 +1,4 @@
-PKG_VERSION=0.4.0-rc.1
+PKG_VERSION=rc
 PKG_TARGET=zig-out
 PKG_PACKAGERS="deb rpm archlinux"
 
