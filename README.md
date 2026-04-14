@@ -25,7 +25,8 @@ if the user has the permission.
 
 ✅ **Dynamic Socket Management**: Automatically creates/removes per-user sockets via inotify when users log in/out
 ✅ **Single Service Architecture**: One global root service for all users, no need to manage per-user services
-✅ **Fine-grained ACL Control**: Per resource allow lists for users and groups
+✅ **Grant-based ACL Control**: Per-resource grants with user/group matching and optional static IP range restrictions
+✅ **Static IP Support**: Validate user-requested static IPs against allowed ranges — no separate CNI config files needed
 ✅ **Security Hardened**: Kernel level identity authentication, netns ownership verification, default deny policy
 ✅ **DHCP Support**: Automatically manage per-user DHCP service instances
 ✅ **Zero Trust**: All requests must pass multi-level validation before execution
@@ -150,6 +151,7 @@ net-porter/
 │   │   └── DhcpManager.zig       # DHCP service manager
 │   ├── config/                   # Configuration
 │   │   ├── Config.zig            # Config struct
+│   │   ├── Resource.zig          # Resource, Grant, Interface, Ipam structs
 │   │   ├── ManagedConfig.zig     # Config loader
 │   │   └── DomainSocket.zig      # Socket path helpers
 │   ├── plugin/                   # Netavark plugin implementation
@@ -175,43 +177,35 @@ systemctl status net-porter
 ```
 
 ### 2. Configure network resource
-Create CNI configuration for your macvlan network at `/etc/net-porter/cni.d/macvlan-dhcp.json`:
-```json
-{
-  "cniVersion": "1.0.0",
-  "name": "macvlan-dhcp",
-  "plugins": [
-    {
-      "type": "macvlan",
-      "master": "eth0", // Replace with your host physical interface
-      "linkInContainer": false,
-      "ipam": {
-        "type": "dhcp"
-      }
-    }
-  ]
-}
-```
+Edit `/etc/net-porter/config.json` to define resources. Each resource combines interface, IPAM, and ACL in one place — no separate CNI config files needed:
 
-### 3. Configure ACL
-Edit `/etc/net-porter/config.json` to configure access permissions:
 ```json
 {
   "resources": [
     {
       "name": "macvlan-dhcp",
-      "allow_users": ["alice", "bob"], // Allow these users to use this network
-      "allow_groups": ["docker"]       // Allow users in this group to use this network
+      "interface": {
+        "type": "macvlan",
+        "master": "eth0"
+      },
+      "ipam": {
+        "type": "dhcp"
+      },
+      "acl": [
+        { "user": "alice" },
+        { "group": "devops" }
+      ]
     }
   ]
 }
 ```
-Restart service after modifying configuration:
+
+Replace `eth0` with your host physical interface. Restart service after modifying configuration:
 ```bash
 systemctl restart net-porter
 ```
 
-### 4. Create podman network
+### 3. Create podman network
 Run this command as the rootless user (e.g., `alice`):
 ```bash
 podman network create \
@@ -221,7 +215,7 @@ podman network create \
   macvlan-net
 ```
 
-### 5. Test it out
+### 4. Test it out
 Run a test container:
 ```bash
 podman run -it --rm --network macvlan-net alpine ip addr
@@ -233,57 +227,127 @@ You should see the macvlan interface with an IP address from your DHCP server.
 ### Server Configuration (`/etc/net-porter/config.json`)
 ```json
 {
-  "cni_dir": "/etc/net-porter/cni.d",   // CNI config directory, optional
-  "cni_plugin_dir": "/usr/lib/cni",     // CNI plugin directory, optional (auto detected)
+  "cni_plugin_dir": "/usr/lib/cni",
   "resources": [
     {
-      "name": "macvlan-dhcp",           // Resource name, must match CNI config file name
-      "allow_users": ["alice", "1002"], // Allowed users: username or numeric uid
-      "allow_groups": ["devops"]        // Allowed groups: group name or numeric gid
+      "name": "macvlan-dhcp",
+      "interface": {
+        "type": "macvlan",
+        "master": "eth0"
+      },
+      "ipam": {
+        "type": "dhcp"
+      },
+      "acl": [
+        { "user": "alice" },
+        { "group": "devops" }
+      ]
     },
     {
       "name": "macvlan-static",
-      "allow_users": ["bob"]
+      "interface": {
+        "type": "macvlan",
+        "master": "eth0",
+        "mode": "bridge",
+        "mtu": 9000
+      },
+      "ipam": {
+        "type": "static",
+        "gateway": "192.168.1.1",
+        "subnet": "192.168.1.0/24",
+        "routes": [{ "dst": "0.0.0.0/0" }]
+      },
+      "acl": [
+        { "user": "alice", "ips": ["192.168.1.10-192.168.1.20"] },
+        { "user": "bob",   "ips": ["192.168.1.30"] }
+      ]
     }
   ],
   "log": {
-    "level": "info",                     // Log level: debug, info, warn, error
+    "level": "info",
     "dump_env": {
-      "enabled": false,                  // Enable environment dump for debugging
-      "path": "/tmp/net-porter-dump"     // Dump directory
+      "enabled": false,
+      "path": "/tmp/net-porter-dump"
     }
   }
 }
 ```
 
-> ⚠️ **Important Note**: Each resource **must** have at least one `allow_users` or `allow_groups` entry. The service will fail to start if any resource has no access controls configured.
+> ⚠️ **Important**: Each resource **must** have at least one ACL grant entry. The service will fail to start if any resource has no access controls configured.
 
-### CNI Configuration
-Put your CNI configuration files under `/etc/net-porter/cni.d/`, the filename must be `<resource-name>.json`.
+### Resource Fields
 
-Common macvlan configuration options:
-| Option | Description |
-|--------|-------------|
-| `master` | Host physical interface to use for macvlan |
-| `mode` | Macvlan mode: `bridge` (default), `vepa`, `private`, `passthru` |
-| `mtu` | MTU size for the interface |
-| `ipam.type` | IPAM type: `dhcp`, `static`, `host-local` |
+| Field | Description | Required |
+|-------|-------------|----------|
+| `name` | Resource name, used to reference this resource in podman network creation | ✅ |
+| `interface` | Network interface configuration (see below) | ✅ |
+| `ipam` | IP address management configuration (see below) | ✅ |
+| `acl` | Access control list — array of grants (see below) | ✅ |
+
+### Interface Configuration
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `type` | Interface type: `macvlan` | — |
+| `master` | Host physical interface to attach to | — |
+| `mode` | Macvlan mode: `bridge`, `vepa`, `private`, `passthru` | `bridge` |
+| `mtu` | MTU size for the interface | unset (use kernel default) |
+
+### IPAM Configuration
+
+| Field | Description | Required |
+|-------|-------------|----------|
+| `type` | IPAM type: `dhcp` or `static` | ✅ |
+| `gateway` | Default gateway (static only) | static: recommended |
+| `subnet` | Subnet in CIDR notation, e.g. `192.168.1.0/24` (static only) | static: ✅ |
+| `routes` | Array of `{ "dst": "<cidr>" }` routes (static only) | static: optional |
+
+### ACL Grants
+
+Each grant in the `acl` array specifies **who** can access this resource and, for static IPAM, **which IPs** they are allowed to use.
+
+| Field | Description | Required |
+|-------|-------------|----------|
+| `user` | Username or numeric UID | one of `user` or `group` |
+| `group` | Group name or numeric GID | one of `user` or `group` |
+| `ips` | Array of allowed IP ranges or single IPs (static IPAM only) | static: ✅ |
+
+**IP range formats** (for static IPAM):
+- Single IP: `"192.168.1.30"`
+- IP range: `"192.168.1.10-192.168.1.20"`
+
+When IPAM type is `static`, the caller must request a specific IP (via podman `--ip` or netavark static_ips option), and net-porter validates it against the user's allowed ranges.
+
+### Top-level Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `cni_plugin_dir` | Directory containing CNI plugin binaries | auto-detected (`/usr/lib/cni` or `/opt/cni/bin`) |
+| `log.level` | Log level: `debug`, `info`, `warn`, `error` | `info` |
+| `log.dump_env` | Environment dump for debugging | disabled |
 
 ## Usage Examples
 
 ### Example 1: Multiple users with different networks
-Configuration:
 ```json
-// /etc/net-porter/config.json
 {
   "resources": [
     {
       "name": "vlan-100",
-      "allow_users": ["alice", "bob"]
+      "interface": { "type": "macvlan", "master": "eth0.100" },
+      "ipam": { "type": "dhcp" },
+      "acl": [
+        { "user": "alice" },
+        { "user": "bob" }
+      ]
     },
     {
       "name": "vlan-200",
-      "allow_groups": ["devops"]
+      "interface": { "type": "macvlan", "master": "eth0.200" },
+      "ipam": { "type": "dhcp" },
+      "acl": [
+        { "group": "devops" }
+      ]
     }
   ]
 }
@@ -296,49 +360,61 @@ User alice creates network:
 podman network create -d net-porter -o net_porter_resource=vlan-100 vlan100
 ```
 
-### Example 2: Static IP configuration
-CNI config (`/etc/net-porter/cni.d/static-net.json`):
+### Example 2: Static IP with per-user ranges
 ```json
 {
-  "cniVersion": "1.0.0",
-  "name": "static-net",
-  "plugins": [
+  "resources": [
     {
-      "type": "macvlan",
-      "master": "eth0",
+      "name": "static-net",
+      "interface": { "type": "macvlan", "master": "eth0" },
       "ipam": {
         "type": "static",
-        "addresses": [
-          {
-            "address": "192.168.1.10/24",
-            "gateway": "192.168.1.1"
-          }
-        ],
-        "routes": [
-          { "dst": "0.0.0.0/0" }
-        ]
-      }
+        "gateway": "192.168.1.1",
+        "subnet": "192.168.1.0/24",
+        "routes": [{ "dst": "0.0.0.0/0" }]
+      },
+      "acl": [
+        { "user": "alice", "ips": ["192.168.1.10-192.168.1.20"] },
+        { "user": "bob",   "ips": ["192.168.1.30-192.168.1.40"] }
+      ]
     }
   ]
 }
 ```
+- `alice` can request any IP in `192.168.1.10` – `192.168.1.20`
+- `bob` can request any IP in `192.168.1.30` – `192.168.1.40`
+- Requests with IPs outside the user's range are rejected
 
-### Example 3: Multiple IP configurations
+Run a container with a specific static IP:
+```bash
+podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
+```
+
+### Example 3: Mixed DHCP and static resources
 ```json
 {
-  "cniVersion": "1.0.0",
-  "name": "dual-stack",
-  "plugins": [
+  "resources": [
     {
-      "type": "macvlan",
-      "master": "eth0",
+      "name": "macvlan-dhcp",
+      "interface": { "type": "macvlan", "master": "eth0" },
+      "ipam": { "type": "dhcp" },
+      "acl": [
+        { "user": "alice" },
+        { "group": "devops" }
+      ]
+    },
+    {
+      "name": "macvlan-static",
+      "interface": { "type": "macvlan", "master": "eth0", "mode": "bridge", "mtu": 9000 },
       "ipam": {
-        "type": "dhcp",
-        "addresses": [
-          { "address": "10.0.0.0/24" },
-          { "address": "2001:db8::/64" }
-        ]
-      }
+        "type": "static",
+        "gateway": "10.0.0.1",
+        "subnet": "10.0.0.0/24",
+        "routes": [{ "dst": "0.0.0.0/0" }]
+      },
+      "acl": [
+        { "user": "alice", "ips": ["10.0.0.5-10.0.0.10"] }
+      ]
     }
   ]
 }
@@ -353,16 +429,17 @@ Version 1.0 uses single global service instead of per-user service instances. To
    systemctl disable net-porter@*
    ```
 2. Install the new version package
-3. Merge your per-user ACL configurations into the global `/etc/net-porter/config.json`
-4. Start the global service:
+3. Merge your per-user ACL configurations into the global `/etc/net-porter/config.json` using the new format (see [Configuration Guide](#configuration-guide))
+4. Remove old CNI config files from `/etc/net-porter/cni.d/` — interface and IPAM settings are now defined inline in the resource
+5. Start the global service:
    ```bash
    systemctl enable --now net-porter
    ```
-5. Recreate podman networks with the new abstract socket path:
+6. Recreate podman networks with the new abstract socket path:
    ```bash
    # Remove old network
    podman network rm macvlan-net
-   # Recreate with abstract socket
+   # Recreate with per-user socket
    podman network create \
      -d net-porter \
      -o net_porter_resource=macvlan-dhcp \
@@ -378,14 +455,14 @@ Version 1.0 uses single global service instead of per-user service instances. To
 **Error**: `Access denied for uid=1000`
 **Solutions**:
 - Check if the user has permission for the requested resource in the config
-- Verify the ACL configuration in `/etc/net-porter/config.json`
+- Verify the ACL grants in `/etc/net-porter/config.json`
 
 #### 2. Plugin cannot connect to server
 **Error**: `Failed to connect to domain socket /run/user/1000/net-porter.sock: ConnectionRefused`
 **Solutions**:
 - Verify the server is running: `systemctl status net-porter`
 - Verify the per-user socket exists: `ls -la /run/user/$(id -u)/net-porter.sock`
-- Check your uid is in the ACL configuration
+- Check your uid is in an ACL grant
 
 #### 3. DHCP failed to get IP
 **Error**: `dhcp client: no ack received`
@@ -394,12 +471,19 @@ Version 1.0 uses single global service instead of per-user service instances. To
 - Check if the master interface is connected to the correct network
 - Ensure macvlan mode is supported by your network switch
 
-#### 4. CNI configuration not found
-**Error**: `Failed to load CNI for resource=xxx`
+#### 4. Static IP rejected
+**Error**: `Static IP x.x.x.x not allowed for user`
 **Solutions**:
-- Check if `/etc/net-porter/cni.d/xxx.json` exists
-- Verify the JSON syntax is valid
-- Ensure the `name` field in CNI config matches the resource name
+- Check the user's `ips` range in the ACL grant
+- Ensure the requested IP falls within the allowed range
+- Verify the IP format (single IP or range in `start-end` format)
+
+#### 5. Resource not found
+**Error**: `Resource 'xxx' not found in config`
+**Solutions**:
+- Check if the resource exists in `/etc/net-porter/config.json`
+- Ensure the `name` field matches what you pass via `net_porter_resource`
+- Restart the service after modifying configuration
 
 ### Logs
 Check service logs:
@@ -422,12 +506,14 @@ Restart service: `systemctl restart net-porter`
 1. **Per-User Socket Isolation**: Each user gets their own socket under `/run/user/<uid>/` with 0600 permissions, ensuring only the owner can connect
 2. **Identity Authentication**: Caller UID/GID is obtained via `SO_PEERCRED` from kernel, cannot be forged
 3. **Socket Filtering**: Connection is immediately rejected if the user has no permission on any resource
-4. **Resource ACL Check**: Each request is validated against the resource's allow list
-5. **Netns Verification**: The network namespace file owner must match the caller UID
-6. **Default Deny**: Any request that doesn't explicitly match a policy is rejected
+4. **Grant-based ACL Check**: Each request is validated against the resource's grant list — grants support user/group matching with optional IP range restrictions
+5. **Static IP Validation**: For static IPAM resources, the requested IP is validated against the user's allowed IP ranges — requests outside the range are rejected
+6. **Netns Verification**: The network namespace file owner must match the caller UID
+7. **Default Deny**: Any request that doesn't explicitly match a policy is rejected
 
 ### Hardening Recommendations
-- Follow the principle of least privilege when configuring ACLs
+- Follow the principle of least privilege when configuring ACL grants
+- For static IP resources, assign each user their own exclusive IP range — do not overlap ranges between users
 - Regularly audit access logs for unusual activity
 - Keep CNI plugins updated to latest version
 
