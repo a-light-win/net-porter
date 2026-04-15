@@ -618,24 +618,35 @@ const PluginConf = struct {
 
     fn setDhcpSocketPath(self: *PluginConf, uid: u32) !void {
         const allocator = self.arena.?.allocator();
-        if (self.conf.getPtr("ipam")) |ipam| {
-            switch (ipam.*) {
-                .object => |ipam_obj| {
-                    if (ipam_obj.get("daemonSocketPath")) |_| {
-                        return;
-                    }
 
-                    const path = try std.fmt.allocPrint(
-                        allocator,
-                        "/run/user/{d}/net-porter-dhcp.sock",
-                        .{uid},
-                    );
+        const ipam = self.conf.get("ipam") orelse return;
+        const ipam_obj = switch (ipam) {
+            .object => |obj| obj,
+            else => return,
+        };
 
-                    try ipam.object.put("daemonSocketPath", json.Value{ .string = path });
-                },
-                else => {},
-            }
+        if (ipam_obj.get("daemonSocketPath")) |_| {
+            return;
         }
+
+        const ipam_type = ipam_obj.get("type") orelse return;
+        const type_str = switch (ipam_type) {
+            .string => |s| s,
+            else => return,
+        };
+
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "/run/user/{d}/net-porter-dhcp.sock",
+            .{uid},
+        );
+
+        // Build a fresh ipam ObjectMap to avoid mutating the shared original
+        var new_ipam = json.ObjectMap.init(allocator);
+        try new_ipam.put("type", .{ .string = type_str });
+        try new_ipam.put("daemonSocketPath", .{ .string = path });
+
+        try self.conf.put("ipam", .{ .object = new_ipam });
     }
 
     pub fn isDhcp(self: PluginConf) bool {
@@ -679,6 +690,18 @@ const PluginConf = struct {
     fn setStaticIp(self: *PluginConf, ip: []const u8, ipam_config: config_mod.Ipam) !void {
         const allocator = self.arena.?.allocator();
 
+        // Read original ipam type (read-only, shared)
+        const ipam = self.conf.get("ipam") orelse return;
+        const ipam_obj = switch (ipam) {
+            .object => |obj| obj,
+            else => return,
+        };
+        const ipam_type = ipam_obj.get("type") orelse return;
+        const type_str = switch (ipam_type) {
+            .string => |s| s,
+            else => return,
+        };
+
         // Extract prefix length from subnet (e.g., "192.168.1.0/24" -> "24")
         const subnet = ipam_config.subnet orelse return error.InvalidSubnet;
         const slash_pos = std.mem.lastIndexOf(u8, subnet, "/") orelse return error.InvalidSubnet;
@@ -694,29 +717,27 @@ const PluginConf = struct {
             try addr_obj.put("gateway", .{ .string = gw });
         }
 
-        // Inject into ipam
-        if (self.conf.getPtr("ipam")) |ipam| {
-            switch (ipam.*) {
-                .object => |*ipam_obj| {
-                    // Set addresses
-                    var addresses = json.Array.initCapacity(allocator, 1) catch unreachable;
-                    addresses.appendAssumeCapacity(.{ .object = addr_obj });
-                    try ipam_obj.put("addresses", .{ .array = addresses });
+        // Build a fresh ipam ObjectMap to avoid mutating the shared original
+        var new_ipam = json.ObjectMap.init(allocator);
+        try new_ipam.put("type", .{ .string = type_str });
 
-                    // Set routes if present
-                    if (ipam_config.routes) |rts| {
-                        var routes_arr = json.Array.initCapacity(allocator, rts.len) catch unreachable;
-                        for (rts) |r| {
-                            var route_obj = json.ObjectMap.init(allocator);
-                            try route_obj.put("dst", .{ .string = r.dst });
-                            routes_arr.appendAssumeCapacity(.{ .object = route_obj });
-                        }
-                        try ipam_obj.put("routes", .{ .array = routes_arr });
-                    }
-                },
-                else => {},
+        // Set addresses
+        var addresses = json.Array.initCapacity(allocator, 1) catch unreachable;
+        addresses.appendAssumeCapacity(.{ .object = addr_obj });
+        try new_ipam.put("addresses", .{ .array = addresses });
+
+        // Set routes if present
+        if (ipam_config.routes) |rts| {
+            var routes_arr = json.Array.initCapacity(allocator, rts.len) catch unreachable;
+            for (rts) |r| {
+                var route_obj = json.ObjectMap.init(allocator);
+                try route_obj.put("dst", .{ .string = r.dst });
+                routes_arr.appendAssumeCapacity(.{ .object = route_obj });
             }
+            try new_ipam.put("routes", .{ .array = routes_arr });
         }
+
+        try self.conf.put("ipam", .{ .object = new_ipam });
     }
 
     test "isDhcp() will return false if the ipam type is not dhcp" {
