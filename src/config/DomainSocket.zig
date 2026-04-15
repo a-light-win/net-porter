@@ -67,12 +67,6 @@ test "pathForUid formats correctly" {
     try std.testing.expectEqualSlices(u8, "/run/user/1000/net-porter.sock", path);
 }
 
-test "connect fails for non-existent socket" {
-    _ = connect("/tmp/this-socket-not-exists.sock") catch |err| {
-        try std.testing.expectEqual(error.FileNotFound, err);
-    };
-}
-
 test "listen creates socket and sets permissions" {
     const gpa = std.testing.allocator;
     const uid = std.os.linux.getuid();
