@@ -80,7 +80,7 @@ Packages will be output to `zig-out/` directory.
 If you want to build directly on your host:
 
 **Dependencies required:**
-- [Zig](https://ziglang.org/) >= 0.15.2 (compiler)
+- [Zig](https://ziglang.org/) 0.16.0 (compiler)
 - [nfpm](https://nfpm.goreleaser.com/) >= 2.30 (packaging tool, required only for building packages)
 - git
 - just

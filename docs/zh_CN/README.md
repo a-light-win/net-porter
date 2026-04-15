@@ -76,7 +76,7 @@ just pack-all
 如果你希望直接在宿主机构建：
 
 **所需依赖：**
-- [Zig](https://ziglang.org/) >= 0.15.2（编译器）
+- [Zig](https://ziglang.org/) 0.16.0（编译器）
 - [nfpm](https://nfpm.goreleaser.com/) >= 2.30（打包工具，仅在构建包时需要）
 - git
 - just
