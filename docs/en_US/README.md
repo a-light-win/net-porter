@@ -23,13 +23,13 @@ if the user has the permission.
 
 ## Features
 
-✅ **Dynamic Socket Management**: Automatically creates/removes per-user sockets via inotify when users log in/out
-✅ **Single Service Architecture**: One global root service for all users, no need to manage per-user services
-✅ **Grant-based ACL Control**: Per-resource grants with user/group matching and optional static IP range restrictions
-✅ **Static IP Support**: Validate user-requested static IPs against allowed ranges — no separate CNI config files needed
-✅ **Security Hardened**: Kernel level identity authentication, netns ownership verification, default deny policy
-✅ **DHCP Support**: Automatically manage per-user DHCP service instances
-✅ **Zero Trust**: All requests must pass multi-level validation before execution
+- **Dynamic Socket Management**: Automatically creates/removes per-user sockets via inotify when users log in/out
+- **Single Service Architecture**: One global root service for all users, no need to manage per-user services
+- **Grant-based ACL Control**: Per-resource grants with user/group matching and optional static IP range restrictions
+- **Static IP Support**: Validate user-requested static IPs against allowed ranges — no separate CNI config files needed
+- **Security Hardened**: Kernel level identity authentication, netns ownership verification, default deny policy
+- **DHCP Support**: Automatically manage per-user DHCP service instances
+- **Zero Trust**: All requests must pass multi-level validation before execution
 
 ## Installation
 
