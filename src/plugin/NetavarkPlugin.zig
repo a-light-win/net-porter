@@ -182,15 +182,16 @@ pub const ErrorResponse = struct {
 };
 
 allocator: std.mem.Allocator,
-stdin_file: std.fs.File,
-stdout_file: std.fs.File,
+stdin_file: std.Io.File,
+stdout_file: std.Io.File,
+io: std.Io = undefined,
 namespace_path: []const u8 = undefined,
 
 pub fn defaultNetavarkPlugin() NetavarkPlugin {
     return NetavarkPlugin{
         .allocator = std.heap.page_allocator,
-        .stdin_file = std.fs.File.stdin(),
-        .stdout_file = std.fs.File.stdout(),
+        .stdin_file = std.Io.File.stdin(),
+        .stdout_file = std.Io.File.stdout(),
     };
 }
 
@@ -205,7 +206,7 @@ pub fn printInfo(self: *NetavarkPlugin) !void {
 
 fn write(self: *NetavarkPlugin, message: anytype) !void {
     var write_buffer: [4096]u8 = undefined;
-    var file_writer = self.stdout_file.writer(&write_buffer);
+    var file_writer = self.stdout_file.writer(self.io, &write_buffer);
     try json.Stringify.value(message, stringify_options, &file_writer.interface);
     try file_writer.end();
 }
@@ -335,20 +336,20 @@ fn validateNetwork(self: *NetavarkPlugin, network: Network) bool {
 
 fn getRequest(self: *NetavarkPlugin) ![]const u8 {
     var read_buffer: [4096]u8 = undefined;
-    var file_reader = self.stdin_file.reader(&read_buffer);
+    var file_reader = self.stdin_file.reader(self.io, &read_buffer);
     return try file_reader.interface.allocRemaining(self.allocator, .limited(max_request_size));
 }
 
 fn sendRequest(self: *NetavarkPlugin, socket_path: [:0]const u8, request: *const Request) !void {
-    const stream = DomainSocket.connect(socket_path) catch |err| {
+    const stream = DomainSocket.connect(self.io, socket_path) catch |err| {
         try self.writeError("Failed to connect to domain socket {s}: {s}", .{ socket_path, @errorName(err) });
         return error.AlreadyHandled;
     };
-    defer stream.close();
+    defer stream.close(self.io);
 
     {
         var write_buffer: [4096]u8 = undefined;
-        var stream_writer = stream.writer(&write_buffer);
+        var stream_writer = stream.writer(self.io, &write_buffer);
         json.Stringify.value(request, stringify_options, &stream_writer.interface) catch |err| {
             try self.writeError("Failed to send request to domain socket {s}: {s}", .{ socket_path, @errorName(err) });
             return error.AlreadyHandled;
@@ -356,11 +357,11 @@ fn sendRequest(self: *NetavarkPlugin, socket_path: [:0]const u8, request: *const
         try stream_writer.interface.flush();
     }
 
-    try std.posix.shutdown(stream.handle, .send);
+    try stream.shutdown(self.io, .send);
 
     var read_buffer: [4096]u8 = undefined;
-    var stream_reader = stream.reader(&read_buffer);
-    const buf = stream_reader.interface().allocRemaining(
+    var stream_reader = stream.reader(self.io, &read_buffer);
+    const buf = stream_reader.interface.allocRemaining(
         self.allocator,
         .limited(max_response_size),
     ) catch |err| {
@@ -370,7 +371,7 @@ fn sendRequest(self: *NetavarkPlugin, socket_path: [:0]const u8, request: *const
 
     {
         var write_buffer: [4096]u8 = undefined;
-        var out_writer = self.stdout_file.writer(&write_buffer);
+        var out_writer = self.stdout_file.writer(self.io, &write_buffer);
         _ = try out_writer.interface.write(buf);
         try out_writer.end();
     }

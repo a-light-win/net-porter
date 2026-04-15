@@ -7,8 +7,6 @@ const network = @import("network.zig");
 const utils = @import("utils.zig");
 const Logger = utils.Logger;
 
-const allocator = std.heap.page_allocator;
-
 pub var logger = Logger.newLogger();
 
 fn logIt(
@@ -25,11 +23,12 @@ pub const std_options = std.Options{
     .logFn = logIt,
 };
 
-pub fn main() !void {
-    var runner = cli.AppRunner.init(allocator) catch |err| {
-        const error_message = network.ErrorMessage.init(@errorName(err));
-        try json.stringifyToStdout(error_message);
-    };
+pub fn main(init: std.process.Init) !void {
+    logger.io = init.io;
+    plugin.setIo(init.io);
+    server.setIo(init.io);
+
+    var runner = cli.AppRunner.init(&init);
 
     const app = &cli.App{
         .command = cli.Command{
@@ -56,7 +55,7 @@ pub fn main() !void {
             error.AlreadyHandled => {},
             else => {
                 const error_message = network.ErrorMessage.init(@errorName(err));
-                try json.stringifyToStdout(error_message);
+                try json.stringifyToStdout(init.io, error_message);
             },
         }
         std.process.exit(1);

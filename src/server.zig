@@ -1,9 +1,12 @@
 const std = @import("std");
 const cli = @import("zig-cli");
 const Server = @import("server/Server.zig");
-const config = @import("config.zig");
 
 var server_opts = Server.Opts{};
+
+pub fn setIo(io: std.Io) void {
+    server_opts.io = io;
+}
 
 pub fn cmd_server(r: *cli.AppRunner) !cli.Command {
     return cli.Command{

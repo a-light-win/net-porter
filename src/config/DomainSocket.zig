@@ -15,19 +15,20 @@ pub fn pathForUid(allocator: std.mem.Allocator, uid: std.posix.uid_t) ![:0]const
 }
 
 /// Connect to a filesystem unix socket.
-pub fn connect(path: [:0]const u8) !std.net.Stream {
-    return try std.net.connectUnixSocket(path);
+pub fn connect(io: std.Io, path: [:0]const u8) !std.Io.net.Stream {
+    const address = try std.Io.net.UnixAddress.init(path);
+    return address.connect(io);
 }
 
 /// Listen on a filesystem unix socket.
 /// Creates the socket file, sets ownership to `uid`, and mode to 0600.
-pub fn listen(path: [:0]const u8, uid: std.posix.uid_t) !std.net.Server {
-    const address = try std.net.Address.initUnix(path);
+pub fn listen(io: std.Io, path: [:0]const u8, uid: std.posix.uid_t) !std.Io.net.Server {
+    const address = try std.Io.net.UnixAddress.init(path);
 
     // Remove stale socket file if it exists
-    std.fs.cwd().deleteFile(path) catch {};
+    std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
-    const server = address.listen(.{}) catch |e| {
+    const server = address.listen(io, .{}) catch |e| {
         log.err("Failed to listen on {s}: {s}", .{ path, @errorName(e) });
         return e;
     };
@@ -53,9 +54,10 @@ fn setOwner(path: [:0]const u8, uid: std.posix.uid_t) void {
 }
 
 fn setMode(path: [:0]const u8, mode: std.posix.mode_t) void {
-    std.posix.fchmodat(std.posix.AT.FDCWD, path, mode, 0) catch |e| {
-        log.warn("Failed to set socket mode for {s}: {s}", .{ path, @errorName(e) });
-    };
+    const rc = std.os.linux.fchmodat(std.posix.AT.FDCWD, path, mode);
+    if (rc != 0) {
+        log.warn("Failed to set socket mode for {s}", .{path});
+    }
 }
 
 // -- Tests --
@@ -69,35 +71,39 @@ test "pathForUid formats correctly" {
 
 test "listen creates socket and sets permissions" {
     const gpa = std.testing.allocator;
+    const io = std.testing.io;
     const uid = std.os.linux.getuid();
     const path_raw = try std.fmt.allocPrint(gpa, "/tmp/net-porter-test-perm-{}.sock", .{uid});
     defer gpa.free(path_raw);
     const path = try gpa.dupeZ(u8, path_raw);
     defer gpa.free(path);
 
-    var server = try listen(path, uid);
-    defer server.deinit();
-    defer std.fs.cwd().deleteFile(path) catch {};
+    var server = try listen(io, path, uid);
+    defer server.deinit(io);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
-    const stat = try std.posix.fstatat(std.posix.AT.FDCWD, path, 0);
-    const mode = stat.mode & 0o777;
-    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), mode);
+    var statx_buf: std.os.linux.Statx = undefined;
+    const rc = std.os.linux.statx(std.os.linux.AT.FDCWD, path, 0, .{ .MODE = true }, &statx_buf);
+    if (rc != 0) return error.Unexpected;
+    const mode = statx_buf.mode & 0o777;
+    try std.testing.expectEqual(@as(u16, 0o600), mode);
 }
 
 test "listen and connect round-trip" {
     const gpa = std.testing.allocator;
+    const io = std.testing.io;
     const uid = std.os.linux.getuid();
     const path_raw = try std.fmt.allocPrint(gpa, "/tmp/net-porter-test-roundtrip-{}.sock", .{uid});
     defer gpa.free(path_raw);
     const path = try gpa.dupeZ(u8, path_raw);
     defer gpa.free(path);
 
-    var server = try listen(path, uid);
-    defer server.deinit();
-    defer std.fs.cwd().deleteFile(path) catch {};
+    var server = try listen(io, path, uid);
+    defer server.deinit(io);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
-    const stream = try connect(path);
-    stream.close();
+    const stream = try connect(io, path);
+    stream.close(io);
 }
 
 test {

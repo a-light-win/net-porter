@@ -5,8 +5,9 @@ const DhcpManager = @This();
 const log = std.log.scoped(.dhcpManager);
 
 allocator: Allocator,
+io: std.Io,
 cni_plugin_dir: []const u8,
-mutex: std.Thread.Mutex,
+mutex: std.Io.Mutex = .init,
 services: ServiceMap,
 
 const ServiceMap = std.HashMap(u32, *DhcpService, ServiceMapContext, 80);
@@ -22,11 +23,11 @@ const ServiceMapContext = struct {
     }
 };
 
-pub fn init(allocator: Allocator, cni_plugin_dir: []const u8) DhcpManager {
+pub fn init(io: std.Io, allocator: Allocator, cni_plugin_dir: []const u8) DhcpManager {
     return DhcpManager{
         .allocator = allocator,
+        .io = io,
         .cni_plugin_dir = cni_plugin_dir,
-        .mutex = .{},
         .services = ServiceMap.init(allocator),
     };
 }
@@ -41,13 +42,13 @@ pub fn deinit(self: *DhcpManager) void {
 }
 
 pub fn ensureStarted(self: *DhcpManager, uid: u32) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    try self.mutex.lock(self.io);
+    defer self.mutex.unlock(self.io);
 
     const result = try self.services.getOrPut(uid);
     if (!result.found_existing) {
         const svc = try self.allocator.create(DhcpService);
-        svc.* = try DhcpService.init(self.allocator, uid, self.cni_plugin_dir);
+        svc.* = try DhcpService.init(self.io, self.allocator, uid, self.cni_plugin_dir);
         result.value_ptr.* = svc;
         log.info("Created DHCP service for uid={d}", .{uid});
     }

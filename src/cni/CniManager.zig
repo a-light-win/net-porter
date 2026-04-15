@@ -9,13 +9,14 @@ const CniMap = std.StringHashMap(*Cni);
 const CniManager = @This();
 
 arena: ArenaAllocator,
+io: std.Io,
 cni_plugin_dir: []const u8,
 resources: []const Resource,
 cni_plugins: CniMap,
 
-mutex: std.Thread.Mutex = std.Thread.Mutex{},
+mutex: std.Io.Mutex = .init,
 
-pub fn init(root_allocator: Allocator, config: Config) Allocator.Error!CniManager {
+pub fn init(io: std.Io, root_allocator: Allocator, config: Config) Allocator.Error!CniManager {
     var arena = try ArenaAllocator.init(root_allocator);
     errdefer arena.deinit();
 
@@ -23,6 +24,7 @@ pub fn init(root_allocator: Allocator, config: Config) Allocator.Error!CniManage
 
     return CniManager{
         .arena = arena,
+        .io = io,
         .cni_plugin_dir = config.cni_plugin_dir,
         .resources = resources,
         .cni_plugins = CniMap.init(arena.allocator()),
@@ -40,8 +42,8 @@ pub fn deinit(self: *CniManager) void {
 }
 
 pub fn loadCni(self: *CniManager, name: []const u8) !*Cni {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    try self.mutex.lock(self.io);
+    defer self.mutex.unlock(self.io);
 
     if (self.cni_plugins.get(name)) |plugin| {
         return plugin;
@@ -55,7 +57,7 @@ pub fn loadCni(self: *CniManager, name: []const u8) !*Cni {
 
     const allocator = self.arena.allocator();
 
-    const cni = try Cni.init(self.arena.childAllocator(), resource, self.cni_plugin_dir);
+    const cni = try Cni.init(self.io, self.arena.childAllocator(), resource, self.cni_plugin_dir);
     errdefer cni.deinit();
 
     try self.cni_plugins.put(try allocator.dupe(u8, name), cni);
@@ -94,7 +96,7 @@ test "CniManager: findResource returns matching resource" {
         },
     };
 
-    var manager = try init(allocator, config);
+    var manager = try init(std.testing.io, allocator, config);
     defer manager.deinit();
 
     const found = manager.findResource("net-a");
@@ -124,7 +126,7 @@ test "CniManager: loadCni returns ResourceNotFound for unknown resource" {
         },
     };
 
-    var manager = try init(allocator, config);
+    var manager = try init(std.testing.io, allocator, config);
     defer manager.deinit();
 
     const result = manager.loadCni("not-exists");
@@ -137,7 +139,7 @@ test "CniManager: loadCni with null resources returns ResourceNotFound" {
         .resources = null,
     };
 
-    var manager = try init(allocator, config);
+    var manager = try init(std.testing.io, allocator, config);
     defer manager.deinit();
 
     const result = manager.loadCni("anything");

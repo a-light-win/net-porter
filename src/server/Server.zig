@@ -7,11 +7,11 @@ const DhcpManager = @import("../cni/DhcpManager.zig");
 const Handler = @import("Handler.zig");
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const SocketManager = @import("SocketManager.zig");
-const allocator = std.heap.page_allocator;
 const Responser = @import("../plugin/Responser.zig");
 const Server = @This();
 
 config: config_mod.Config,
+io: std.Io,
 acl_manager: AclManager,
 cni_manager: CniManager,
 dhcp_manager: DhcpManager,
@@ -20,10 +20,15 @@ managed_config: config_mod.ManagedConfig,
 
 pub const Opts = struct {
     config_path: ?[]const u8 = null,
+    io: ?std.Io = null,
 };
 
 pub fn new(opts: Opts) !Server {
+    const io = opts.io orelse return error.IoNotInitialized;
+    const allocator = std.heap.page_allocator;
+
     var managed_config = config_mod.ManagedConfig.load(
+        io,
         allocator,
         opts.config_path,
     ) catch |e| {
@@ -45,14 +50,15 @@ pub fn new(opts: Opts) !Server {
 
     const allowed_uids = try conf.resolveUserUids(allocator);
 
-    var socket_manager = try SocketManager.init(allocator, allowed_uids);
-    socket_manager.scanExisting();
+    var socket_manager = try SocketManager.init(io, allocator, allowed_uids);
+    socket_manager.scanExisting(io);
 
     return Server{
         .config = conf,
+        .io = io,
         .acl_manager = acl_manager,
-        .cni_manager = try CniManager.init(allocator, conf),
-        .dhcp_manager = DhcpManager.init(allocator, conf.cni_plugin_dir),
+        .cni_manager = try CniManager.init(io, allocator, conf),
+        .dhcp_manager = DhcpManager.init(io, allocator, conf.cni_plugin_dir),
         .socket_manager = socket_manager,
         .managed_config = managed_config,
     };
@@ -68,6 +74,7 @@ pub fn deinit(self: *Server) void {
 }
 
 pub fn run(self: *Server) !void {
+    const io = self.io;
     log.info("Server started, monitoring /run/user/ for ACL users", .{});
     const log_response = self.config.log.logEnabled(.debug, .traffic);
 
@@ -88,16 +95,18 @@ pub fn run(self: *Server) !void {
         }
 
         // Server socket event — accept connection
-        var conn = self.socket_manager.accept(idx) orelse continue;
+        var conn = self.socket_manager.accept(io, idx) orelse continue;
 
         var handler = Handler{
-            .arena = try ArenaAllocator.init(allocator),
+            .io = io,
+            .arena = try ArenaAllocator.init(std.heap.page_allocator),
             .acl_manager = &self.acl_manager,
             .cni_manager = &self.cni_manager,
             .dhcp_manager = &self.dhcp_manager,
             .config = &self.config,
             .connection = conn,
             .responser = Responser{
+                .io = io,
                 .stream = &conn.stream,
                 .log_response = log_response,
             },

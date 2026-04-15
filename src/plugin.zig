@@ -1,3 +1,4 @@
+const std = @import("std");
 const cli = @import("zig-cli");
 const NetavarkPlugin = @import("plugin/NetavarkPlugin.zig");
 pub const Responser = @import("plugin/Responser.zig");
@@ -14,6 +15,10 @@ pub const Subnet = NetavarkPlugin.Subnet;
 pub const NetworkPluginExec = NetavarkPlugin.NetworkPluginExec;
 
 var plugin = NetavarkPlugin.defaultNetavarkPlugin();
+
+pub fn setIo(io: std.Io) void {
+    plugin.io = io;
+}
 
 fn create() !void {
     try plugin.create();

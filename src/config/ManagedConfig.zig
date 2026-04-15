@@ -16,17 +16,17 @@ pub fn deinit(self: ManagedConfig) void {
     }
 }
 
-pub fn load(root_allocator: std.mem.Allocator, config_path: ?[]const u8) !ManagedConfig {
+pub fn load(io: std.Io, root_allocator: std.mem.Allocator, config_path: ?[]const u8) !ManagedConfig {
     var arena = try ArenaAllocator.init(root_allocator);
     errdefer arena.deinit();
 
     const allocator = arena.allocator();
     const path = if (config_path) |value| value else default_config_path;
 
-    const parsed_config = parseConfig(allocator, path) catch |err| switch (err) {
+    const parsed_config = parseConfig(io, allocator, path) catch |err| switch (err) {
         error.FileNotFound => {
             var managed_config = ManagedConfig{ .config = Config{}, .arena = arena };
-            try managed_config.config.postInit(allocator, path);
+            try managed_config.config.postInit(io, allocator, path);
             return managed_config;
         },
         else => return err,
@@ -34,7 +34,7 @@ pub fn load(root_allocator: std.mem.Allocator, config_path: ?[]const u8) !Manage
     errdefer parsed_config.deinit();
 
     var config = parsed_config.value;
-    try config.postInit(allocator, path);
+    try config.postInit(io, allocator, path);
 
     return ManagedConfig{
         .config = config,
@@ -44,7 +44,8 @@ pub fn load(root_allocator: std.mem.Allocator, config_path: ?[]const u8) !Manage
 
 test "load() should return InvalidPath if the config path is invalid" {
     const allocator = std.testing.allocator;
-    _ = ManagedConfig.load(allocator, "config.json") catch |err| switch (err) {
+    const io = std.testing.io;
+    _ = ManagedConfig.load(io, allocator, "config.json") catch |err| switch (err) {
         error.InvalidPath => ManagedConfig{ .config = Config{} },
         else => unreachable,
     };
@@ -52,7 +53,8 @@ test "load() should return InvalidPath if the config path is invalid" {
 
 test "load() should return error if the config file is invalid" {
     const allocator = std.testing.allocator;
-    _ = ManagedConfig.load(allocator, "src/config/tests/invalid-config.json") catch |err| switch (err) {
+    const io = std.testing.io;
+    _ = ManagedConfig.load(io, allocator, "src/config/tests/invalid-config.json") catch |err| switch (err) {
         error.SyntaxError => ManagedConfig{ .config = Config{} },
         else => unreachable,
     };
@@ -60,7 +62,9 @@ test "load() should return error if the config file is invalid" {
 
 test "load() should return default config if the config file does not exist" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
     const managed_config = try ManagedConfig.load(
+        io,
         allocator,
         "src/config/tests/config-not-exists.json",
     );
@@ -72,8 +76,10 @@ test "load() should return default config if the config file does not exist" {
 
 test "load() should return config if the config file exists" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     const managed_config = try ManagedConfig.load(
+        io,
         allocator,
         "src/config/tests/config.json",
     );
@@ -83,11 +89,13 @@ test "load() should return config if the config file exists" {
     try std.testing.expectEqualSlices(u8, "src/config/tests/config.json", managed_config.config.config_path);
 }
 
-fn parseConfig(allocator: std.mem.Allocator, config_path: []const u8) !json.Parsed(Config) {
-    const config_file = try std.fs.cwd().openFile(config_path, .{});
-    defer config_file.close();
+fn parseConfig(io: std.Io, allocator: std.mem.Allocator, config_path: []const u8) !json.Parsed(Config) {
+    var config_file = try std.Io.Dir.cwd().openFile(io, config_path, .{});
+    defer config_file.close(io);
 
-    const buf = try config_file.readToEndAlloc(allocator, max_config_size);
+    var read_buffer: [4096]u8 = undefined;
+    var file_reader = config_file.reader(io, &read_buffer);
+    const buf = try file_reader.interface.allocRemaining(allocator, .limited(max_config_size));
     defer allocator.free(buf);
 
     return try json.parseFromSlice(
@@ -104,7 +112,8 @@ fn parseConfig(allocator: std.mem.Allocator, config_path: []const u8) !json.Pars
 
 test "parseConfig() should return an error if the config file does not exist" {
     const allocator = std.testing.allocator;
-    const config = parseConfig(allocator, "src/config/tests/config-not-exists.json");
+    const io = std.testing.io;
+    const config = parseConfig(io, allocator, "src/config/tests/config-not-exists.json");
 
     if (config) |_| {
         unreachable;
@@ -116,7 +125,8 @@ test "parseConfig() should return an error if the config file does not exist" {
 
 test "parseConfig() should return an error if the config file is not valid JSON" {
     const allocator = std.testing.allocator;
-    const config = parseConfig(allocator, "src/config/tests/invalid-config.json");
+    const io = std.testing.io;
+    const config = parseConfig(io, allocator, "src/config/tests/invalid-config.json");
 
     if (config) |_| {
         unreachable;
@@ -128,7 +138,8 @@ test "parseConfig() should return an error if the config file is not valid JSON"
 
 test "parseConfig() should successfully parse a valid config file" {
     const allocator = std.testing.allocator;
-    const config = try parseConfig(allocator, "src/config/tests/config.json");
+    const io = std.testing.io;
+    const config = try parseConfig(io, allocator, "src/config/tests/config.json");
     defer config.deinit();
 
     // Verify resources are parsed

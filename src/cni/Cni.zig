@@ -10,14 +10,15 @@ const managed_type = @import("managed_type.zig");
 const Cni = @This();
 
 arena: ArenaAllocator,
+io: std.Io,
 cni_plugin_dir: []const u8,
 config: CniConfig,
 ipam_config: config_mod.IpamConfig,
 
-mutex: std.Thread.Mutex = std.Thread.Mutex{},
+mutex: std.Io.Mutex = .init,
 user_sessions: UserAttachmentMap,
 
-pub fn init(root_allocator: Allocator, resource: config_mod.Resource, cni_plugin_dir: []const u8) !*Cni {
+pub fn init(io: std.Io, root_allocator: Allocator, resource: config_mod.Resource, cni_plugin_dir: []const u8) !*Cni {
     var arena = try ArenaAllocator.init(root_allocator);
     errdefer arena.deinit();
 
@@ -28,6 +29,7 @@ pub fn init(root_allocator: Allocator, resource: config_mod.Resource, cni_plugin
 
     const cni = try allocator.create(Cni);
     cni.* = Cni{
+        .io = io,
         .arena = arena,
         .cni_plugin_dir = cni_plugin_dir,
         .config = cni_config,
@@ -39,25 +41,25 @@ pub fn init(root_allocator: Allocator, resource: config_mod.Resource, cni_plugin
 
 fn buildCniConfigFromResource(allocator: Allocator, resource: config_mod.Resource) !CniConfig {
     // Build ipam object — only "type" field; addresses/routes injected at runtime
-    var ipam_obj = json.ObjectMap.init(allocator);
+    var ipam_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
     switch (resource.ipam) {
-        .static => try ipam_obj.put("type", .{ .string = "static" }),
-        .dhcp => try ipam_obj.put("type", .{ .string = "dhcp" }),
+        .static => try ipam_obj.put(allocator, "type", .{ .string = "static" }),
+        .dhcp => try ipam_obj.put(allocator, "type", .{ .string = "dhcp" }),
     }
 
     // Build plugin object
-    var plugin_obj = json.ObjectMap.init(allocator);
-    try plugin_obj.put("type", .{ .string = resource.interface.type });
-    try plugin_obj.put("master", .{ .string = resource.interface.master });
+    var plugin_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
+    try plugin_obj.put(allocator, "type", .{ .string = resource.interface.type });
+    try plugin_obj.put(allocator, "master", .{ .string = resource.interface.master });
 
     if (resource.interface.mode) |mode| {
-        try plugin_obj.put("mode", .{ .string = mode });
+        try plugin_obj.put(allocator, "mode", .{ .string = mode });
     }
     if (resource.interface.mtu) |mtu| {
-        try plugin_obj.put("mtu", .{ .integer = @intCast(mtu) });
+        try plugin_obj.put(allocator, "mtu", .{ .integer = @intCast(mtu) });
     }
 
-    try plugin_obj.put("ipam", .{ .object = ipam_obj });
+    try plugin_obj.put(allocator, "ipam", .{ .object = ipam_obj });
 
     // Build plugins array
     var plugins = json.Array.initCapacity(allocator, 1) catch unreachable;
@@ -127,8 +129,8 @@ fn getOrCreateUserSession(self: *Cni, uid: std.posix.uid_t) !*UserSession {
 }
 
 pub fn setup(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser, caller_uid: std.posix.uid_t) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    try self.mutex.lock(self.io);
+    defer self.mutex.unlock(self.io);
 
     const session = try self.getOrCreateUserSession(caller_uid);
     const attachment = try self.loadAttachment(session, request);
@@ -137,12 +139,12 @@ pub fn setup(self: *Cni, tentative_allocator: Allocator, request: plugin.Request
         return;
     }
 
-    try attachment.setup(tentative_allocator, request, responser);
+    try attachment.setup(self.io, tentative_allocator, request, responser);
 }
 
 pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser, caller_uid: std.posix.uid_t) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    try self.mutex.lock(self.io);
+    defer self.mutex.unlock(self.io);
 
     const exec_request = request.requestExec();
     const attachment_key = AttachmentKey{
@@ -167,7 +169,7 @@ pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Requ
             value.deinit();
         }
 
-        try value.teardown(tentative_allocator, request, responser);
+        try value.teardown(self.io, tentative_allocator, request, responser);
     } else {
         log.warn(
             "Attachment not found for uid={d}, container_id={s}, ifname={s}, skipping CNI DEL. This can happen if the server was restarted.",
@@ -537,7 +539,8 @@ const PluginConf = struct {
     }
 
     pub fn deinit(self: *PluginConf) void {
-        self.conf.deinit();
+        const alloc = self.arena.?.allocator();
+        self.conf.deinit(alloc);
 
         if (self.result) |*result| {
             const allocator = self.arena.?.allocator();
@@ -645,11 +648,11 @@ const PluginConf = struct {
         );
 
         // Build a fresh ipam ObjectMap to avoid mutating the shared original
-        var new_ipam = json.ObjectMap.init(allocator);
-        try new_ipam.put("type", .{ .string = type_str });
-        try new_ipam.put("daemonSocketPath", .{ .string = path });
+        var new_ipam = try json.ObjectMap.init(allocator, &.{}, &.{});
+        try new_ipam.put(allocator, "type", .{ .string = type_str });
+        try new_ipam.put(allocator, "daemonSocketPath", .{ .string = path });
 
-        try self.conf.put("ipam", .{ .object = new_ipam });
+        try self.conf.put(allocator, "ipam", .{ .object = new_ipam });
     }
 
     pub fn isDhcp(self: PluginConf) bool {
@@ -722,69 +725,69 @@ const PluginConf = struct {
         const address = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ip, prefix });
 
         // Build address object
-        var addr_obj = json.ObjectMap.init(allocator);
-        try addr_obj.put("address", .{ .string = address });
+        var addr_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
+        try addr_obj.put(allocator, "address", .{ .string = address });
         if (static_conf.addresses[0].gateway) |gw| {
-            try addr_obj.put("gateway", .{ .string = gw });
+            try addr_obj.put(allocator, "gateway", .{ .string = gw });
         }
 
         // Build a fresh ipam ObjectMap to avoid mutating the shared original
-        var new_ipam = json.ObjectMap.init(allocator);
-        try new_ipam.put("type", .{ .string = type_str });
+        var new_ipam = try json.ObjectMap.init(allocator, &.{}, &.{});
+        try new_ipam.put(allocator, "type", .{ .string = type_str });
 
         // Set addresses
         var addresses = json.Array.initCapacity(allocator, 1) catch unreachable;
         addresses.appendAssumeCapacity(.{ .object = addr_obj });
-        try new_ipam.put("addresses", .{ .array = addresses });
+        try new_ipam.put(allocator, "addresses", .{ .array = addresses });
 
         // Set routes if present
         if (static_conf.routes) |rts| {
             var routes_arr = json.Array.initCapacity(allocator, rts.len) catch unreachable;
             for (rts) |r| {
-                var route_obj = json.ObjectMap.init(allocator);
-                try route_obj.put("dst", .{ .string = r.dst });
+                var route_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
+                try route_obj.put(allocator, "dst", .{ .string = r.dst });
                 if (r.gw) |gw| {
-                    try route_obj.put("gw", .{ .string = gw });
+                    try route_obj.put(allocator, "gw", .{ .string = gw });
                 }
                 if (r.priority) |p| {
-                    try route_obj.put("priority", .{ .integer = @as(i64, @intCast(p)) });
+                    try route_obj.put(allocator, "priority", .{ .integer = @as(i64, @intCast(p)) });
                 }
                 routes_arr.appendAssumeCapacity(.{ .object = route_obj });
             }
-            try new_ipam.put("routes", .{ .array = routes_arr });
+            try new_ipam.put(allocator, "routes", .{ .array = routes_arr });
         }
 
         // Set dns if present
         if (static_conf.dns) |dns_conf| {
-            var dns_obj = json.ObjectMap.init(allocator);
+            var dns_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
             if (dns_conf.nameservers) |ns| {
                 var ns_arr = json.Array.initCapacity(allocator, ns.len) catch unreachable;
                 for (ns) |n| {
                     ns_arr.appendAssumeCapacity(.{ .string = n });
                 }
-                try dns_obj.put("nameservers", .{ .array = ns_arr });
+                try dns_obj.put(allocator, "nameservers", .{ .array = ns_arr });
             }
             if (dns_conf.domain) |d| {
-                try dns_obj.put("domain", .{ .string = d });
+                try dns_obj.put(allocator, "domain", .{ .string = d });
             }
             if (dns_conf.search) |s| {
                 var s_arr = json.Array.initCapacity(allocator, s.len) catch unreachable;
                 for (s) |item| {
                     s_arr.appendAssumeCapacity(.{ .string = item });
                 }
-                try dns_obj.put("search", .{ .array = s_arr });
+                try dns_obj.put(allocator, "search", .{ .array = s_arr });
             }
             if (dns_conf.options) |o| {
                 var o_arr = json.Array.initCapacity(allocator, o.len) catch unreachable;
                 for (o) |item| {
                     o_arr.appendAssumeCapacity(.{ .string = item });
                 }
-                try dns_obj.put("options", .{ .array = o_arr });
+                try dns_obj.put(allocator, "options", .{ .array = o_arr });
             }
-            try new_ipam.put("dns", .{ .object = dns_obj });
+            try new_ipam.put(allocator, "dns", .{ .object = dns_obj });
         }
 
-        try self.conf.put("ipam", .{ .object = new_ipam });
+        try self.conf.put(allocator, "ipam", .{ .object = new_ipam });
     }
 
     test "isDhcp() will return false if the ipam type is not dhcp" {
@@ -794,23 +797,23 @@ const PluginConf = struct {
         defer arena.deinit();
 
         // No ipam field
-        var plugin_conf = PluginConf{ .conf = json.ObjectMap.init(allocator) };
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
         try std.testing.expect(!plugin_conf.isDhcp());
 
         // Ipam field is not object type
-        try plugin_conf.conf.put("ipam", json.Value{ .bool = true });
+        try plugin_conf.conf.put(allocator, "ipam", json.Value{ .bool = true });
         try std.testing.expect(!plugin_conf.isDhcp());
 
         // Have ipam field but no type field
-        try plugin_conf.conf.put("ipam", json.Value{ .object = json.ObjectMap.init(allocator) });
+        try plugin_conf.conf.put(allocator, "ipam", json.Value{ .object = try json.ObjectMap.init(allocator, &.{}, &.{}) });
         try std.testing.expect(!plugin_conf.isDhcp());
 
         // Ipam type field is not string type
-        try plugin_conf.conf.getPtr("ipam").?.object.put("type", json.Value{ .bool = true });
+        try plugin_conf.conf.getPtr("ipam").?.object.put(allocator, "type", json.Value{ .bool = true });
         try std.testing.expect(!plugin_conf.isDhcp());
 
         // Ipam type field is not 'dhcp'
-        try plugin_conf.conf.getPtr("ipam").?.object.put("type", json.Value{ .string = "static" });
+        try plugin_conf.conf.getPtr("ipam").?.object.put(allocator, "type", json.Value{ .string = "static" });
         try std.testing.expect(!plugin_conf.isDhcp());
     }
 
@@ -820,9 +823,9 @@ const PluginConf = struct {
         const allocator = arena.allocator();
         defer arena.deinit();
 
-        var plugin_conf = PluginConf{ .conf = json.ObjectMap.init(allocator) };
-        try plugin_conf.conf.put("ipam", json.Value{ .object = json.ObjectMap.init(allocator) });
-        try plugin_conf.conf.getPtr("ipam").?.object.put("type", json.Value{ .string = "dhcp" });
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try plugin_conf.conf.put(allocator, "ipam", json.Value{ .object = try json.ObjectMap.init(allocator, &.{}, &.{}) });
+        try plugin_conf.conf.getPtr("ipam").?.object.put(allocator, "type", json.Value{ .string = "dhcp" });
 
         try std.testing.expect(plugin_conf.isDhcp());
     }
@@ -833,9 +836,9 @@ const PluginConf = struct {
         const allocator = arena.allocator();
         defer arena.deinit();
 
-        var plugin_conf = PluginConf{ .conf = json.ObjectMap.init(allocator) };
-        try plugin_conf.conf.put("ipam", json.Value{ .object = json.ObjectMap.init(allocator) });
-        try plugin_conf.conf.getPtr("ipam").?.object.put("type", json.Value{ .string = "static" });
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try plugin_conf.conf.put(allocator, "ipam", json.Value{ .object = try json.ObjectMap.init(allocator, &.{}, &.{}) });
+        try plugin_conf.conf.getPtr("ipam").?.object.put(allocator, "type", json.Value{ .string = "static" });
 
         try std.testing.expect(plugin_conf.isStatic());
     }
@@ -846,16 +849,16 @@ const PluginConf = struct {
         const allocator = arena.allocator();
         defer arena.deinit();
 
-        var plugin_conf = PluginConf{ .conf = json.ObjectMap.init(allocator) };
-        try plugin_conf.conf.put("ipam", json.Value{ .object = json.ObjectMap.init(allocator) });
-        try plugin_conf.conf.getPtr("ipam").?.object.put("type", json.Value{ .string = "dhcp" });
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try plugin_conf.conf.put(allocator, "ipam", json.Value{ .object = try json.ObjectMap.init(allocator, &.{}, &.{}) });
+        try plugin_conf.conf.getPtr("ipam").?.object.put(allocator, "type", json.Value{ .string = "dhcp" });
 
         try std.testing.expect(!plugin_conf.isStatic());
     }
 
-    fn stringify(self: PluginConf, stream: std.fs.File) !void {
+    fn stringify(self: PluginConf, io: std.Io, stream: std.Io.File) !void {
         var write_buffer: [4096]u8 = undefined;
-        var file_writer = stream.writer(&write_buffer);
+        var file_writer = stream.writer(io, &write_buffer);
         try json.Stringify.value(
             json.Value{ .object = self.conf },
             .{ .whitespace = .indent_2 },
@@ -866,6 +869,7 @@ const PluginConf = struct {
 
     test "stringify() will success" {
         const allocator = std.testing.allocator;
+        const io = std.testing.io;
         const raw_data =
             \\{
             \\    "cniVersion": "1.0.0",
@@ -883,17 +887,19 @@ const PluginConf = struct {
 
         const exec_config = PluginConf{ .conf = parsed_data.value.object };
 
-        const fds = try std.posix.pipe();
-        var in = std.fs.File{ .handle = fds[0] };
-        defer in.close();
+        var fds: [2]i32 = undefined;
+        const rc = std.os.linux.pipe(&fds);
+        if (rc != 0) return error.Unexpected;
+        var in = std.Io.File{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+        defer in.close(io);
 
-        var out = std.fs.File{ .handle = fds[1] };
-        try exec_config.stringify(out);
-        out.close();
+        var out = std.Io.File{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+        try exec_config.stringify(io, out);
+        out.close(io);
 
         const buf = blk: {
             var read_buffer: [1024]u8 = undefined;
-            var file_reader = in.reader(&read_buffer);
+            var file_reader = in.reader(io, &read_buffer);
             break :blk try file_reader.interface.allocRemaining(allocator, .limited(1024));
         };
         defer allocator.free(buf);
@@ -903,11 +909,11 @@ const PluginConf = struct {
     }
 
     fn setName(self: *PluginConf, name: []const u8) !void {
-        try self.conf.put("name", json.Value{ .string = name });
+        try self.conf.put(self.arena.?.allocator(), "name", json.Value{ .string = name });
     }
 
     fn setCniVersion(self: *PluginConf, version: []const u8) !void {
-        try self.conf.put("cniVersion", json.Value{ .string = version });
+        try self.conf.put(self.arena.?.allocator(), "cniVersion", json.Value{ .string = version });
     }
 
     const supported_plugins = .{
@@ -924,10 +930,10 @@ const PluginConf = struct {
     }
 
     fn shadowCopy(allocator: Allocator, src: json.ObjectMap) !json.ObjectMap {
-        var new_obj = json.ObjectMap.init(allocator);
+        var new_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
         var it = src.iterator();
         while (it.next()) |entry| {
-            try new_obj.put(try allocator.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
+            try new_obj.put(allocator, try allocator.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
         }
         return new_obj;
     }
@@ -936,30 +942,42 @@ const PluginConf = struct {
         return self.result != null;
     }
 
-    fn exec(self: *PluginConf, tentative_allocator: Allocator, cmd: []const u8, pid: []const u8, env_map: std.process.EnvMap) !std.process.Child.Term {
+    fn exec(self: *PluginConf, io: std.Io, tentative_allocator: Allocator, cmd: []const u8, pid: []const u8, env_map: std.process.Environ.Map) !std.process.Child.Term {
+        _ = tentative_allocator;
         const allocator = self.arena.?.allocator();
 
-        var process = std.process.Child.init(
-            &[_][]const u8{ "nsenter", "-t", pid, "--mount", cmd },
-            tentative_allocator,
-        );
-        process.stdin_behavior = .Pipe;
-        process.stdout_behavior = .Pipe;
-        process.stderr_behavior = .Pipe;
-        process.env_map = &env_map;
+        var process = try std.process.spawn(io, .{
+            .argv = &[_][]const u8{ "nsenter", "-t", pid, "--mount", cmd },
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+            .environ_map = &env_map,
+        });
 
-        var stdout = std.ArrayListUnmanaged(u8){};
-        var stderr = std.ArrayListUnmanaged(u8){};
+        var stdout = std.ArrayListUnmanaged(u8).empty;
+        defer stdout.deinit(allocator);
+        var stderr = std.ArrayListUnmanaged(u8).empty;
         defer stderr.deinit(allocator);
 
-        try process.spawn();
-
-        try self.stringify(process.stdin.?);
-        process.stdin.?.close();
+        try self.stringify(io, process.stdin.?);
+        process.stdin.?.close(io);
         process.stdin = null;
 
-        try process.collectOutput(allocator, &stdout, &stderr, 4096);
-        const result = try process.wait();
+        // Read stdout and stderr into buffers
+        if (process.stdout) |out_file| {
+            var read_buffer: [4096]u8 = undefined;
+            var file_reader = out_file.reader(io, &read_buffer);
+            const data = try file_reader.interface.allocRemaining(allocator, .unlimited);
+            stdout = std.ArrayListUnmanaged(u8).fromOwnedSlice(data);
+        }
+        if (process.stderr) |err_file| {
+            var read_buffer: [4096]u8 = undefined;
+            var file_reader = err_file.reader(io, &read_buffer);
+            const data = try file_reader.interface.allocRemaining(allocator, .unlimited);
+            stderr = std.ArrayListUnmanaged(u8).fromOwnedSlice(data);
+        }
+
+        const result = try process.wait(io);
 
         self.result = std.ArrayList(u8).fromOwnedSlice(try stdout.toOwnedSlice(allocator));
         return result;
@@ -1186,7 +1204,7 @@ const Attachment = struct {
         return self.exec_configs.items[0].isExecuted();
     }
 
-    fn setup(self: *Attachment, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
+    fn setup(self: *Attachment, io: std.Io, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
         const env_map = try self.envMap(tentative_allocator, .ADD, request);
         const pid = try std.fmt.allocPrint(tentative_allocator, "{d}", .{request.process_id.?});
 
@@ -1202,8 +1220,8 @@ const Attachment = struct {
                 }
             }
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
-            const result = try exec_config.exec(tentative_allocator, cmd, pid, env_map);
-            if (result.Exited != 0) {
+            const result = try exec_config.exec(io, tentative_allocator, cmd, pid, env_map);
+            if (result.exited != 0) {
                 log.warn("Setup {s} failed", .{request.request.exec.container_name});
                 try responseError(tentative_allocator, responser, exec_config.result.?);
                 return error.UnexpectedError;
@@ -1218,7 +1236,7 @@ const Attachment = struct {
         );
     }
 
-    fn teardown(self: *Attachment, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
+    fn teardown(self: *Attachment, io: std.Io, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
         _ = responser;
         const env_map = try self.envMap(tentative_allocator, .DEL, request);
         const pid = try std.fmt.allocPrint(tentative_allocator, "{d}", .{request.process_id.?});
@@ -1228,9 +1246,9 @@ const Attachment = struct {
         while (i < len) : (i += 1) {
             var exec_config = &self.exec_configs.items[len - (i + 1)];
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
-            const result = try exec_config.exec(tentative_allocator, cmd, pid, env_map);
+            const result = try exec_config.exec(io, tentative_allocator, cmd, pid, env_map);
 
-            if (result.Exited != 0) {
+            if (result.exited != 0) {
                 log.warn(
                     "Teardown {s} failed on step {s}, ignore it. the detail error is {s}",
                     .{
@@ -1243,10 +1261,10 @@ const Attachment = struct {
         }
     }
 
-    fn envMap(self: Attachment, allocator: Allocator, cni_command: CniCommand, request: plugin.Request) !std.process.EnvMap {
+    fn envMap(self: Attachment, allocator: Allocator, cni_command: CniCommand, request: plugin.Request) !std.process.Environ.Map {
         const exec_request = request.requestExec();
 
-        var env_map = std.process.EnvMap.init(allocator);
+        var env_map = std.process.Environ.Map.init(allocator);
         try env_map.put("CNI_COMMAND", @tagName(cni_command));
         try env_map.put("CNI_CONTAINERID", exec_request.container_id);
         try env_map.put("CNI_NETNS", request.netns.?);
@@ -1375,14 +1393,14 @@ test "setStaticIp injects address with subnet prefix" {
     const arena_alloc = arena.allocator();
 
     // Build a plugin conf with static ipam
-    var ipam_obj = json.ObjectMap.init(arena_alloc);
-    try ipam_obj.put("type", .{ .string = "static" });
+    var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
 
-    var conf = json.ObjectMap.init(arena_alloc);
-    try conf.put("type", .{ .string = "macvlan" });
-    try conf.put("name", .{ .string = "test" });
-    try conf.put("cniVersion", .{ .string = "1.0.0" });
-    try conf.put("ipam", .{ .object = ipam_obj });
+    var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
+    try conf.put(arena_alloc, "name", .{ .string = "test" });
+    try conf.put(arena_alloc, "cniVersion", .{ .string = "1.0.0" });
+    try conf.put(arena_alloc, "ipam", .{ .object = ipam_obj });
 
     var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
 
@@ -1418,14 +1436,14 @@ test "setStaticIp with no gateway omits gateway field" {
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var ipam_obj = json.ObjectMap.init(arena_alloc);
-    try ipam_obj.put("type", .{ .string = "static" });
+    var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
 
-    var conf = json.ObjectMap.init(arena_alloc);
-    try conf.put("type", .{ .string = "macvlan" });
-    try conf.put("name", .{ .string = "test" });
-    try conf.put("cniVersion", .{ .string = "1.0.0" });
-    try conf.put("ipam", .{ .object = ipam_obj });
+    var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
+    try conf.put(arena_alloc, "name", .{ .string = "test" });
+    try conf.put(arena_alloc, "cniVersion", .{ .string = "1.0.0" });
+    try conf.put(arena_alloc, "ipam", .{ .object = ipam_obj });
 
     var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
 
@@ -1452,14 +1470,14 @@ test "setStaticIp with multiple routes injects all" {
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var ipam_obj = json.ObjectMap.init(arena_alloc);
-    try ipam_obj.put("type", .{ .string = "static" });
+    var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
 
-    var conf = json.ObjectMap.init(arena_alloc);
-    try conf.put("type", .{ .string = "macvlan" });
-    try conf.put("name", .{ .string = "test" });
-    try conf.put("cniVersion", .{ .string = "1.0.0" });
-    try conf.put("ipam", .{ .object = ipam_obj });
+    var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
+    try conf.put(arena_alloc, "name", .{ .string = "test" });
+    try conf.put(arena_alloc, "cniVersion", .{ .string = "1.0.0" });
+    try conf.put(arena_alloc, "ipam", .{ .object = ipam_obj });
 
     var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
 
@@ -1488,14 +1506,14 @@ test "setStaticIp returns error when subnet is null" {
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var ipam_obj = json.ObjectMap.init(arena_alloc);
-    try ipam_obj.put("type", .{ .string = "static" });
+    var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
 
-    var conf = json.ObjectMap.init(arena_alloc);
-    try conf.put("type", .{ .string = "macvlan" });
-    try conf.put("name", .{ .string = "test" });
-    try conf.put("cniVersion", .{ .string = "1.0.0" });
-    try conf.put("ipam", .{ .object = ipam_obj });
+    var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
+    try conf.put(arena_alloc, "name", .{ .string = "test" });
+    try conf.put(arena_alloc, "cniVersion", .{ .string = "1.0.0" });
+    try conf.put(arena_alloc, "ipam", .{ .object = ipam_obj });
 
     var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
 
@@ -1512,14 +1530,14 @@ test "setStaticIp returns error when subnet has no slash" {
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var ipam_obj = json.ObjectMap.init(arena_alloc);
-    try ipam_obj.put("type", .{ .string = "static" });
+    var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
 
-    var conf = json.ObjectMap.init(arena_alloc);
-    try conf.put("type", .{ .string = "macvlan" });
-    try conf.put("name", .{ .string = "test" });
-    try conf.put("cniVersion", .{ .string = "1.0.0" });
-    try conf.put("ipam", .{ .object = ipam_obj });
+    var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
+    try conf.put(arena_alloc, "name", .{ .string = "test" });
+    try conf.put(arena_alloc, "cniVersion", .{ .string = "1.0.0" });
+    try conf.put(arena_alloc, "ipam", .{ .object = ipam_obj });
 
     var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
 
@@ -1551,7 +1569,7 @@ test "Cni.init creates CNI from resource config" {
         },
     };
 
-    var cni = try Cni.init(allocator, resource, "/usr/lib/cni");
+    var cni = try Cni.init(std.testing.io, allocator, resource, "/usr/lib/cni");
     defer cni.deinit();
 
     try std.testing.expectEqualSlices(u8, "test-cni-init", cni.config.name);
@@ -1579,7 +1597,7 @@ test "Cni.init with static ipam stores ipam_config" {
         },
     };
 
-    var cni = try Cni.init(allocator, resource, "/usr/lib/cni");
+    var cni = try Cni.init(std.testing.io, allocator, resource, "/usr/lib/cni");
     defer cni.deinit();
 
     try std.testing.expect(cni.ipam_config == .static);

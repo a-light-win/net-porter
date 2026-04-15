@@ -20,11 +20,16 @@ const IN_CLOEXEC: u32 = 0x80000;
 /// A single managed listening socket for a specific uid.
 const SocketEntry = struct {
     uid: std.posix.uid_t,
-    server: std.net.Server,
+    server: std.Io.net.Server,
     path: [:0]const u8,
 };
 
+pub const Connection = struct {
+    stream: std.Io.net.Stream,
+};
+
 allocator: Allocator,
+io: std.Io,
 /// Set of uids that are allowed by ACL (owned externally).
 allowed_uids: std.ArrayList(u32),
 /// Active listening sockets.
@@ -34,14 +39,14 @@ poll_fds: std.ArrayList(std.posix.pollfd),
 /// inotify file descriptor.
 inotify_fd: std.posix.fd_t,
 
-pub fn init(allocator: Allocator, allowed_uids: std.ArrayList(u32)) !SocketManager {
+pub fn init(io: std.Io, allocator: Allocator, allowed_uids: std.ArrayList(u32)) !SocketManager {
     const init_rc = linux.inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (std.posix.errno(init_rc) != .SUCCESS) {
         log.err("Failed to create inotify fd: {s}", .{@tagName(std.posix.errno(init_rc))});
         return error.InotifyInitFailed;
     }
     const ifd: std.posix.fd_t = @intCast(init_rc);
-    errdefer std.posix.close(ifd);
+    errdefer _ = linux.close(ifd);
 
     // Watch /run/user for directory create/delete
     const wd_rc = linux.inotify_add_watch(ifd, run_user_dir, IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO);
@@ -52,6 +57,7 @@ pub fn init(allocator: Allocator, allowed_uids: std.ArrayList(u32)) !SocketManag
 
     var manager = SocketManager{
         .allocator = allocator,
+        .io = io,
         .allowed_uids = allowed_uids,
         .entries = std.ArrayList(SocketEntry).empty,
         .poll_fds = std.ArrayList(std.posix.pollfd).empty,
@@ -71,28 +77,28 @@ pub fn init(allocator: Allocator, allowed_uids: std.ArrayList(u32)) !SocketManag
 pub fn deinit(self: *SocketManager) void {
     // Close all server sockets
     for (self.entries.items) |*entry| {
-        entry.server.deinit();
-        std.fs.cwd().deleteFile(entry.path) catch {};
+        entry.server.deinit(self.io);
+        std.Io.Dir.cwd().deleteFile(self.io, entry.path) catch {};
         self.allocator.free(entry.path);
     }
     self.entries.deinit(self.allocator);
     self.poll_fds.deinit(self.allocator);
 
     // Close inotify fd
-    std.posix.close(self.inotify_fd);
+    _ = linux.close(self.inotify_fd);
 }
 
 /// Initial scan: create sockets for existing /run/user/<uid>/ directories
 /// that match allowed uids.
-pub fn scanExisting(self: *SocketManager) void {
-    var dir = std.fs.cwd().openDir(run_user_dir, .{ .iterate = true }) catch |err| {
+pub fn scanExisting(self: *SocketManager, io: std.Io) void {
+    var dir = std.Io.Dir.cwd().openDir(io, run_user_dir, .{ .iterate = true }) catch |err| {
         log.warn("Failed to open {s}: {s}, skipping initial scan", .{ run_user_dir, @errorName(err) });
         return;
     };
-    defer dir.close();
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(io) catch null) |entry| {
         if (entry.kind != .directory) continue;
         const uid = std.fmt.parseUnsigned(std.posix.uid_t, entry.name, 10) catch continue;
         if (self.isUidAllowed(uid)) {
@@ -121,7 +127,7 @@ pub fn addSocket(self: *SocketManager, uid: std.posix.uid_t) !void {
     const path = try DomainSocket.pathForUid(self.allocator, uid);
     errdefer self.allocator.free(path);
 
-    const server = DomainSocket.listen(path, uid) catch |err| {
+    const server = DomainSocket.listen(self.io, path, uid) catch |err| {
         log.warn("Failed to listen on {s}: {s}", .{ path, @errorName(err) });
         self.allocator.free(path);
         return err;
@@ -135,7 +141,7 @@ pub fn addSocket(self: *SocketManager, uid: std.posix.uid_t) !void {
 
     try self.entries.append(self.allocator, entry);
     try self.poll_fds.append(self.allocator, .{
-        .fd = server.stream.handle,
+        .fd = server.socket.handle,
         .events = std.posix.POLL.IN,
         .revents = 0,
     });
@@ -147,8 +153,8 @@ pub fn addSocket(self: *SocketManager, uid: std.posix.uid_t) !void {
 pub fn removeSocket(self: *SocketManager, uid: std.posix.uid_t) void {
     for (self.entries.items, 0..) |*entry, i| {
         if (entry.uid == uid) {
-            entry.server.deinit();
-            std.fs.cwd().deleteFile(entry.path) catch {};
+            entry.server.deinit(self.io);
+            std.Io.Dir.cwd().deleteFile(self.io, entry.path) catch {};
             log.info("Stopped listening on {s} for uid={d}", .{ entry.path, uid });
             self.allocator.free(entry.path);
             _ = self.entries.orderedRemove(i);
@@ -192,7 +198,7 @@ pub fn updateAllowedUids(self: *SocketManager, new_uids: std.ArrayList(u32)) voi
             // Check if /run/user/<uid>/ directory exists
             var buf: [std.fs.max_path_bytes]u8 = undefined;
             const dir_path = std.fmt.bufPrint(&buf, "{s}/{d}", .{ run_user_dir, uid }) catch continue;
-            std.fs.cwd().openDir(dir_path, .{}) catch continue;
+            std.Io.Dir.cwd().openDir(self.io, dir_path, .{}) catch continue;
             // Directory exists, create socket
             self.addSocket(uid) catch |err| {
                 log.warn("Failed to create socket for uid={d} after config reload: {s}", .{ uid, @errorName(err) });
@@ -267,12 +273,13 @@ pub fn poll(self: *SocketManager, timeout_ms: i32) !?usize {
 
 /// Accept a connection on the server socket at the given poll_fds index.
 /// poll_fds index 1 corresponds to entries[0].
-pub fn accept(self: *SocketManager, poll_index: usize) ?std.net.Server.Connection {
+pub fn accept(self: *SocketManager, io: std.Io, poll_index: usize) ?Connection {
     if (poll_index == 0) return null; // inotify fd
     const entry_index = poll_index - 1;
     if (entry_index >= self.entries.items.len) return null;
-    return self.entries.items[entry_index].server.accept() catch |err| {
+    const stream = self.entries.items[entry_index].server.accept(io) catch |err| {
         log.warn("Failed to accept connection: {s}", .{@errorName(err)});
         return null;
     };
+    return Connection{ .stream = stream };
 }

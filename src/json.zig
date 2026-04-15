@@ -9,9 +9,9 @@ const stringify_options = json.Stringify.Options{
     .emit_null_optional_fields = false,
 };
 
-pub fn stringifyToStdout(value: anytype) !void {
+pub fn stringifyToStdout(io: std.Io, value: anytype) !void {
     var write_buffer: [4096]u8 = undefined;
-    var file_writer = std.fs.File.stdout().writer(&write_buffer);
+    var file_writer = std.Io.File.stdout().writer(io, &write_buffer);
     try json.Stringify.value(value, stringify_options, &file_writer.interface);
     try file_writer.end();
 }

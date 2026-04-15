@@ -4,14 +4,15 @@ const DhcpService = @This();
 const log = std.log.scoped(.dhcpServer);
 
 allocator: Allocator,
+io: std.Io,
 caller_uid: std.posix.uid_t,
 dhcp_cni_path: []const u8,
 sock_path: []const u8,
 podman_infra_pid: ?[]const u8 = null,
 process: ?std.process.Child = null,
-mutex: std.Thread.Mutex = std.Thread.Mutex{},
+mutex: std.Io.Mutex = .init,
 
-pub fn init(allocator: Allocator, caller_uid: std.posix.uid_t, cni_path: []const u8) !DhcpService {
+pub fn init(io: std.Io, allocator: Allocator, caller_uid: std.posix.uid_t, cni_path: []const u8) !DhcpService {
     const dhcp_sock_path = try std.fmt.allocPrint(
         allocator,
         "/run/user/{d}/net-porter-dhcp.sock",
@@ -28,6 +29,7 @@ pub fn init(allocator: Allocator, caller_uid: std.posix.uid_t, cni_path: []const
 
     return DhcpService{
         .allocator = allocator,
+        .io = io,
         .caller_uid = caller_uid,
         .dhcp_cni_path = dhcp_cni_path,
         .sock_path = dhcp_sock_path,
@@ -36,8 +38,8 @@ pub fn init(allocator: Allocator, caller_uid: std.posix.uid_t, cni_path: []const
 
 pub fn deinit(self: *DhcpService) void {
     {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch unreachable;
+        defer self.mutex.unlock(self.io);
 
         self.stop();
     }
@@ -53,8 +55,8 @@ pub fn deinit(self: *DhcpService) void {
 }
 
 pub fn ensureStarted(self: *DhcpService) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    try self.mutex.lock(self.io);
+    defer self.mutex.unlock(self.io);
 
     if (!self.isAlive()) {
         try self.start();
@@ -72,8 +74,8 @@ fn start(self: *DhcpService) !void {
 
     self.removeSocketPath();
 
-    self.process = std.process.Child.init(
-        &[_][]const u8{
+    self.process = std.process.spawn(self.io, .{
+        .argv = &[_][]const u8{
             "nsenter",
             "-t",
             self.podman_infra_pid.?,
@@ -83,10 +85,7 @@ fn start(self: *DhcpService) !void {
             "-socketpath",
             self.sock_path,
         },
-        self.allocator,
-    );
-
-    self.process.?.spawn() catch |err| {
+    }) catch |err| {
         self.process = null;
         log.warn("Failed to start DHCP service: {s}", .{@errorName(err)});
         return err;
@@ -98,7 +97,7 @@ fn start(self: *DhcpService) !void {
 
 fn isAlive(self: DhcpService) bool {
     if (self.process) |process| {
-        std.posix.kill(process.id, 0) catch |err| switch (err) {
+        std.posix.kill(process.id.?, @enumFromInt(0)) catch |err| switch (err) {
             error.ProcessNotFound => return false,
             else => {
                 log.warn("Failed to check if DHCP service is alive: {s}", .{@errorName(err)});
@@ -112,11 +111,8 @@ fn isAlive(self: DhcpService) bool {
 
 fn stop(self: *DhcpService) void {
     if (self.process) |*process| {
-        _ = process.kill() catch |err| {
-            log.warn("Failed to stop DHCP service: {s}", .{@errorName(err)});
-            return;
-        };
-        _ = process.wait() catch |err| {
+        process.kill(self.io);
+        _ = process.wait(self.io) catch |err| {
             log.warn("Failed to wait for DHCP service to stop: {s}", .{@errorName(err)});
             return;
         };
@@ -127,18 +123,21 @@ fn stop(self: *DhcpService) void {
 fn waitSocketPathCreated(self: DhcpService, comptime max_wait: comptime_int) void {
     var i: usize = 0;
     while (i < max_wait) : (i += 1) {
-        _ = std.posix.fstatat(std.posix.AT.FDCWD, self.sock_path, 0) catch |err| switch (err) {
+        const f = std.Io.Dir.cwd().openFile(self.io, self.sock_path, .{}) catch |err| switch (err) {
             error.FileNotFound => {
-                std.posix.nanosleep(0, 10 * std.time.ns_per_ms);
+                var req: std.os.linux.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+                _ = std.os.linux.nanosleep(&req, null);
                 continue;
             },
             else => return,
         };
+        f.close(self.io);
+        return;
     }
 }
 
 fn removeSocketPath(self: DhcpService) void {
-    _ = std.fs.cwd().deleteFile(self.sock_path) catch |err| switch (err) {
+    _ = std.Io.Dir.cwd().deleteFile(self.io, self.sock_path) catch |err| switch (err) {
         error.FileNotFound => {},
         else => {
             log.warn("Failed to remove {s}: {s}", .{ self.sock_path, @errorName(err) });
@@ -156,8 +155,7 @@ fn initPodmanInfraPid(self: *DhcpService) InitPodmanInfraPidError!void {
     };
     defer self.allocator.free(uid);
 
-    const p = std.process.Child.run(.{
-        .allocator = self.allocator,
+    const p = std.process.run(self.allocator, self.io, .{
         .argv = &[_][]const u8{
             "pgrep",
             "-u",

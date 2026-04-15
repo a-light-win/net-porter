@@ -1,6 +1,5 @@
 const std = @import("std");
 const config_mod = @import("../config.zig");
-const net = std.net;
 const json = std.json;
 const log = std.log.scoped(.server);
 const traffic_log = std.log.scoped(.traffic);
@@ -11,6 +10,7 @@ const Cni = @import("../cni/Cni.zig");
 const CniManager = @import("../cni/CniManager.zig");
 const Responser = plugin.Responser;
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
+const SocketManager = @import("SocketManager.zig");
 const Handler = @This();
 
 const ClientInfo = extern struct {
@@ -19,16 +19,19 @@ const ClientInfo = extern struct {
     gid: std.posix.gid_t,
 };
 
+const Connection = SocketManager.Connection;
+
 arena: ArenaAllocator,
+io: std.Io,
 config: *config_mod.Config,
 acl_manager: *AclManager,
 cni_manager: *CniManager,
 dhcp_manager: *DhcpManager,
-connection: std.net.Server.Connection,
+connection: Connection,
 responser: Responser,
 
 pub fn deinit(self: *Handler) void {
-    self.connection.stream.close();
+    self.connection.stream.close(self.io);
 
     self.arena.deinit();
 }
@@ -46,8 +49,8 @@ pub fn handle(self: *Handler) !void {
     };
 
     var read_buffer: [4096]u8 = undefined;
-    var stream_reader = stream.reader(&read_buffer);
-    const buf = stream_reader.interface().allocRemaining(
+    var stream_reader = stream.reader(self.io, &read_buffer);
+    const buf = stream_reader.interface.allocRemaining(
         tentative_allocator,
         .limited(plugin.max_request_size),
     ) catch |err| {
@@ -180,7 +183,7 @@ fn getClientInfo(responser: *Responser) std.posix.UnexpectedError!ClientInfo {
     // Get peer credentials
     var client_info: ClientInfo = undefined;
     var info_len: std.posix.socklen_t = @sizeOf(ClientInfo);
-    const fd = responser.stream.handle;
+    const fd = responser.stream.socket.handle;
     const res = std.posix.system.getsockopt(
         fd,
         std.posix.SOL.SOCKET,
@@ -224,17 +227,18 @@ fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Re
 
 fn checkNetns(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
     if (request.netns) |netns| {
-        const netns_file = std.fs.cwd().openFile(netns, .{}) catch |err| {
-            self.responser.writeError("Failed to open netns file {s}: {s}", .{ netns, @errorName(err) });
-            return err;
-        };
-        defer netns_file.close();
-        const stat = std.posix.fstat(netns_file.handle) catch |err| {
-            self.responser.writeError("Failed to stat netns file {s}: {s}", .{ netns, @errorName(err) });
-            return err;
-        };
+        const netns_file = try std.Io.Dir.cwd().openFile(self.io, netns, .{});
+        defer netns_file.close(self.io);
 
-        if (stat.uid != client_info.uid) {
+        // Use statx syscall to get file owner uid
+        var statx_buf: std.os.linux.Statx = undefined;
+        const rc = std.os.linux.statx(netns_file.handle, "", std.os.linux.AT.EMPTY_PATH, .{ .UID = true }, &statx_buf);
+        if (rc != 0) {
+            self.responser.writeError("Failed to stat netns file {s}", .{netns});
+            return error.AccessDenied;
+        }
+
+        if (statx_buf.uid != client_info.uid) {
             self.responser.writeError("Netns file {s} doesn't belong to client", .{netns});
             return error.AccessDenied;
         }
@@ -265,8 +269,9 @@ fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !v
 
 const dump_env_sh = @embedFile("files/dump_env.sh");
 
-fn dumpEnv(self: Handler, allocator: std.mem.Allocator, request: plugin.Request) void {
+fn dumpEnv(self: *Handler, allocator: std.mem.Allocator, request: plugin.Request) void {
     const env_log = std.log.scoped(.dump_env);
+    const io = self.io;
 
     const dump_env = self.config.log.dump_env;
     if (!dump_env.enabled) {
@@ -279,45 +284,31 @@ fn dumpEnv(self: Handler, allocator: std.mem.Allocator, request: plugin.Request)
     }
 
     // Ensure the path of dump env exist
-    std.fs.cwd().makePath(dump_env.path) catch |err| {
+    std.Io.Dir.cwd().createDirPath(io, dump_env.path) catch |err| {
         env_log.warn(
             "Failed to create dump env path {s}: {s}",
             .{ dump_env.path, @errorName(err) },
         );
     };
 
-    var child = std.process.Child.init(
-        &[_][]const u8{"sh"},
-        allocator,
-    );
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-
-    var env_map = std.process.EnvMap.init(allocator);
-    defer env_map.deinit();
-    child.env_map = &env_map;
-
-    env_map.put(
-        "CLIENT_PID",
-        std.fmt.allocPrintSentinel(
-            allocator,
-            "{d}",
-            .{request.process_id.?},
-            0,
-        ) catch unreachable,
-    ) catch unreachable;
-
-    child.spawn() catch |err| {
+    var child = std.process.spawn(io, .{
+        .argv = &[_][]const u8{"sh"},
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    }) catch |err| {
         env_log.warn("Failed to spawn child process: {s}", .{@errorName(err)});
         return;
     };
 
     if (child.stdin) |stdin| {
-        stdin.writeAll(dump_env_sh) catch |err| {
+        var write_buffer: [4096]u8 = undefined;
+        var stdin_writer = stdin.writer(io, &write_buffer);
+        stdin_writer.interface.writeAll(dump_env_sh) catch |err| {
             env_log.warn("Failed to prepare the dump script: {s}", .{@errorName(err)});
         };
-        stdin.close();
+        stdin_writer.end() catch {};
+        stdin.close(io);
         child.stdin = null;
     }
 
@@ -335,40 +326,40 @@ fn dumpEnv(self: Handler, allocator: std.mem.Allocator, request: plugin.Request)
     defer allocator.free(file_path);
     env_log.info("Dumping env to {s}", .{file_path});
 
-    const file = std.fs.cwd().createFile(file_path, .{}) catch |err| {
+    const file = std.Io.Dir.cwd().createFile(io, file_path, .{}) catch |err| {
         env_log.warn("Failed to create dump env file {s}: {s}", .{ file_path, @errorName(err) });
         return;
     };
-    defer file.close();
-    file.chmod(0o640) catch |err| {
+    defer file.close(io);
+    file.setPermissions(io, @enumFromInt(0o640)) catch |err| {
         env_log.warn("Failed to chmod the file {s}: {s}", .{ file_path, @errorName(err) });
     };
 
-    const dump_stdout = std.Thread.spawn(.{}, dumpToFile, .{ allocator, child.stdout.?, file }) catch |err| {
+    const dump_stdout = std.Thread.spawn(.{}, dumpToFile, .{ io, allocator, child.stdout.?, file }) catch |err| {
         env_log.warn("Failed to spawn thread: {s}", .{@errorName(err)});
         return;
     };
     defer dump_stdout.join();
 
-    const dump_stderr = std.Thread.spawn(.{}, dumpToFile, .{ allocator, child.stderr.?, file }) catch |err| {
+    const dump_stderr = std.Thread.spawn(.{}, dumpToFile, .{ io, allocator, child.stderr.?, file }) catch |err| {
         env_log.warn("Failed to spawn thread: {s}", .{@errorName(err)});
         return;
     };
     defer dump_stderr.join();
 
-    _ = child.wait() catch |err| {
+    _ = child.wait(io) catch |err| {
         env_log.warn("Failed to wait child process: {s}", .{@errorName(err)});
     };
 }
 
-fn dumpToFile(allocator: std.mem.Allocator, in: std.fs.File, out: std.fs.File) void {
+fn dumpToFile(io: std.Io, allocator: std.mem.Allocator, in: std.Io.File, out: std.Io.File) void {
     _ = allocator;
     const env_log = std.log.scoped(.dump_env);
 
     var read_buffer: [4096]u8 = undefined;
     var write_buffer: [4096]u8 = undefined;
-    var file_reader = in.reader(&read_buffer);
-    var file_writer = out.writer(&write_buffer);
+    var file_reader = in.reader(io, &read_buffer);
+    var file_writer = out.writer(io, &write_buffer);
 
     _ = file_reader.interface.stream(&file_writer.interface, .unlimited) catch |err| {
         env_log.warn("Failed to dump env: {s}", .{@errorName(err)});

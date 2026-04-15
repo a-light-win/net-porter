@@ -15,18 +15,18 @@ users: ?[]const [:0]const u8 = null,
 resources: ?[]const Resource = null,
 log: LogSettings = .{},
 
-pub fn postInit(self: *Config, allocator: std.mem.Allocator, path: []const u8) !void {
+pub fn postInit(self: *Config, io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
     _ = allocator;
     self.config_path = path;
 
-    if (std.fs.path.dirname(path)) |dir| {
+    if (std.Io.Dir.path.dirname(path)) |dir| {
         self.config_dir = dir;
     } else {
         std.log.warn("Can not get config directory from path: {s}", .{path});
         return error.InvalidPath;
     }
 
-    self.setCNIPluginDir();
+    self.setCNIPluginDir(io);
 }
 
 const cni_plugin_search_paths = &[_][]const u8{
@@ -34,12 +34,12 @@ const cni_plugin_search_paths = &[_][]const u8{
     "/opt/cni/bin",
 };
 
-fn setCNIPluginDir(self: *Config) void {
+fn setCNIPluginDir(self: *Config, io: std.Io) void {
     if (!std.mem.eql(u8, self.cni_plugin_dir, "")) {
         return;
     }
     for (cni_plugin_search_paths) |path| blk: {
-        _ = std.fs.cwd().openDir(path, .{}) catch {
+        _ = std.Io.Dir.cwd().openDir(io, path, .{}) catch {
             break :blk;
         };
         self.cni_plugin_dir = path;
