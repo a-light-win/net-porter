@@ -78,7 +78,7 @@ test "CniManager: findResource returns matching resource" {
             Resource{
                 .name = "net-a",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "1000" },
                 },
@@ -86,7 +86,7 @@ test "CniManager: findResource returns matching resource" {
             Resource{
                 .name = "net-b",
                 .interface = .{ .type = "macvlan", .master = "eth1" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "2000" },
                 },
@@ -116,7 +116,7 @@ test "CniManager: loadCni returns ResourceNotFound for unknown resource" {
             Resource{
                 .name = "net-a",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "1000" },
                 },

@@ -102,7 +102,7 @@ test "isAllowed" {
             Resource{
                 .name = "test",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "root" },
                 },
@@ -124,7 +124,7 @@ test "hasAnyPermission" {
             Resource{
                 .name = "net-a",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "root" },
                 },
@@ -132,7 +132,7 @@ test "hasAnyPermission" {
             Resource{
                 .name = "net-b",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .group = "999" },
                 },
@@ -154,7 +154,7 @@ test "init rejects resource without ACL" {
             Resource{
                 .name = "insecure",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{},
             },
         },
@@ -170,7 +170,7 @@ test "isStaticResource and isIpAllowed" {
             Resource{
                 .name = "dhcp-net",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "1000" },
                 },
@@ -178,7 +178,7 @@ test "isStaticResource and isIpAllowed" {
             Resource{
                 .name = "static-net",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "static" },
+                .ipam = .{ .static = .{ .addresses = &[_]Resource.Address{} } },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "1000", .ips = &[_][:0]const u8{"192.168.1.10-192.168.1.20"} },
                 },
@@ -205,7 +205,7 @@ test "isIpAllowed scoped to correct resource" {
             Resource{
                 .name = "static-a",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "static" },
+                .ipam = .{ .static = .{ .addresses = &[_]Resource.Address{} } },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "1000", .ips = &[_][:0]const u8{"10.0.0.5-10.0.0.10"} },
                 },
@@ -213,7 +213,7 @@ test "isIpAllowed scoped to correct resource" {
             Resource{
                 .name = "static-b",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "static" },
+                .ipam = .{ .static = .{ .addresses = &[_]Resource.Address{} } },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "1000", .ips = &[_][:0]const u8{"192.168.1.5-192.168.1.10"} },
                 },

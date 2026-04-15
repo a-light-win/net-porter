@@ -11,7 +11,7 @@ test "AclManager: hasAnyPermission - single user allowed on single resource" {
             Resource{
                 .name = "vlan-100",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "1000" },
                 },
@@ -33,7 +33,7 @@ test "AclManager: hasAnyPermission - group permission" {
             Resource{
                 .name = "vlan-100",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .group = "100" },
                 },
@@ -55,7 +55,7 @@ test "AclManager: hasAnyPermission - multiple resources" {
             Resource{
                 .name = "vlan-100",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "1000" },
                 },
@@ -63,7 +63,7 @@ test "AclManager: hasAnyPermission - multiple resources" {
             Resource{
                 .name = "vlan-200",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "1001" },
                 },
@@ -71,7 +71,7 @@ test "AclManager: hasAnyPermission - multiple resources" {
             Resource{
                 .name = "vlan-300",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .group = "200" },
                 },
@@ -108,7 +108,7 @@ test "AclManager: init rejects resource with empty acl" {
             Resource{
                 .name = "insecure-resource",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{},
             },
         },
@@ -125,7 +125,7 @@ test "AclManager: isAllowed - user allowed on specific resource" {
             Resource{
                 .name = "vlan-100",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "1000" },
                     .{ .user = "1001" },
@@ -134,7 +134,7 @@ test "AclManager: isAllowed - user allowed on specific resource" {
             Resource{
                 .name = "vlan-200",
                 .interface = .{ .type = "macvlan", .master = "eth0" },
-                .ipam = .{ .type = "dhcp" },
+                .ipam = .{ .dhcp = .{} },
                 .acl = &[_]Resource.Grant{
                     .{ .user = "1001" },
                     .{ .user = "1002" },

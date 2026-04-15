@@ -104,7 +104,7 @@ test "isAllowed() should fail if acl is empty" {
     var acl = try fromResource(allocator, Resource{
         .name = "test",
         .interface = .{ .type = "macvlan", .master = "eth0" },
-        .ipam = .{ .type = "dhcp" },
+        .ipam = .{ .dhcp = .{} },
         .acl = &[_]Resource.Grant{},
     });
     defer acl.deinit();
@@ -118,7 +118,7 @@ test "isAllowed() should succeed if uid is allowed" {
         Resource{
             .name = "test",
             .interface = .{ .type = "macvlan", .master = "eth0" },
-            .ipam = .{ .type = "dhcp" },
+            .ipam = .{ .dhcp = .{} },
             .acl = &[_]Resource.Grant{
                 .{ .user = "root" },
             },
@@ -135,7 +135,7 @@ test "isAllowed() should succeed if gid is allowed" {
         Resource{
             .name = "test",
             .interface = .{ .type = "macvlan", .master = "eth0" },
-            .ipam = .{ .type = "dhcp" },
+            .ipam = .{ .dhcp = .{} },
             .acl = &[_]Resource.Grant{
                 .{ .group = "root" },
             },
@@ -152,7 +152,7 @@ test "isAllowed() with numeric uid in grant" {
         Resource{
             .name = "test",
             .interface = .{ .type = "macvlan", .master = "eth0" },
-            .ipam = .{ .type = "dhcp" },
+            .ipam = .{ .dhcp = .{} },
             .acl = &[_]Resource.Grant{
                 .{ .user = "333" },
                 .{ .group = "333" },
@@ -171,7 +171,7 @@ test "hasAnyAllow() returns false for empty acl" {
     var acl = try fromResource(allocator, Resource{
         .name = "test",
         .interface = .{ .type = "macvlan", .master = "eth0" },
-        .ipam = .{ .type = "dhcp" },
+        .ipam = .{ .dhcp = .{} },
         .acl = &[_]Resource.Grant{},
     });
     defer acl.deinit();
@@ -183,7 +183,7 @@ test "hasAnyAllow() returns true when users are present" {
     var acl = try fromResource(allocator, Resource{
         .name = "test",
         .interface = .{ .type = "macvlan", .master = "eth0" },
-        .ipam = .{ .type = "dhcp" },
+        .ipam = .{ .dhcp = .{} },
         .acl = &[_]Resource.Grant{
             .{ .user = "root" },
         },
@@ -197,7 +197,7 @@ test "isStatic() returns false when no ip ranges" {
     var acl = try fromResource(allocator, Resource{
         .name = "test",
         .interface = .{ .type = "macvlan", .master = "eth0" },
-        .ipam = .{ .type = "dhcp" },
+        .ipam = .{ .dhcp = .{} },
         .acl = &[_]Resource.Grant{
             .{ .user = "root" },
         },
@@ -211,7 +211,7 @@ test "isStatic() returns true when ip ranges exist" {
     var acl = try fromResource(allocator, Resource{
         .name = "test",
         .interface = .{ .type = "macvlan", .master = "eth0" },
-        .ipam = .{ .type = "static" },
+        .ipam = .{ .static = .{ .addresses = &[_]Resource.Address{} } },
         .acl = &[_]Resource.Grant{
             .{ .user = "1000", .ips = &[_][:0]const u8{"192.168.1.10-192.168.1.20"} },
         },
@@ -225,7 +225,7 @@ test "isIpAllowed() validates IP against ranges" {
     var acl = try fromResource(allocator, Resource{
         .name = "test",
         .interface = .{ .type = "macvlan", .master = "eth0" },
-        .ipam = .{ .type = "static" },
+        .ipam = .{ .static = .{ .addresses = &[_]Resource.Address{} } },
         .acl = &[_]Resource.Grant{
             .{ .user = "1000", .ips = &[_][:0]const u8{
                 "192.168.1.10-192.168.1.20",
@@ -252,7 +252,7 @@ test "isIpAllowed() with single IP" {
     var acl = try fromResource(allocator, Resource{
         .name = "test",
         .interface = .{ .type = "macvlan", .master = "eth0" },
-        .ipam = .{ .type = "static" },
+        .ipam = .{ .static = .{ .addresses = &[_]Resource.Address{} } },
         .acl = &[_]Resource.Grant{
             .{ .user = "1000", .ips = &[_][:0]const u8{"192.168.1.50"} },
         },
@@ -408,7 +408,7 @@ test "isIpAllowed() returns false for invalid IP string" {
     var acl = try fromResource(allocator, Resource{
         .name = "test",
         .interface = .{ .type = "macvlan", .master = "eth0" },
-        .ipam = .{ .type = "static" },
+        .ipam = .{ .static = .{ .addresses = &[_]Resource.Address{} } },
         .acl = &[_]Resource.Grant{
             .{ .user = "1000", .ips = &[_][:0]const u8{"192.168.1.10-192.168.1.20"} },
         },
@@ -425,7 +425,7 @@ test "isIpAllowed() with multiple disjoint ranges for same user" {
     var acl = try fromResource(allocator, Resource{
         .name = "test",
         .interface = .{ .type = "macvlan", .master = "eth0" },
-        .ipam = .{ .type = "static" },
+        .ipam = .{ .static = .{ .addresses = &[_]Resource.Address{} } },
         .acl = &[_]Resource.Grant{
             .{
                 .user = "1000",
@@ -449,7 +449,7 @@ test "fromResource with unresolvable user is skipped" {
     var acl = try fromResource(allocator, Resource{
         .name = "test",
         .interface = .{ .type = "macvlan", .master = "eth0" },
-        .ipam = .{ .type = "dhcp" },
+        .ipam = .{ .dhcp = .{} },
         .acl = &[_]Resource.Grant{
             .{ .user = "nonexistent-user-xyz" },
             .{ .user = "1000" },
@@ -467,7 +467,7 @@ test "fromResource with unresolvable group is skipped" {
     var acl = try fromResource(allocator, Resource{
         .name = "test",
         .interface = .{ .type = "macvlan", .master = "eth0" },
-        .ipam = .{ .type = "dhcp" },
+        .ipam = .{ .dhcp = .{} },
         .acl = &[_]Resource.Grant{
             .{ .group = "nonexistent-group-xyz" },
             .{ .group = "100" },
@@ -484,7 +484,7 @@ test "fromResource with mixed user and group grants" {
     var acl = try fromResource(allocator, Resource{
         .name = "test",
         .interface = .{ .type = "macvlan", .master = "eth0" },
-        .ipam = .{ .type = "dhcp" },
+        .ipam = .{ .dhcp = .{} },
         .acl = &[_]Resource.Grant{
             .{ .user = "1000" },
             .{ .group = "100" },

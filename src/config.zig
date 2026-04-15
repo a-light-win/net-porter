@@ -2,7 +2,7 @@ pub const Config = @import("config/Config.zig");
 pub const ManagedConfig = @import("config/ManagedConfig.zig");
 pub const DomainSocket = @import("config/DomainSocket.zig");
 pub const Resource = @import("config/Resource.zig");
-pub const Ipam = Resource.Ipam;
+pub const IpamConfig = Resource.IpamConfig;
 
 test {
     _ = @import("config/Config.zig");
