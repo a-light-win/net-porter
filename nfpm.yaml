@@ -41,6 +41,10 @@ contents:
     type: dir
     file_info:
       mode: 0755
+  - dst: /etc/net-porter/acl.d
+    type: dir
+    file_info:
+      mode: 0755
 
 archlinux:
   packager: "Songmin Li <lisongmin@protonmail.com>"
