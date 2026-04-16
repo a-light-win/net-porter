@@ -1,12 +1,12 @@
 # net-porter
 
 `net-porter` 是一个 [netavark](https://github.com/containers/netavark) 插件，
-用于为 rootless podman 容器提供 macvlan 网络。
+用于为 rootless podman 容器提供 macvlan/ipvlan 网络。
 
 它由两个主要部分组成：
 
 - `net-porter plugin`：运行在 rootless 环境中的 `netavark` 插件，由 `netavark` 调用。
-- `net-porter server`：以 root 权限运行的服务端，负责通过 CNI 插件创建 macvlan 网络。
+- `net-porter server`：以 root 权限运行的服务端，负责通过 CNI 插件创建 macvlan/ipvlan 网络。
 
 `net-porter server` 以单一全局 systemd 服务运行。它通过 inotify 监听 `/run/user/` 目录，
 为每个 ACL 授权的用户自动创建独立的 unix socket。当容器启动时，
@@ -14,7 +14,7 @@ netavark 会调用 `net-porter plugin`，plugin 通过对应用户的 socket 连
 并将所需信息传递给服务端。
 
 `net-porter server` 通过调用者的 `uid/gid`（通过内核 `SO_PEERCRED` 获取，不可伪造）进行身份认证，
-并在用户具有权限时创建 macvlan 网络。
+并在用户具有权限时创建 macvlan/ipvlan 网络。
 
 > **为什么使用 `/run/user/<uid>/` 下的每用户 socket？** Rootless podman 运行在隔离的挂载命名空间和独立的网络命名空间中（通过 pasta/slirp4netns）。`/run/` 下的文件系统 socket 和抽象 socket 都无法跨命名空间访问。但 `/run/user/<uid>/` 是由 `systemd-logind` 创建的每用户 tmpfs，会被 bind-mount 到用户命名空间中，因此在宿主机和 rootless podman 中均可访问。
 
@@ -287,9 +287,9 @@ podman run -it --rm --network macvlan-net alpine ip addr
 
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
-| `type` | 接口类型：`macvlan` | — |
+| `type` | 接口类型：`macvlan` 或 `ipvlan` | — |
 | `master` | 要附加的宿主机物理接口 | — |
-| `mode` | Macvlan 模式：`bridge`、`vepa`、`private`、`passthru` | `bridge` |
+| `mode` | macvlan 模式：`bridge`、`vepa`、`private`、`passthru`；ipvlan 模式：`l2`、`l3`、`l3s` | macvlan: `bridge`，ipvlan: `l2` |
 | `mtu` | 接口的 MTU 大小 | 未设置（使用内核默认值） |
 
 ### IPAM 配置
@@ -398,7 +398,50 @@ podman network create -d net-porter -o net_porter_resource=vlan-100 vlan100
 podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 ```
 
-### 示例 3：混合 DHCP 和静态 IP 资源
+### 示例 3：IPvLAN L3 模式
+```json
+{
+  "users": ["alice"],
+  "resources": [
+    {
+      "name": "ipvlan-l3",
+      "interface": { "type": "ipvlan", "master": "eth0", "mode": "l3" },
+      "ipam": { "type": "dhcp" },
+      "acl": [
+        { "user": "alice" }
+      ]
+    }
+  ]
+}
+```
+- `alice` 可以使用 `ipvlan-l3` 网络（ipvlan L3 模式）
+- IPvLAN 共享父接口的 MAC 地址（每个容器没有独立的 MAC）
+
+### 示例 4：IPvLAN 静态 IP
+```json
+{
+  "users": ["alice", "bob"],
+  "resources": [
+    {
+      "name": "ipvlan-static",
+      "interface": { "type": "ipvlan", "master": "eth0", "mode": "l2", "mtu": 9000 },
+      "ipam": {
+        "type": "static",
+        "addresses": [
+          { "address": "10.0.0.0/24", "gateway": "10.0.0.1" }
+        ],
+        "routes": [{ "dst": "0.0.0.0/0" }]
+      },
+      "acl": [
+        { "user": "alice", "ips": ["10.0.0.10-10.0.0.20"] },
+        { "user": "bob",   "ips": ["10.0.0.30-10.0.0.40"] }
+      ]
+    }
+  ]
+}
+```
+
+### 示例 5：混合 macvlan 和 ipvlan 资源
 ```json
 {
   "users": ["alice"],
