@@ -112,7 +112,7 @@ pub fn loadFromDir(self: *AclManager, io: std.Io) void {
         // Only process .json files
         if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
 
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const file_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ self.acl_dir, entry.name }) catch continue;
 
         self.loadAclFile(io, arena_allocator, &new_acls, file_path, entry.name);
@@ -506,7 +506,7 @@ const TestAclDir = struct {
     }
 
     fn writeFile(self: TestAclDir, filename: []const u8, content: []const u8) !void {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const file_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ self.dir_path, filename }) catch return;
         const file = try std.Io.Dir.cwd().createFile(self.io, file_path, .{});
         defer file.close(self.io);

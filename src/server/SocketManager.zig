@@ -200,7 +200,7 @@ pub fn updateAllowedUids(self: *SocketManager, new_uids: std.ArrayList(u32)) voi
         }
         if (!exists) {
             // Check if /run/user/<uid>/ directory exists
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const dir_path = std.fmt.bufPrint(&buf, "{s}/{d}", .{ run_user_dir, uid }) catch continue;
             _ = std.Io.Dir.cwd().openDir(self.io, dir_path, .{}) catch continue;
             // Directory exists, create socket

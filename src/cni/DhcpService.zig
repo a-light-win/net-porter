@@ -125,7 +125,7 @@ fn waitSocketPathCreated(self: DhcpService, comptime max_wait: comptime_int) voi
     while (i < max_wait) : (i += 1) {
         const f = std.Io.Dir.cwd().openFile(self.io, self.sock_path, .{}) catch |err| switch (err) {
             error.FileNotFound => {
-                var req: std.os.linux.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+                var req: std.posix.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
                 _ = std.os.linux.nanosleep(&req, null);
                 continue;
             },
