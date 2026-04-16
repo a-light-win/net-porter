@@ -8,7 +8,7 @@ info_buffer: [4096]u8 = undefined,
 error_buffer: [4096]u8 = undefined,
 initialized: bool = false,
 io: ?std.Io = null,
-log_settings: ?LogSettings = null,
+log_settings: ?LogSettings = .{},
 
 fn ensureInitialized(self: *Logger) void {
     if (!self.initialized) {
