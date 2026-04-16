@@ -1,6 +1,6 @@
 .{
     .name = .net_porter,
-    .version = "0.5.0-rc.2",
+    .version = "0.5.0",
     .fingerprint = 0xe3d8545efbb96a27,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
