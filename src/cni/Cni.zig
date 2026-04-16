@@ -1051,10 +1051,11 @@ const Attachment = struct {
     /// Serialize the attachment state to JSON for disk persistence.
     /// Stores each plugin's config and its result (if executed).
     fn serializeState(self: Attachment, allocator: Allocator) ![]const u8 {
-        var configs = std.ArrayList(json.Value).initCapacity(allocator, self.exec_configs.items.len) catch unreachable;
+        var configs = try std.ArrayList(json.Value).initCapacity(allocator, self.exec_configs.items.len);
 
         for (self.exec_configs.items) |exec_config| {
-            var entry = json.Value{ .object = try json.ObjectMap.init(allocator, &.{}, &{}) };
+            const entry_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
+            var entry = json.Value{ .object = entry_obj };
             // Store the plugin config
             try entry.object.put(allocator, "conf", json.Value{ .object = exec_config.conf });
             // Store the result (if any — should be present after setup)
@@ -1070,14 +1071,9 @@ const Attachment = struct {
         var root = try json.ObjectMap.init(allocator, &.{}, &.{});
         try root.put(allocator, "version", json.Value{ .integer = 1 });
         try root.put(allocator, "cni_plugin_dir", json.Value{ .string = self.cni_plugin_dir });
-        try root.put(allocator, "exec_configs", json.Value{ .array = configs });
+        try root.put(allocator, "exec_configs", json.Value{ .array = json.Array.fromOwnedSlice(allocator, configs.items) });
 
-        var buf = std.ArrayList(u8).empty;
-        try json.stringify(json.Value{ .object = root }, .{}, buf.writer(allocator));
-        return buf.toOwnedSlice(allocator) catch |err| {
-            buf.deinit(allocator);
-            return err;
-        };
+        return try json.Stringify.valueAlloc(allocator, json.Value{ .object = root }, .{});
     }
 
     /// Deserialize attachment state from JSON read from disk.
@@ -1114,9 +1110,8 @@ const Attachment = struct {
 
             // Restore result if present
             if (entry.result) |result_val| {
-                var result_buf = std.ArrayList(u8).empty;
-                try json.stringify(result_val, .{}, result_buf.writer(arena_alloc));
-                plugin_conf.result = result_buf;
+                const result_str = try json.Stringify.valueAlloc(arena_alloc, result_val, .{});
+                plugin_conf.result = std.ArrayList(u8).fromOwnedSlice(result_str);
             }
 
             try attachment.exec_configs.append(arena_alloc, plugin_conf);

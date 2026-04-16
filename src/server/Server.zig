@@ -48,7 +48,7 @@ pub fn new(opts: Opts) !Server {
     logger.log_settings = conf.log;
 
     // Ensure state directory exists with correct permissions
-    StateFile.ensureBaseDir() catch |err| {
+    StateFile.ensureBaseDir(io) catch |err| {
         log.err("Failed to create state directory: {s}", .{@errorName(err)});
         return err;
     };

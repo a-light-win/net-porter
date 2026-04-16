@@ -11,8 +11,8 @@ const mode_file = 0o600;
 
 /// Ensure the base directory exists with correct permissions (0700, root-only).
 /// Idempotent — no error if the directory already exists.
-pub fn ensureBaseDir() !void {
-    try ensureDir(default_base_dir);
+pub fn ensureBaseDir(io: std.Io) !void {
+    try ensureDir(io, default_base_dir);
 }
 
 /// Generate the state file path: /run/net-porter/{uid}/{container_id}_{ifname}.json
