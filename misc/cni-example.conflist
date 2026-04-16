@@ -1,0 +1,39 @@
+{
+  "cniVersion": "1.0.0",
+  "name": "default-network",
+  "description": "NetPorter标准CNI配置示例，重命名去掉.example后缀即可生效",
+  "plugins": [
+    // 主网络插件：macvlan模式，基于物理网卡bond0
+    {
+      "type": "macvlan",
+      "master": "bond0",
+      "mode": "bridge",
+      "mtu": 1500,
+      "ipam": {
+        "type": "dhcp"
+        // 静态IPAM配置示例：
+        // "type": "static",
+        // "addresses": [
+        //   { "address": "192.168.1.0/24", "gateway": "192.168.1.1" }
+        // ],
+        // "routes": [
+        //   { "dst": "0.0.0.0/0" }
+        // ],
+        // "dns": {
+        //   "nameservers": ["8.8.8.8", "114.114.114.114"]
+        // }
+      }
+    }
+    // 可选链式插件，按顺序执行：
+    // {
+    //   "type": "firewall",
+    //   "allowedPorts": ["80/tcp", "443/tcp", "53/udp"],
+    //   "ingressPolicy": "deny"
+    // },
+    // {
+    //   "type": "bandwidth",
+    //   "ingressRate": 1000000,
+    //   "egressRate": 1000000
+    // }
+  ]
+}

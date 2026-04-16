@@ -45,6 +45,15 @@ contents:
     type: dir
     file_info:
       mode: 0755
+  - dst: /etc/net-porter/cni.d
+    type: dir
+    file_info:
+      mode: 0755
+  - src: ./misc/cni-example.conflist
+    dst: /etc/net-porter/cni.d/00-example.conflist.example
+    type: config
+    file_info:
+      mode: 0644
 
 archlinux:
   packager: "Songmin Li <lisongmin@protonmail.com>"
