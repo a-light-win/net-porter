@@ -142,8 +142,10 @@ net-porter/
 │   │   ├── Server.zig            # Server core
 │   │   ├── SocketManager.zig     # Multi-socket management (inotify + poll)
 │   │   ├── Handler.zig           # Request handler
-│   │   ├── AclManager.zig        # ACL management
-│   │   └── Acl.zig               # ACL validation
+│   │   ├── AclManager.zig        # ACL management (file-based, hot-reload)
+│   │   ├── AclFile.zig           # ACL file format definition
+│   │   ├── Acl.zig               # ACL validation
+│   │   └── version.zig           # Version string
 │   ├── cni/                      # CNI integration
 │   │   ├── Cni.zig               # CNI execution logic
 │   │   ├── CniManager.zig        # CNI config management
@@ -155,6 +157,7 @@ net-porter/
 │   │   ├── ManagedConfig.zig     # Config loader
 │   │   └── DomainSocket.zig      # Socket path helpers
 │   ├── plugin/                   # Netavark plugin implementation
+│   ├── version.zig               # Version string
 │   └── utils/                    # Utilities
 ├── misc/
 │   ├── systemd/                  # Systemd service files
@@ -177,11 +180,10 @@ systemctl status net-porter
 ```
 
 ### 2. Configure network resource
-Edit `/etc/net-porter/config.json` to define resources. Each resource combines interface, IPAM, and ACL in one place — no separate CNI config files needed:
+Edit `/etc/net-porter/config.json` to define resources. Each resource combines interface and IPAM in one place — no separate CNI config files needed:
 
 ```json
 {
-  "users": ["alice"],
   "resources": [
     {
       "name": "macvlan-dhcp",
@@ -191,11 +193,7 @@ Edit `/etc/net-porter/config.json` to define resources. Each resource combines i
       },
       "ipam": {
         "type": "dhcp"
-      },
-      "acl": [
-        { "user": "alice" },
-        { "group": "devops" }
-      ]
+      }
     }
   ]
 }
@@ -206,7 +204,26 @@ Replace `eth0` with your host physical interface. Restart service after modifyin
 systemctl restart net-porter
 ```
 
-### 3. Create podman network
+### 3. Configure access control
+Create an ACL file in `/etc/net-porter/acl.d/` for each user or group that should have access:
+
+```bash
+mkdir -p /etc/net-porter/acl.d
+```
+
+`/etc/net-porter/acl.d/alice.json`:
+```json
+{
+  "user": "alice",
+  "grants": [
+    { "resource": "macvlan-dhcp" }
+  ]
+}
+```
+
+> ACL files are watched for changes. Adding, modifying, or deleting files takes effect automatically — no restart needed.
+
+### 4. Create podman network
 Run this command as the rootless user (e.g., `alice`):
 ```bash
 podman network create \
@@ -217,7 +234,7 @@ podman network create \
 ```
 
 ### 4. Test it out
-Run a test container:
+Run this command as the rootless user (e.g., `alice`):
 ```bash
 podman run -it --rm --network macvlan-net alpine ip addr
 ```
@@ -228,7 +245,6 @@ You should see the macvlan interface with an IP address from your DHCP server.
 ### Server Configuration (`/etc/net-porter/config.json`)
 ```json
 {
-  "users": ["alice", "bob"],
   "cni_plugin_dir": "/usr/lib/cni",
   "resources": [
     {
@@ -239,11 +255,7 @@ You should see the macvlan interface with an IP address from your DHCP server.
       },
       "ipam": {
         "type": "dhcp"
-      },
-      "acl": [
-        { "user": "alice" },
-        { "group": "devops" }
-      ]
+      }
     },
     {
       "name": "macvlan-static",
@@ -259,11 +271,7 @@ You should see the macvlan interface with an IP address from your DHCP server.
           { "address": "192.168.1.0/24", "gateway": "192.168.1.1" }
         ],
         "routes": [{ "dst": "0.0.0.0/0" }]
-      },
-      "acl": [
-        { "user": "alice", "ips": ["192.168.1.10-192.168.1.20"] },
-        { "user": "bob",   "ips": ["192.168.1.30"] }
-      ]
+      }
     }
   ],
   "log": {
@@ -276,7 +284,7 @@ You should see the macvlan interface with an IP address from your DHCP server.
 }
 ```
 
-> ⚠️ **Important**: Each resource **must** have at least one ACL grant entry. The service will fail to start if any resource has no access controls configured.
+Access control is configured separately in the `/etc/net-porter/acl.d/` directory — see [ACL Configuration](#acl-configuration) below.
 
 ### Resource Fields
 
@@ -285,7 +293,6 @@ You should see the macvlan interface with an IP address from your DHCP server.
 | `name` | Resource name, used to reference this resource in podman network creation | ✅ |
 | `interface` | Network interface configuration (see below) | ✅ |
 | `ipam` | IP address management configuration (see below) | ✅ |
-| `acl` | Access control list — array of grants (see below) | ✅ |
 
 ### Interface Configuration
 
@@ -295,6 +302,8 @@ You should see the macvlan interface with an IP address from your DHCP server.
 | `master` | Host physical interface to attach to | — |
 | `mode` | macvlan mode: `bridge`, `vepa`, `private`, `passthru`; ipvlan mode: `l2`, `l3`, `l3s` | macvlan: `bridge`, ipvlan: `l2` |
 | `mtu` | MTU size for the interface | unset (use kernel default) |
+
+> ⚠️ **Note**: ipvlan L3/L3s modes do not support DHCP (no ARP layer). Use static IPAM with these modes.
 
 ### IPAM Configuration
 
@@ -310,55 +319,102 @@ For `type: "static"`, additional fields:
 | `routes` | Array of `{ "dst": "<cidr>", "gw": "<ip>", "priority": <num> }` routes | static: optional |
 | `dns` | `{ "nameservers": [...], "domain": "...", "search": [...] }` | static: optional |
 
-### ACL Grants
+### ACL Configuration
 
-Each grant in the `acl` array specifies **who** can access this resource and, for static IPAM, **which IPs** they are allowed to use.
+Access control is managed through individual JSON files in the `/etc/net-porter/acl.d/` directory. The service watches this directory and applies changes automatically — no restart needed.
+
+#### ACL file format
+
+Each file must end in `.json` and follow this structure:
+
+```json
+{
+  "user": "alice",
+  "grants": [
+    { "resource": "macvlan-dhcp" },
+    { "resource": "static-net", "ips": ["192.168.1.10-192.168.1.20"] }
+  ]
+}
+```
+
+#### ACL file fields
 
 | Field | Description | Required |
 |-------|-------------|----------|
 | `user` | Username or numeric UID | one of `user` or `group` |
 | `group` | Group name or numeric GID | one of `user` or `group` |
-| `ips` | Array of allowed IP ranges or single IPs (static IPAM only) | static: ✅ |
+| `grants` | Array of resource grants | ✅ |
+| `grants[].resource` | Resource name (must match a resource in `config.json`) | ✅ |
+| `grants[].ips` | Array of allowed IP ranges or single IPs (for static IPAM resources) | static: ✅ |
 
-**IP range formats** (for static IPAM):
-- Single IP: `"192.168.1.30"`
-- IP range: `"192.168.1.10-192.168.1.20"`
+#### IP range formats
+
+- Single IPv4: `"192.168.1.30"`
+- IPv4 range: `"192.168.1.10-192.168.1.20"`
+- Single IPv6: `"2001:db8::1"`
+- IPv6 range: `"2001:db8::1-2001:db8::ff"`
 
 When IPAM type is `static`, the caller must request a specific IP (via podman `--ip` or netavark static_ips option), and net-porter validates it against the user's allowed ranges.
+
+> 💡 **Tip**: You can name ACL files however you like. A common convention is to use the user or group name (e.g., `alice.json`, `devops.json`). Multiple files can reference the same resource — grants are merged automatically.
 
 ### Top-level Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `users` | Array of usernames or numeric UIDs that need a `net-porter.sock` entry. The server creates per-user sockets only for users listed here. | `[]` (empty) |
 | `cni_plugin_dir` | Directory containing CNI plugin binaries | auto-detected (`/usr/lib/cni` or `/opt/cni/bin`) |
+| `acl_dir` | Directory containing ACL files | `{config_dir}/acl.d` |
 | `log.level` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 | `log.dump_env` | Environment dump for debugging | disabled |
 
 ## Usage Examples
 
 ### Example 1: Multiple users with different networks
+
+`/etc/net-porter/config.json`:
 ```json
 {
-  "users": ["alice", "bob"],
   "resources": [
     {
       "name": "vlan-100",
       "interface": { "type": "macvlan", "master": "eth0.100" },
-      "ipam": { "type": "dhcp" },
-      "acl": [
-        { "user": "alice" },
-        { "user": "bob" }
-      ]
+      "ipam": { "type": "dhcp" }
     },
     {
       "name": "vlan-200",
       "interface": { "type": "macvlan", "master": "eth0.200" },
-      "ipam": { "type": "dhcp" },
-      "acl": [
-        { "group": "devops" }
-      ]
+      "ipam": { "type": "dhcp" }
     }
+  ]
+}
+```
+
+`/etc/net-porter/acl.d/alice.json`:
+```json
+{
+  "user": "alice",
+  "grants": [
+    { "resource": "vlan-100" }
+  ]
+}
+```
+
+`/etc/net-porter/acl.d/bob.json`:
+```json
+{
+  "user": "bob",
+  "grants": [
+    { "resource": "vlan-100" }
+  ]
+}
+```
+
+`/etc/net-porter/acl.d/devops.json`:
+```json
+{
+  "group": "devops",
+  "grants": [
+    { "resource": "vlan-200" }
   ]
 }
 ```
@@ -371,9 +427,10 @@ podman network create -d net-porter -o net_porter_resource=vlan-100 vlan100
 ```
 
 ### Example 2: Static IP with per-user ranges
+
+`/etc/net-porter/config.json`:
 ```json
 {
-  "users": ["alice", "bob"],
   "resources": [
     {
       "name": "static-net",
@@ -384,12 +441,28 @@ podman network create -d net-porter -o net_porter_resource=vlan-100 vlan100
           { "address": "192.168.1.0/24", "gateway": "192.168.1.1" }
         ],
         "routes": [{ "dst": "0.0.0.0/0" }]
-      },
-      "acl": [
-        { "user": "alice", "ips": ["192.168.1.10-192.168.1.20"] },
-        { "user": "bob",   "ips": ["192.168.1.30-192.168.1.40"] }
-      ]
+      }
     }
+  ]
+}
+```
+
+`/etc/net-porter/acl.d/alice.json`:
+```json
+{
+  "user": "alice",
+  "grants": [
+    { "resource": "static-net", "ips": ["192.168.1.10-192.168.1.20"] }
+  ]
+}
+```
+
+`/etc/net-porter/acl.d/bob.json`:
+```json
+{
+  "user": "bob",
+  "grants": [
+    { "resource": "static-net", "ips": ["192.168.1.30-192.168.1.40"] }
   ]
 }
 ```
@@ -403,61 +476,73 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 ```
 
 ### Example 3: IPvLAN with L3 mode
+
+`/etc/net-porter/config.json`:
 ```json
 {
-  "users": ["alice"],
   "resources": [
     {
       "name": "ipvlan-l3",
       "interface": { "type": "ipvlan", "master": "eth0", "mode": "l3" },
-      "ipam": { "type": "dhcp" },
-      "acl": [
-        { "user": "alice" }
-      ]
+      "ipam": {
+        "type": "static",
+        "addresses": [
+          { "address": "10.0.0.0/24", "gateway": "10.0.0.1" }
+        ]
+      }
     }
+  ]
+}
+```
+
+`/etc/net-porter/acl.d/alice.json`:
+```json
+{
+  "user": "alice",
+  "grants": [
+    { "resource": "ipvlan-l3", "ips": ["10.0.0.10-10.0.0.20"] }
   ]
 }
 ```
 - `alice` can use the `ipvlan-l3` network with ipvlan L3 mode
 - IPvLAN shares the parent interface's MAC address (no separate MAC per container)
+- Note: ipvlan L3/L3s modes require static IPAM (DHCP is not supported)
 
-### Example 4: IPvLAN with static IP
+### Example 4: IPvLAN L2 with DHCP
+
+`/etc/net-porter/config.json`:
 ```json
 {
-  "users": ["alice", "bob"],
   "resources": [
     {
-      "name": "ipvlan-static",
+      "name": "ipvlan-dhcp",
       "interface": { "type": "ipvlan", "master": "eth0", "mode": "l2", "mtu": 9000 },
-      "ipam": {
-        "type": "static",
-        "addresses": [
-          { "address": "10.0.0.0/24", "gateway": "10.0.0.1" }
-        ],
-        "routes": [{ "dst": "0.0.0.0/0" }]
-      },
-      "acl": [
-        { "user": "alice", "ips": ["10.0.0.10-10.0.0.20"] },
-        { "user": "bob",   "ips": ["10.0.0.30-10.0.0.40"] }
-      ]
+      "ipam": { "type": "dhcp" }
     }
   ]
 }
 ```
 
-### Example 5: Mixed macvlan and ipvlan resources
+`/etc/net-porter/acl.d/alice.json`:
 ```json
 {
-  "users": ["alice"],
+  "user": "alice",
+  "grants": [
+    { "resource": "ipvlan-dhcp" }
+  ]
+}
+```
+
+### Example 5: Mixed macvlan and ipvlan resources
+
+`/etc/net-porter/config.json`:
+```json
+{
   "resources": [
     {
       "name": "macvlan-dhcp",
       "interface": { "type": "macvlan", "master": "eth0" },
-      "ipam": { "type": "dhcp" },
-      "acl": [
-        { "user": "alice" },
-        { "group": "devops" }
-      ]
+      "ipam": { "type": "dhcp" }
     },
     {
       "name": "macvlan-static",
@@ -468,41 +553,43 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
           { "address": "10.0.0.0/24", "gateway": "10.0.0.1" }
         ],
         "routes": [{ "dst": "0.0.0.0/0" }]
-      },
-      "acl": [
-        { "user": "alice", "ips": ["10.0.0.5-10.0.0.10"] }
-      ]
+      }
     }
   ]
 }
 ```
 
-## Upgrade from v0.x (per-user service architecture)
-Version 1.0 uses single global service instead of per-user service instances. To upgrade:
+`/etc/net-porter/acl.d/alice.json`:
+```json
+{
+  "user": "alice",
+  "grants": [
+    { "resource": "macvlan-dhcp" },
+    { "resource": "macvlan-static", "ips": ["10.0.0.5-10.0.0.10"] }
+  ]
+}
+```
 
-1. Stop and disable all per-user services:
+## Upgrade from v0.4
+
+Version 0.5.0 moves access control from inline `acl` fields to a separate `acl.d/` directory. See the [Migration Guide (0.4 → 0.5)](migration-guide-0.4-to-0.5.md) for detailed instructions.
+
+Quick steps:
+
+1. Create the ACL directory:
    ```bash
-   systemctl stop net-porter@*
-   systemctl disable net-porter@*
+   mkdir -p /etc/net-porter/acl.d
    ```
-2. Install the new version package
-3. Merge your per-user ACL configurations into the global `/etc/net-porter/config.json` using the new format (see [Configuration Guide](#configuration-guide))
-4. Remove old CNI config files from `/etc/net-porter/cni.d/` — interface and IPAM settings are now defined inline in the resource
-5. Start the global service:
+2. Create an ACL file for each user/group based on your existing `acl` grants (see [ACL Configuration](#acl-configuration))
+3. Remove `users` and `acl` fields from `/etc/net-porter/config.json`
+4. Restart the service:
    ```bash
-   systemctl enable --now net-porter
+   systemctl restart net-porter
    ```
-6. Recreate podman networks with the new abstract socket path:
-   ```bash
-   # Remove old network
-   podman network rm macvlan-net
-   # Recreate with per-user socket
-   podman network create \
-     -d net-porter \
-     -o net_porter_resource=macvlan-dhcp \
-     -o net_porter_socket=/run/user/$(id -u)/net-porter.sock \
-     macvlan-net
-   ```
+
+## Upgrade from v0.3 or earlier
+
+See the [Migration Guide (0.3 → 0.4)](migration-guide-0.3-to-0.4.md) for upgrading from v0.3 or earlier. Then follow the v0.4 → v0.5 migration above.
 
 ## Troubleshooting
 
@@ -511,8 +598,8 @@ Version 1.0 uses single global service instead of per-user service instances. To
 #### 1. Permission denied when connecting to socket
 **Error**: `Access denied for uid=1000`
 **Solutions**:
-- Check if the user has permission for the requested resource in the config
-- Verify the ACL grants in `/etc/net-porter/config.json`
+- Check if the user has an ACL file in `/etc/net-porter/acl.d/` granting access to the requested resource
+- Verify the ACL grants in the user's ACL file
 
 #### 2. Plugin cannot connect to server
 **Error**: `Failed to connect to domain socket /run/user/1000/net-porter.sock: ConnectionRefused`

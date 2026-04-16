@@ -138,8 +138,10 @@ net-porter/
 │   │   ├── Server.zig            # 服务端核心
 │   │   ├── SocketManager.zig     # 多 Socket 管理（inotify + poll）
 │   │   ├── Handler.zig           # 请求处理器
-│   │   ├── AclManager.zig        # ACL 管理
-│   │   └── Acl.zig               # ACL 验证
+│   │   ├── AclManager.zig        # ACL 管理（基于文件、热加载）
+│   │   ├── AclFile.zig           # ACL 文件格式定义
+│   │   ├── Acl.zig               # ACL 验证
+│   │   └── version.zig           # 版本号
 │   ├── cni/                      # CNI 集成
 │   │   ├── Cni.zig               # CNI 执行逻辑
 │   │   ├── CniManager.zig        # CNI 配置管理
@@ -151,6 +153,7 @@ net-porter/
 │   │   ├── ManagedConfig.zig     # 配置加载器
 │   │   └── DomainSocket.zig      # Socket 路径工具
 │   ├── plugin/                   # Netavark 插件实现
+│   ├── version.zig               # 版本号
 │   └── utils/                    # 工具模块
 ├── misc/
 │   ├── systemd/                  # Systemd 服务文件
@@ -173,11 +176,10 @@ systemctl status net-porter
 ```
 
 ### 2. 配置网络资源
-编辑 `/etc/net-porter/config.json` 定义资源。每个资源将接口、IPAM 和 ACL 合并在一处 —— 无需单独的 CNI 配置文件：
+编辑 `/etc/net-porter/config.json` 定义资源。每个资源将接口和 IPAM 合并在一处 —— 无需单独的 CNI 配置文件：
 
 ```json
 {
-  "users": ["alice"],
   "resources": [
     {
       "name": "macvlan-dhcp",
@@ -187,11 +189,7 @@ systemctl status net-porter
       },
       "ipam": {
         "type": "dhcp"
-      },
-      "acl": [
-        { "user": "alice" },
-        { "group": "devops" }
-      ]
+      }
     }
   ]
 }
@@ -202,7 +200,26 @@ systemctl status net-porter
 systemctl restart net-porter
 ```
 
-### 3. 创建 podman 网络
+### 3. 配置访问控制
+为每个需要访问权限的用户或组在 `/etc/net-porter/acl.d/` 目录中创建 ACL 文件：
+
+```bash
+mkdir -p /etc/net-porter/acl.d
+```
+
+`/etc/net-porter/acl.d/alice.json`：
+```json
+{
+  "user": "alice",
+  "grants": [
+    { "resource": "macvlan-dhcp" }
+  ]
+}
+```
+
+> ACL 文件会被自动监听。添加、修改或删除文件后无需重启即可生效。
+
+### 4. 创建 podman 网络
 以 rootless 用户（如 `alice`）身份运行：
 ```bash
 podman network create \
@@ -212,8 +229,8 @@ podman network create \
   macvlan-net
 ```
 
-### 4. 测试
-运行一个测试容器：
+### 5. 测试
+以 rootless 用户（如 `alice`）身份运行：
 ```bash
 podman run -it --rm --network macvlan-net alpine ip addr
 ```
@@ -224,7 +241,6 @@ podman run -it --rm --network macvlan-net alpine ip addr
 ### 服务端配置 (`/etc/net-porter/config.json`)
 ```json
 {
-  "users": ["alice", "bob"],
   "cni_plugin_dir": "/usr/lib/cni",
   "resources": [
     {
@@ -235,11 +251,7 @@ podman run -it --rm --network macvlan-net alpine ip addr
       },
       "ipam": {
         "type": "dhcp"
-      },
-      "acl": [
-        { "user": "alice" },
-        { "group": "devops" }
-      ]
+      }
     },
     {
       "name": "macvlan-static",
@@ -255,11 +267,7 @@ podman run -it --rm --network macvlan-net alpine ip addr
           { "address": "192.168.1.0/24", "gateway": "192.168.1.1" }
         ],
         "routes": [{ "dst": "0.0.0.0/0" }]
-      },
-      "acl": [
-        { "user": "alice", "ips": ["192.168.1.10-192.168.1.20"] },
-        { "user": "bob",   "ips": ["192.168.1.30"] }
-      ]
+      }
     }
   ],
   "log": {
@@ -272,7 +280,7 @@ podman run -it --rm --network macvlan-net alpine ip addr
 }
 ```
 
-> ⚠️ **重要**：每个资源**必须**至少有一个 ACL grant 条目。如果任何资源缺少访问控制配置，服务将拒绝启动。
+访问控制在 `/etc/net-porter/acl.d/` 目录中单独配置 —— 详见下文 [ACL 配置](#acl-配置)。
 
 ### 资源字段
 
@@ -281,7 +289,6 @@ podman run -it --rm --network macvlan-net alpine ip addr
 | `name` | 资源名称，用于创建 podman 网络时引用 | ✅ |
 | `interface` | 网络接口配置（见下文） | ✅ |
 | `ipam` | IP 地址管理配置（见下文） | ✅ |
-| `acl` | 访问控制列表 —— grant 数组（见下文） | ✅ |
 
 ### 接口配置
 
@@ -291,6 +298,8 @@ podman run -it --rm --network macvlan-net alpine ip addr
 | `master` | 要附加的宿主机物理接口 | — |
 | `mode` | macvlan 模式：`bridge`、`vepa`、`private`、`passthru`；ipvlan 模式：`l2`、`l3`、`l3s` | macvlan: `bridge`，ipvlan: `l2` |
 | `mtu` | 接口的 MTU 大小 | 未设置（使用内核默认值） |
+
+> ⚠️ **注意**：ipvlan L3/L3s 模式不支持 DHCP（无 ARP 层），请使用静态 IPAM。
 
 ### IPAM 配置
 
@@ -306,70 +315,113 @@ podman run -it --rm --network macvlan-net alpine ip addr
 | `routes` | `{ "dst": "<cidr>", "gw": "<ip>", "priority": <num> }` 路由数组 | static: 可选 |
 | `dns` | `{ "nameservers": [...], "domain": "...", "search": [...] }` | static: 可选 |
 
-### ACL Grant
+### ACL 配置
 
-`acl` 数组中的每个 grant 指定**谁**可以访问此资源，以及对于静态 IPAM，允许使用**哪些 IP**。
+访问控制通过 `/etc/net-porter/acl.d/` 目录中的独立 JSON 文件管理。服务会自动监听该目录，添加、修改或删除文件后无需重启即可生效。
+
+#### ACL 文件格式
+
+每个文件必须以 `.json` 结尾，结构如下：
+
+```json
+{
+  "user": "alice",
+  "grants": [
+    { "resource": "macvlan-dhcp" },
+    { "resource": "static-net", "ips": ["192.168.1.10-192.168.1.20"] }
+  ]
+}
+```
+
+#### ACL 文件字段
 
 | 字段 | 说明 | 必填 |
 |------|------|------|
 | `user` | 用户名或数字 UID | `user` 或 `group` 二选一 |
 | `group` | 组名或数字 GID | `user` 或 `group` 二选一 |
-| `ips` | 允许的 IP 范围或单个 IP 的数组（仅静态 IPAM） | static: ✅ |
+| `grants` | 资源授权数组 | ✅ |
+| `grants[].resource` | 资源名称（须与 `config.json` 中的资源匹配） | ✅ |
+| `grants[].ips` | 允许的 IP 范围或单个 IP 数组（用于静态 IP 资源） | 静态资源：✅ |
 
-**IP 范围格式**（用于静态 IPAM）：
-- 单个 IP：`"192.168.1.30"`
-- IP 范围：`"192.168.1.10-192.168.1.20"`
+#### IP 范围格式
+
+- 单个 IPv4：`"192.168.1.30"`
+- IPv4 范围：`"192.168.1.10-192.168.1.20"`
+- 单个 IPv6：`"2001:db8::1"`
+- IPv6 范围：`"2001:db8::1-2001:db8::ff"`
 
 当 IPAM 类型为 `static` 时，调用方必须请求特定 IP（通过 podman `--ip` 或 netavark static_ips 选项），net-porter 会根据用户允许的范围进行校验。
+
+> 💡 **提示**：ACL 文件可以随意命名。常见做法是使用用户名或组名（如 `alice.json`、`devops.json`）。多个文件可以引用同一资源 —— 授权会自动合并。
 
 ### 顶层选项
 
 | 选项 | 说明 | 默认值 |
 |------|------|--------|
-| `users` | 需要 `net-porter.sock` 入口的用户名或数字 UID 数组。服务仅为列出的用户创建每用户 socket。 | `[]`（空） |
 | `cni_plugin_dir` | CNI 插件二进制文件所在目录 | 自动检测（`/usr/lib/cni` 或 `/opt/cni/bin`） |
+| `acl_dir` | ACL 文件所在目录 | `{config_dir}/acl.d` |
 | `log.level` | 日志级别：`debug`、`info`、`warn`、`error` | `info` |
 | `log.dump_env` | 调试用的环境信息导出 | 禁用 |
 
 ## 使用示例
 
 ### 示例 1：多用户使用不同网络
+
+`/etc/net-porter/config.json`：
 ```json
 {
-  "users": ["alice", "bob"],
   "resources": [
     {
       "name": "vlan-100",
       "interface": { "type": "macvlan", "master": "eth0.100" },
-      "ipam": { "type": "dhcp" },
-      "acl": [
-        { "user": "alice" },
-        { "user": "bob" }
-      ]
+      "ipam": { "type": "dhcp" }
     },
     {
       "name": "vlan-200",
       "interface": { "type": "macvlan", "master": "eth0.200" },
-      "ipam": { "type": "dhcp" },
-      "acl": [
-        { "group": "devops" }
-      ]
+      "ipam": { "type": "dhcp" }
     }
+  ]
+}
+```
+
+`/etc/net-porter/acl.d/alice.json`：
+```json
+{
+  "user": "alice",
+  "grants": [
+    { "resource": "vlan-100" }
+  ]
+}
+```
+
+`/etc/net-porter/acl.d/bob.json`：
+```json
+{
+  "user": "bob",
+  "grants": [
+    { "resource": "vlan-100" }
+  ]
+}
+```
+
+`/etc/net-porter/acl.d/devops.json`：
+```json
+{
+  "group": "devops",
+  "grants": [
+    { "resource": "vlan-200" }
   ]
 }
 ```
 - `alice` 和 `bob` 可以使用 `vlan-100` 网络
 - `devops` 组中的所有用户可以使用 `vlan-200` 网络
 
-用户 alice 创建网络：
-```bash
-podman network create -d net-porter -o net_porter_resource=vlan-100 vlan100
-```
-
 ### 示例 2：静态 IP 及每用户 IP 范围
+
+`/etc/net-porter/config.json`：
 ```json
 {
-  "users": ["alice", "bob"],
   "resources": [
     {
       "name": "static-net",
@@ -380,12 +432,28 @@ podman network create -d net-porter -o net_porter_resource=vlan-100 vlan100
           { "address": "192.168.1.0/24", "gateway": "192.168.1.1" }
         ],
         "routes": [{ "dst": "0.0.0.0/0" }]
-      },
-      "acl": [
-        { "user": "alice", "ips": ["192.168.1.10-192.168.1.20"] },
-        { "user": "bob",   "ips": ["192.168.1.30-192.168.1.40"] }
-      ]
+      }
     }
+  ]
+}
+```
+
+`/etc/net-porter/acl.d/alice.json`：
+```json
+{
+  "user": "alice",
+  "grants": [
+    { "resource": "static-net", "ips": ["192.168.1.10-192.168.1.20"] }
+  ]
+}
+```
+
+`/etc/net-porter/acl.d/bob.json`：
+```json
+{
+  "user": "bob",
+  "grants": [
+    { "resource": "static-net", "ips": ["192.168.1.30-192.168.1.40"] }
   ]
 }
 ```
@@ -399,61 +467,73 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 ```
 
 ### 示例 3：IPvLAN L3 模式
+
+`/etc/net-porter/config.json`：
 ```json
 {
-  "users": ["alice"],
   "resources": [
     {
       "name": "ipvlan-l3",
       "interface": { "type": "ipvlan", "master": "eth0", "mode": "l3" },
-      "ipam": { "type": "dhcp" },
-      "acl": [
-        { "user": "alice" }
-      ]
+      "ipam": {
+        "type": "static",
+        "addresses": [
+          { "address": "10.0.0.0/24", "gateway": "10.0.0.1" }
+        ]
+      }
     }
+  ]
+}
+```
+
+`/etc/net-porter/acl.d/alice.json`：
+```json
+{
+  "user": "alice",
+  "grants": [
+    { "resource": "ipvlan-l3", "ips": ["10.0.0.10-10.0.0.20"] }
   ]
 }
 ```
 - `alice` 可以使用 `ipvlan-l3` 网络（ipvlan L3 模式）
 - IPvLAN 共享父接口的 MAC 地址（每个容器没有独立的 MAC）
+- 注意：ipvlan L3/L3s 模式需要使用静态 IPAM（不支持 DHCP）
 
-### 示例 4：IPvLAN 静态 IP
+### 示例 4：IPvLAN L2 + DHCP
+
+`/etc/net-porter/config.json`：
 ```json
 {
-  "users": ["alice", "bob"],
   "resources": [
     {
-      "name": "ipvlan-static",
+      "name": "ipvlan-dhcp",
       "interface": { "type": "ipvlan", "master": "eth0", "mode": "l2", "mtu": 9000 },
-      "ipam": {
-        "type": "static",
-        "addresses": [
-          { "address": "10.0.0.0/24", "gateway": "10.0.0.1" }
-        ],
-        "routes": [{ "dst": "0.0.0.0/0" }]
-      },
-      "acl": [
-        { "user": "alice", "ips": ["10.0.0.10-10.0.0.20"] },
-        { "user": "bob",   "ips": ["10.0.0.30-10.0.0.40"] }
-      ]
+      "ipam": { "type": "dhcp" }
     }
   ]
 }
 ```
 
-### 示例 5：混合 macvlan 和 ipvlan 资源
+`/etc/net-porter/acl.d/alice.json`：
 ```json
 {
-  "users": ["alice"],
+  "user": "alice",
+  "grants": [
+    { "resource": "ipvlan-dhcp" }
+  ]
+}
+```
+
+### 示例 5：混合 macvlan 和 ipvlan 资源
+
+`/etc/net-porter/config.json`：
+```json
+{
   "resources": [
     {
       "name": "macvlan-dhcp",
       "interface": { "type": "macvlan", "master": "eth0" },
-      "ipam": { "type": "dhcp" },
-      "acl": [
-        { "user": "alice" },
-        { "group": "devops" }
-      ]
+      "ipam": { "type": "dhcp" }
     },
     {
       "name": "macvlan-static",
@@ -464,41 +544,43 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
           { "address": "10.0.0.0/24", "gateway": "10.0.0.1" }
         ],
         "routes": [{ "dst": "0.0.0.0/0" }]
-      },
-      "acl": [
-        { "user": "alice", "ips": ["10.0.0.5-10.0.0.10"] }
-      ]
+      }
     }
   ]
 }
 ```
 
-## 从 v0.x 升级（每用户服务架构）
-版本 0.4.0 使用单一全局服务替代了每用户服务实例。升级步骤：
+`/etc/net-porter/acl.d/alice.json`：
+```json
+{
+  "user": "alice",
+  "grants": [
+    { "resource": "macvlan-dhcp" },
+    { "resource": "macvlan-static", "ips": ["10.0.0.5-10.0.0.10"] }
+  ]
+}
+```
 
-1. 停止并禁用所有每用户服务：
+## 从 v0.4 升级
+
+0.5.0 版本将访问控制从内联 `acl` 字段迁移到独立的 `acl.d/` 目录。详见 [迁移指南（0.4 → 0.5）](migration-guide-0.4-to-0.5.md)。
+
+快速步骤：
+
+1. 创建 ACL 目录：
    ```bash
-   systemctl stop net-porter@*
-   systemctl disable net-porter@*
+   mkdir -p /etc/net-porter/acl.d
    ```
-2. 安装新版本包
-3. 使用新格式将每用户 ACL 配置合并到全局 `/etc/net-porter/config.json` 中（见[配置指南](#配置指南)）
-4. 删除 `/etc/net-porter/cni.d/` 中的旧 CNI 配置文件 —— 接口和 IPAM 设置现在在资源中内联定义
-5. 启动全局服务：
+2. 根据现有的 `acl` 授权为每个用户/组创建 ACL 文件（见 [ACL 配置](#acl-配置)）
+3. 从 `/etc/net-porter/config.json` 中删除 `users` 和 `acl` 字段
+4. 重启服务：
    ```bash
-   systemctl enable --now net-porter
+   systemctl restart net-porter
    ```
-6. 使用新的每用户 socket 路径重建 podman 网络：
-   ```bash
-   # 删除旧网络
-   podman network rm macvlan-net
-   # 使用每用户 socket 重建
-   podman network create \
-     -d net-porter \
-     -o net_porter_resource=macvlan-dhcp \
-     -o net_porter_socket=/run/user/$(id -u)/net-porter.sock \
-     macvlan-net
-   ```
+
+## 从 v0.3 或更早版本升级
+
+详见 [迁移指南（0.3 → 0.4）](migration-guide-0.3-to-0.4.md) 升级到 v0.4，然后再按上述步骤迁移到 v0.5。
 
 ## 故障排查
 
@@ -507,8 +589,8 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 #### 1. 连接 socket 时权限被拒绝
 **错误**：`Access denied for uid=1000`
 **解决方案**：
-- 检查用户在配置中是否有所请求资源的权限
-- 验证 `/etc/net-porter/config.json` 中的 ACL grant 配置
+- 检查用户在 `/etc/net-porter/acl.d/` 中的 ACL 文件是否有所请求资源的权限
+- 验证 ACL 文件中的授权配置
 
 #### 2. 插件无法连接到服务端
 **错误**：`Failed to connect to domain socket /run/user/1000/net-porter.sock: ConnectionRefused`
