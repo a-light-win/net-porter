@@ -74,8 +74,9 @@ pub const CniLoader = struct {
         defer self.allocator.free(content);
 
         const parsed = try json.parseFromSlice(json.Value, self.allocator, content, .{ .ignore_unknown_fields = true });
-        // All memory is owned by arena, will be freed automatically when CniManager is destroyed
-        // No need to deinit parsed here
+        // All JSON memory is allocated on self.allocator (which is an arena owned by CniManager)
+        // The arena will free all memory when CniManager.deinit() is called, so no need to deinit parsed here
+        // The CniConfig returned will reference memory owned by this arena
 
         if (parsed.value != .object) return error.InvalidConfig;
         const obj = parsed.value.object;
@@ -137,11 +138,16 @@ pub const CniLoader = struct {
 // ============================================================
 test "CniLoader loads single-plugin config" {
     const allocator = std.testing.allocator;
-    var temp_dir = try std.testing.tmpDir(.{});
-    defer temp_dir.cleanup();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
 
-    const cni_dir = try temp_dir.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(cni_dir);
+    // Create temp directories under /tmp with absolute paths
+    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_test_{d}", .{std.os.linux.getpid()});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
+    const cni_dir = try std.Io.Dir.cwd().openDir(std.testing.io, cni_dir_path, .{});
+    defer cni_dir.close(std.testing.io);
 
     // Create test config
     const test_config =
@@ -153,20 +159,24 @@ test "CniLoader loads single-plugin config" {
         \\    "ipam": {"type": "dhcp"}
         \\}
     ;
-    try temp_dir.dir.writeFile("test.conf", test_config);
+    try cni_dir.writeFile(std.testing.io, .{ .sub_path = "test.conf", .data = test_config });
 
     // Mock plugin directory with dummy executable
-    var plugin_dir = try std.testing.tmpDir(.{});
-    defer plugin_dir.cleanup();
-    try plugin_dir.dir.writeFile("macvlan", "#!/bin/sh\nexit 0");
-    try plugin_dir.dir.chmod("macvlan", 0o755);
-    const plugin_dir_path = try plugin_dir.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(plugin_dir_path);
+    const plugin_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_plugin_test_{d}", .{std.os.linux.getpid()});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, plugin_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, plugin_dir_path) catch {};
+    const plugin_dir = try std.Io.Dir.cwd().openDir(std.testing.io, plugin_dir_path, .{});
+    defer plugin_dir.close(std.testing.io);
+    try plugin_dir.writeFile(std.testing.io, .{ .sub_path = "macvlan", .data = "#!/bin/sh\nexit 0" });
+    // Make plugin executable (chmod 0755)
+    const macvlan_path = try std.fmt.allocPrint(arena_alloc, "{s}/macvlan\x00", .{plugin_dir_path});
+    const macvlan_z: [:0]const u8 = macvlan_path[0 .. macvlan_path.len - 1 :0];
+    _ = std.os.linux.fchmodat(std.posix.AT.FDCWD, macvlan_z, 0o755);
 
-    // Load config
-    var loader = CniLoader.init(std.testing.io, allocator, cni_dir, plugin_dir_path);
+    // Load config using arena allocator (all memory freed when arena deinit)
+    var loader = CniLoader.init(std.testing.io, arena_alloc, cni_dir_path, plugin_dir_path);
     var configs = try loader.loadAll();
-    defer configs.deinit(); // All memory is owned by test allocator, will be freed automatically
+    defer configs.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), configs.count());
     const config = configs.get("test-net").?;
@@ -177,11 +187,16 @@ test "CniLoader loads single-plugin config" {
 
 test "CniLoader loads multi-plugin conflist" {
     const allocator = std.testing.allocator;
-    var temp_dir = try std.testing.tmpDir(.{});
-    defer temp_dir.cleanup();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
 
-    const cni_dir = try temp_dir.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(cni_dir);
+    // Create temp directories under /tmp with absolute paths
+    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_conflist_test_{d}", .{std.os.linux.getpid()});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
+    const cni_dir = try std.Io.Dir.cwd().openDir(std.testing.io, cni_dir_path, .{});
+    defer cni_dir.close(std.testing.io);
 
     // Create test conflist
     const test_config =
@@ -194,22 +209,28 @@ test "CniLoader loads multi-plugin conflist" {
         \\    ]
         \\}
     ;
-    try temp_dir.dir.writeFile("test.conflist", test_config);
+    try cni_dir.writeFile(std.testing.io, .{ .sub_path = "test.conflist", .data = test_config });
 
     // Mock plugin directory
-    var plugin_dir = try std.testing.tmpDir(.{});
-    defer plugin_dir.cleanup();
-    try plugin_dir.dir.writeFile("macvlan", "#!/bin/sh\nexit 0");
-    try plugin_dir.dir.writeFile("firewall", "#!/bin/sh\nexit 0");
-    try plugin_dir.dir.chmod("macvlan", 0o755);
-    try plugin_dir.dir.chmod("firewall", 0o755);
-    const plugin_dir_path = try plugin_dir.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(plugin_dir_path);
+    const plugin_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_conflist_plugin_test_{d}", .{std.os.linux.getpid()});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, plugin_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, plugin_dir_path) catch {};
+    const plugin_dir = try std.Io.Dir.cwd().openDir(std.testing.io, plugin_dir_path, .{});
+    defer plugin_dir.close(std.testing.io);
+    try plugin_dir.writeFile(std.testing.io, .{ .sub_path = "macvlan", .data = "#!/bin/sh\nexit 0" });
+    try plugin_dir.writeFile(std.testing.io, .{ .sub_path = "firewall", .data = "#!/bin/sh\nexit 0" });
+    // Make plugins executable (chmod 0755)
+    const macvlan_path = try std.fmt.allocPrint(arena_alloc, "{s}/macvlan\x00", .{plugin_dir_path});
+    const macvlan_z: [:0]const u8 = macvlan_path[0 .. macvlan_path.len - 1 :0];
+    _ = std.os.linux.fchmodat(std.posix.AT.FDCWD, macvlan_z, 0o755);
+    const firewall_path = try std.fmt.allocPrint(arena_alloc, "{s}/firewall\x00", .{plugin_dir_path});
+    const firewall_z: [:0]const u8 = firewall_path[0 .. firewall_path.len - 1 :0];
+    _ = std.os.linux.fchmodat(std.posix.AT.FDCWD, firewall_z, 0o755);
 
-    // Load config
-    var loader = CniLoader.init(std.testing.io, allocator, cni_dir, plugin_dir_path);
+    // Load config using arena allocator (all memory freed when arena deinit)
+    var loader = CniLoader.init(std.testing.io, arena_alloc, cni_dir_path, plugin_dir_path);
     var configs = try loader.loadAll();
-    defer configs.deinit(); // All memory is owned by test allocator, will be freed automatically
+    defer configs.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), configs.count());
     const config = configs.get("test-net").?;

@@ -57,17 +57,9 @@ pub fn deinit(self: *CniManager) void {
         plugin.*.deinit();
     }
     self.cni_plugins.deinit();
-
-    // Release CNI configs
-    const allocator = self.arena.allocator();
-    var config_it = self.cni_configs.valueIterator();
-    while (config_it.next()) |cfg| {
-        var mut_cfg = cfg.*;
-        mut_cfg.deinit(allocator); // Explicitly free config memory
-    }
+    // Release CNI configs map (all value memory is owned by arena, will be freed automatically)
     self.cni_configs.deinit();
-
-    // Release arena (frees any remaining allocated memory)
+    // Release arena (frees all allocated memory including configs and parsed JSON)
     self.arena.deinit();
 }
 
@@ -109,13 +101,15 @@ pub fn listNetworks(self: *CniManager) ![]const []const u8 {
 
 test "CniManager: loadCni returns NetworkNotFound for unknown network" {
     const allocator = std.testing.allocator;
-    var temp_dir = try std.testing.tmpDir(.{});
-    defer temp_dir.cleanup();
-    const cni_dir = try temp_dir.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(cni_dir);
+
+    // Create temp directory under /tmp with absolute path
+    const cni_dir_path = try std.fmt.allocPrint(allocator, "/tmp/cni_mgr_test_{d}", .{std.os.linux.getpid()});
+    defer allocator.free(cni_dir_path);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
 
     const config = Config{
-        .cni_dir = cni_dir,
+        .cni_dir = cni_dir_path,
         .cni_plugin_dir = "/usr/lib/cni",
     };
 

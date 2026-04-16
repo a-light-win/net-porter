@@ -9,6 +9,10 @@ const Responser = plugin.Responser;
 const managed_type = @import("managed_type.zig");
 const StateFile = @import("StateFile.zig");
 
+// Forward declarations for types defined later in the file
+const UserSession = struct {}; // Dummy definition for type checking, actual definition follows
+const UserAttachmentMap = std.AutoHashMap(u32, *UserSession);
+
 const Cni = @This();
 
 arena: ArenaAllocator,
@@ -16,7 +20,7 @@ io: std.Io,
 cni_plugin_dir: []const u8,
 config: CniConfig,
 ipam_config: config_mod.IpamConfig,
-user_sessions: UserAttachmentMap,
+user_sessions: std.AutoHashMap(u32, *UserSession),
 
 mutex: std.Io.Mutex = .init,
 
@@ -67,11 +71,12 @@ pub fn initFromConfig(io: std.Io, root_allocator: Allocator, config: CniConfig, 
         };
 
     const cni = try allocator.create(Cni);
+    // All config memory is owned by CniManager's arena, which will outlive Cni
     cni.* = Cni{
         .io = io,
         .arena = arena,
         .cni_plugin_dir = cni_plugin_dir,
-        .config = try config.dupe(allocator), // Cni owns a deep copy of the config
+        .config = config,
         .ipam_config = ipam_config,
         .user_sessions = std.AutoHashMap(u32, *UserSession).init(allocator),
     };
@@ -336,23 +341,6 @@ pub const CniConfig = struct {
         InvalidIpamType,
         UnsupportedIpamType,
     } || PluginConf.ValidateError;
-
-    /// Deep copy CniConfig to the given allocator
-    pub fn dupe(self: CniConfig, allocator: Allocator) !CniConfig {
-        return CniConfig{
-            .cniVersion = try allocator.dupe(u8, self.cniVersion),
-            .name = try allocator.dupe(u8, self.name),
-            .disableCheck = self.disableCheck,
-            .plugins = try self.plugins.dupe(allocator),
-        };
-    }
-
-    /// Free all allocated memory for this CniConfig
-    pub fn deinit(self: *CniConfig, allocator: Allocator) void {
-        allocator.free(self.cniVersion);
-        allocator.free(self.name);
-        self.plugins.deinit(allocator);
-    }
 
     pub fn validate(self: CniConfig) ValidateError!void {
         return switch (self.plugins) {
