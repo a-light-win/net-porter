@@ -49,13 +49,13 @@ pub const CniLoader = struct {
 
             log.debug("Loading CNI config: {s}", .{path});
             const config = self.loadConfig(path) catch |err| {
-                log.err("Failed to load CNI config {s}: {}", .{ path, err });
+                log.warn("Failed to load CNI config {s}: {}", .{ path, err });
                 continue;
             };
 
             // Check for duplicate network names
             if (configs.contains(config.name)) {
-                log.err("Duplicate network name '{s}' in config {s}, skipping", .{ config.name, path });
+                log.warn("Duplicate network name '{s}' in config {s}, skipping", .{ config.name, path });
                 // All memory is owned by arena, will be freed automatically
                 continue;
             }
@@ -237,4 +237,140 @@ test "CniLoader loads multi-plugin conflist" {
     try std.testing.expectEqual(@as(usize, 1), configs.count());
     const config = configs.get("test-net").?;
     try std.testing.expectEqual(@as(usize, 2), config.plugins.array.items.len);
+}
+
+test "CniLoader returns empty map for non-existent directory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var loader = CniLoader.init(std.testing.io, arena_alloc, "/tmp/nonexistent_cni_dir_xyz", "/usr/lib/cni");
+    var configs = try loader.loadAll();
+    defer configs.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), configs.count());
+}
+
+test "CniLoader returns empty map for directory with no config files" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_empty_test_{d}", .{std.os.linux.getpid()});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
+
+    // Write a non-config file that should be skipped
+    const cni_dir = try std.Io.Dir.cwd().openDir(std.testing.io, cni_dir_path, .{});
+    defer cni_dir.close(std.testing.io);
+    try cni_dir.writeFile(std.testing.io, .{ .sub_path = "readme.txt", .data = "not a config" });
+
+    var loader = CniLoader.init(std.testing.io, arena_alloc, cni_dir_path, "/usr/lib/cni");
+    var configs = try loader.loadAll();
+    defer configs.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), configs.count());
+}
+
+test "CniLoader skips invalid config and loads valid one" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_mixed_test_{d}", .{std.os.linux.getpid()});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
+    const cni_dir = try std.Io.Dir.cwd().openDir(std.testing.io, cni_dir_path, .{});
+    defer cni_dir.close(std.testing.io);
+
+    // Invalid config: missing required fields
+    try cni_dir.writeFile(std.testing.io, .{ .sub_path = "invalid.conf", .data = "{}" });
+
+    // Valid config
+    const valid_config =
+        \\{
+        \\    "cniVersion": "1.0.0",
+        \\    "name": "valid-net",
+        \\    "type": "macvlan",
+        \\    "master": "eth0",
+        \\    "ipam": {"type": "dhcp"}
+        \\}
+    ;
+    try cni_dir.writeFile(std.testing.io, .{ .sub_path = "valid.conf", .data = valid_config });
+
+    // Mock plugin directory
+    const plugin_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_mixed_plugin_test_{d}", .{std.os.linux.getpid()});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, plugin_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, plugin_dir_path) catch {};
+    const plugin_dir = try std.Io.Dir.cwd().openDir(std.testing.io, plugin_dir_path, .{});
+    defer plugin_dir.close(std.testing.io);
+    try plugin_dir.writeFile(std.testing.io, .{ .sub_path = "macvlan", .data = "#!/bin/sh\nexit 0" });
+    const macvlan_path = try std.fmt.allocPrint(arena_alloc, "{s}/macvlan\x00", .{plugin_dir_path});
+    const macvlan_z: [:0]const u8 = macvlan_path[0 .. macvlan_path.len - 1 :0];
+    _ = std.os.linux.fchmodat(std.posix.AT.FDCWD, macvlan_z, 0o755);
+
+    var loader = CniLoader.init(std.testing.io, arena_alloc, cni_dir_path, plugin_dir_path);
+    var configs = try loader.loadAll();
+    defer configs.deinit();
+
+    // Only the valid config should be loaded
+    try std.testing.expectEqual(@as(usize, 1), configs.count());
+    try std.testing.expect(configs.contains("valid-net"));
+}
+
+test "CniLoader skips duplicate network name and keeps first" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_dup_test_{d}", .{std.os.linux.getpid()});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
+    const cni_dir = try std.Io.Dir.cwd().openDir(std.testing.io, cni_dir_path, .{});
+    defer cni_dir.close(std.testing.io);
+
+    // Two configs with the same network name
+    const config_a =
+        \\{
+        \\    "cniVersion": "1.0.0",
+        \\    "name": "dup-net",
+        \\    "type": "macvlan",
+        \\    "master": "eth0",
+        \\    "ipam": {"type": "dhcp"}
+        \\}
+    ;
+    const config_b =
+        \\{
+        \\    "cniVersion": "1.0.0",
+        \\    "name": "dup-net",
+        \\    "type": "ipvlan",
+        \\    "master": "eth1",
+        \\    "ipam": {"type": "dhcp"}
+        \\}
+    ;
+    try cni_dir.writeFile(std.testing.io, .{ .sub_path = "a.conf", .data = config_a });
+    try cni_dir.writeFile(std.testing.io, .{ .sub_path = "b.conf", .data = config_b });
+
+    // Mock plugin directory
+    const plugin_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_dup_plugin_test_{d}", .{std.os.linux.getpid()});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, plugin_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, plugin_dir_path) catch {};
+    const plugin_dir = try std.Io.Dir.cwd().openDir(std.testing.io, plugin_dir_path, .{});
+    defer plugin_dir.close(std.testing.io);
+    try plugin_dir.writeFile(std.testing.io, .{ .sub_path = "macvlan", .data = "#!/bin/sh\nexit 0" });
+    try plugin_dir.writeFile(std.testing.io, .{ .sub_path = "ipvlan", .data = "#!/bin/sh\nexit 0" });
+    const macvlan_path = try std.fmt.allocPrint(arena_alloc, "{s}/macvlan\x00", .{plugin_dir_path});
+    const macvlan_z: [:0]const u8 = macvlan_path[0 .. macvlan_path.len - 1 :0];
+    _ = std.os.linux.fchmodat(std.posix.AT.FDCWD, macvlan_z, 0o755);
+    const ipvlan_path = try std.fmt.allocPrint(arena_alloc, "{s}/ipvlan\x00", .{plugin_dir_path});
+    const ipvlan_z: [:0]const u8 = ipvlan_path[0 .. ipvlan_path.len - 1 :0];
+    _ = std.os.linux.fchmodat(std.posix.AT.FDCWD, ipvlan_z, 0o755);
+
+    var loader = CniLoader.init(std.testing.io, arena_alloc, cni_dir_path, plugin_dir_path);
+    var configs = try loader.loadAll();
+    defer configs.deinit();
+
+    // Only one config should be loaded (first wins)
+    try std.testing.expectEqual(@as(usize, 1), configs.count());
+    try std.testing.expect(configs.contains("dup-net"));
 }

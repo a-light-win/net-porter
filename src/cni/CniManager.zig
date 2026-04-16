@@ -90,13 +90,13 @@ pub fn loadCni(self: *CniManager, name: []const u8) !*Cni {
 /// Returned slice is owned by CniManager arena, valid until CniManager.deinit()
 pub fn listNetworks(self: *CniManager) ![]const []const u8 {
     const allocator = self.arena.allocator();
-    var names = std.ArrayList([]const u8).init(allocator);
-    errdefer names.deinit();
+    var names = std.ArrayList([]const u8).empty;
+    errdefer names.deinit(allocator);
     var it = self.cni_configs.keyIterator();
     while (it.next()) |name| {
-        try names.append(name.*);
+        try names.append(allocator, name.*);
     }
-    return try names.toOwnedSlice();
+    return try names.toOwnedSlice(allocator);
 }
 
 test "CniManager: loadCni returns NetworkNotFound for unknown network" {
@@ -118,4 +118,79 @@ test "CniManager: loadCni returns NetworkNotFound for unknown network" {
 
     const result = manager.loadCni("not-exists");
     try std.testing.expectError(error.NetworkNotFound, result);
+}
+
+test "CniManager: loadCni loads from cni.d and caches instance" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    // Create cni.d with a test config
+    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_mgr_load_test_{d}", .{std.os.linux.getpid()});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
+    const cni_dir = try std.Io.Dir.cwd().openDir(std.testing.io, cni_dir_path, .{});
+    defer cni_dir.close(std.testing.io);
+
+    const test_config =
+        \\{
+        \\    "cniVersion": "1.0.0",
+        \\    "name": "test-load",
+        \\    "type": "macvlan",
+        \\    "master": "eth0",
+        \\    "ipam": {"type": "dhcp"}
+        \\}
+    ;
+    try cni_dir.writeFile(std.testing.io, .{ .sub_path = "test.conf", .data = test_config });
+
+    // Mock plugin directory
+    const plugin_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_mgr_load_plugin_test_{d}", .{std.os.linux.getpid()});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, plugin_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, plugin_dir_path) catch {};
+    const plugin_dir = try std.Io.Dir.cwd().openDir(std.testing.io, plugin_dir_path, .{});
+    defer plugin_dir.close(std.testing.io);
+    try plugin_dir.writeFile(std.testing.io, .{ .sub_path = "macvlan", .data = "#!/bin/sh\nexit 0" });
+    const macvlan_path = try std.fmt.allocPrint(arena_alloc, "{s}/macvlan\x00", .{plugin_dir_path});
+    const macvlan_z: [:0]const u8 = macvlan_path[0 .. macvlan_path.len - 1 :0];
+    _ = std.os.linux.fchmodat(std.posix.AT.FDCWD, macvlan_z, 0o755);
+
+    const config = Config{
+        .cni_dir = cni_dir_path,
+        .cni_plugin_dir = plugin_dir_path,
+    };
+
+    var manager = try init(std.testing.io, arena_alloc, config);
+    defer manager.deinit();
+
+    // First load creates a new instance
+    const cni1 = try manager.loadCni("test-load");
+    try std.testing.expectEqualStrings("test-load", cni1.config.name);
+
+    // Second load returns the cached instance
+    const cni2 = try manager.loadCni("test-load");
+    try std.testing.expect(cni1 == cni2);
+}
+
+test "CniManager: listNetworks returns all loaded network names" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_mgr_list_test_{d}", .{std.os.linux.getpid()});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
+
+    const config = Config{
+        .cni_dir = cni_dir_path,
+        .cni_plugin_dir = "/usr/lib/cni",
+    };
+
+    var manager = try init(std.testing.io, arena_alloc, config);
+    defer manager.deinit();
+
+    // Empty directory → no networks
+    const names = try manager.listNetworks();
+    try std.testing.expectEqual(@as(usize, 0), names.len);
 }
