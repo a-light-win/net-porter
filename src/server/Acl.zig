@@ -14,8 +14,8 @@ ip_ranges: IpRangeMap,
 const IpRangeMap = std.AutoHashMap(u32, std.ArrayList(IpRange));
 
 pub const IpRange = struct {
-    start: u32,
-    end: u32,
+    start: u128,
+    end: u128,
 };
 
 /// Data for a single grant to be added to an Acl.
@@ -311,7 +311,15 @@ fn parseIpRange(ip_spec: []const u8) !IpRange {
     }
 }
 
-fn parseIpToInt(ip: []const u8) !u32 {
+fn parseIpToInt(ip: []const u8) !u128 {
+    // Detect IPv6 by presence of ':'
+    if (std.mem.indexOf(u8, ip, ":") != null) {
+        return parseIpv6ToInt(ip);
+    }
+    return parseIpv4ToInt(ip);
+}
+
+fn parseIpv4ToInt(ip: []const u8) !u128 {
     var parts = std.mem.splitScalar(u8, ip, '.');
     var result: u32 = 0;
     var count: u32 = 0;
@@ -321,42 +329,133 @@ fn parseIpToInt(ip: []const u8) !u32 {
         result = (result << 8) | @as(u32, byte);
     }
     if (count != 4) return error.InvalidIp;
+    return @as(u128, result);
+}
+
+fn parseIpv6ToInt(ip: []const u8) !u128 {
+    // Handle :: expansion
+    // Strategy: split on '::', parse left and right halves, fill zeros in between
+    const double_colon = std.mem.indexOf(u8, ip, "::");
+
+    var left_str: []const u8 = "";
+    var right_str: []const u8 = "";
+
+    if (double_colon) |pos| {
+        if (pos > 0) left_str = ip[0..pos];
+        if (pos + 2 < ip.len) right_str = ip[pos + 2 ..];
+    } else {
+        left_str = ip;
+    }
+
+    var result: u128 = 0;
+    var groups: u32 = 0;
+
+    // Parse left part (before ::)
+    if (left_str.len > 0) {
+        var left_parts = std.mem.splitScalar(u8, left_str, ':');
+        while (left_parts.next()) |part| {
+            if (part.len == 0) return error.InvalidIp;
+            const val = std.fmt.parseUnsigned(u16, part, 16) catch return error.InvalidIp;
+            result = (result << 16) | @as(u128, val);
+            groups += 1;
+        }
+    }
+
+    // If no ::, right_str is empty; otherwise, insert zeros
+    if (double_colon != null) {
+        // Expand :: to fill remaining groups (total 8 groups for full IPv6)
+        var right_groups: u32 = 0;
+        // Count right groups first
+        if (right_str.len > 0) {
+            var right_parts = std.mem.splitScalar(u8, right_str, ':');
+            while (right_parts.next()) |_| {
+                right_groups += 1;
+            }
+        }
+        const zeros_needed = 8 - groups - right_groups;
+        if (zeros_needed > 8) return error.InvalidIp;
+        const shift_bits = zeros_needed * 16;
+        if (shift_bits > 0 and shift_bits < 128) {
+            result = result << @intCast(shift_bits);
+        }
+        groups += zeros_needed;
+    }
+
+    // Parse right part (after ::)
+    if (right_str.len > 0) {
+        var right_parts = std.mem.splitScalar(u8, right_str, ':');
+        while (right_parts.next()) |part| {
+            if (part.len == 0) return error.InvalidIp;
+            const val = std.fmt.parseUnsigned(u16, part, 16) catch return error.InvalidIp;
+            result = (result << 16) | @as(u128, val);
+            groups += 1;
+        }
+    }
+
+    if (groups != 8) return error.InvalidIp;
     return result;
 }
 
 test "parseIpToInt" {
     const ip = try parseIpToInt("192.168.1.15");
-    try std.testing.expectEqual(@as(u32, 0xC0A8010F), ip);
+    try std.testing.expectEqual(@as(u128, 0xC0A8010F), ip);
 
     const ip2 = try parseIpToInt("10.0.0.1");
-    try std.testing.expectEqual(@as(u32, 0x0A000001), ip2);
+    try std.testing.expectEqual(@as(u128, 0x0A000001), ip2);
 
     const ip3 = try parseIpToInt("0.0.0.0");
-    try std.testing.expectEqual(@as(u32, 0), ip3);
+    try std.testing.expectEqual(@as(u128, 0), ip3);
 
     try std.testing.expectError(error.InvalidIp, parseIpToInt("invalid"));
     try std.testing.expectError(error.InvalidIp, parseIpToInt("192.168.1"));
     try std.testing.expectError(error.InvalidIp, parseIpToInt("192.168.1.1.1"));
 }
 
+test "parseIpToInt IPv6" {
+    // Full form
+    const ip_full = try parseIpToInt("2001:0db8:0000:0000:0000:0000:0000:0001");
+    try std.testing.expectEqual(@as(u128, 0x20010DB8000000000000000000000001), ip_full);
+
+    // Compressed form ::1
+    const ip_loopback = try parseIpToInt("::1");
+    try std.testing.expectEqual(@as(u128, 0x00000000000000000000000000000001), ip_loopback);
+
+    // Compressed form with prefix 2001:db8::1
+    const ip_compressed = try parseIpToInt("2001:db8::1");
+    try std.testing.expectEqual(@as(u128, 0x20010DB8000000000000000000000001), ip_compressed);
+
+    // All zeros ::
+    const ip_all_zeros = try parseIpToInt("::");
+    try std.testing.expectEqual(@as(u128, 0), ip_all_zeros);
+
+    // Link-local fe80::1
+    const ip_link_local = try parseIpToInt("fe80::1");
+    try std.testing.expectEqual(@as(u128, 0xFE800000000000000000000000000001), ip_link_local);
+
+    // Reject invalid IPv6
+    try std.testing.expectError(error.InvalidIp, parseIpToInt(":::1"));
+    try std.testing.expectError(error.InvalidIp, parseIpToInt("2001:db8:::1"));
+    try std.testing.expectError(error.InvalidIp, parseIpToInt("2001:db8::1::2"));
+}
+
 test "parseIpRange with range" {
     const range = try parseIpRange("192.168.1.10-192.168.1.20");
-    try std.testing.expectEqual(@as(u32, 0xC0A8010A), range.start);
-    try std.testing.expectEqual(@as(u32, 0xC0A80114), range.end);
+    try std.testing.expectEqual(@as(u128, 0xC0A8010A), range.start);
+    try std.testing.expectEqual(@as(u128, 0xC0A80114), range.end);
 }
 
 test "parseIpRange with single IP" {
     const range = try parseIpRange("192.168.1.50");
-    try std.testing.expectEqual(@as(u32, 0xC0A80132), range.start);
-    try std.testing.expectEqual(@as(u32, 0xC0A80132), range.end);
+    try std.testing.expectEqual(@as(u128, 0xC0A80132), range.start);
+    try std.testing.expectEqual(@as(u128, 0xC0A80132), range.end);
 }
 
 test "parseIpToInt with boundary values" {
     const max_ip = try parseIpToInt("255.255.255.255");
-    try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), max_ip);
+    try std.testing.expectEqual(@as(u128, 0xFFFFFFFF), max_ip);
 
     const small_ip = try parseIpToInt("1.2.3.4");
-    try std.testing.expectEqual(@as(u32, 0x01020304), small_ip);
+    try std.testing.expectEqual(@as(u128, 0x01020304), small_ip);
 }
 
 test "parseIpToInt rejects invalid inputs" {
@@ -370,8 +469,8 @@ test "parseIpToInt rejects invalid inputs" {
 
 test "parseIpRange with whitespace around dash" {
     const range = try parseIpRange("192.168.1.10 - 192.168.1.20");
-    try std.testing.expectEqual(@as(u32, 0xC0A8010A), range.start);
-    try std.testing.expectEqual(@as(u32, 0xC0A80114), range.end);
+    try std.testing.expectEqual(@as(u128, 0xC0A8010A), range.start);
+    try std.testing.expectEqual(@as(u128, 0xC0A80114), range.end);
 }
 
 test "parseIpRange rejects invalid IP in range" {
@@ -392,10 +491,54 @@ test "parseIpRanges with multiple entries" {
     defer ranges.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 3), ranges.items.len);
-    try std.testing.expectEqual(@as(u32, 0xC0A8010A), ranges.items[0].start);
-    try std.testing.expectEqual(@as(u32, 0xC0A80114), ranges.items[0].end);
-    try std.testing.expectEqual(@as(u32, 0x0A000005), ranges.items[1].start);
-    try std.testing.expectEqual(@as(u32, 0x0A00000A), ranges.items[1].end);
-    try std.testing.expectEqual(@as(u32, 0xAC100001), ranges.items[2].start);
-    try std.testing.expectEqual(@as(u32, 0xAC100001), ranges.items[2].end);
+    try std.testing.expectEqual(@as(u128, 0xC0A8010A), ranges.items[0].start);
+    try std.testing.expectEqual(@as(u128, 0xC0A80114), ranges.items[0].end);
+    try std.testing.expectEqual(@as(u128, 0x0A000005), ranges.items[1].start);
+    try std.testing.expectEqual(@as(u128, 0x0A00000A), ranges.items[1].end);
+    try std.testing.expectEqual(@as(u128, 0xAC100001), ranges.items[2].start);
+    try std.testing.expectEqual(@as(u128, 0xAC100001), ranges.items[2].end);
+}
+
+test "parseIpRange with IPv6 range" {
+    const range = try parseIpRange("2001:db8::1-2001:db8::ff");
+    try std.testing.expectEqual(@as(u128, 0x20010DB8000000000000000000000001), range.start);
+    try std.testing.expectEqual(@as(u128, 0x20010DB80000000000000000000000FF), range.end);
+}
+
+test "parseIpRange with single IPv6" {
+    const range = try parseIpRange("::1");
+    try std.testing.expectEqual(@as(u128, 0x00000000000000000000000000000001), range.start);
+    try std.testing.expectEqual(@as(u128, 0x00000000000000000000000000000001), range.end);
+}
+
+test "isIpAllowed with IPv6 range" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    try acl.addGrant(allocator, .{
+        .user = "1000",
+        .ips = &[_][:0]const u8{"2001:db8::1-2001:db8::ff"},
+    });
+
+    try std.testing.expect(acl.isIpAllowed(1000, "2001:db8::1"));
+    try std.testing.expect(acl.isIpAllowed(1000, "2001:db8::80"));
+    try std.testing.expect(acl.isIpAllowed(1000, "2001:db8::ff"));
+    try std.testing.expect(!acl.isIpAllowed(1000, "2001:db8::100"));
+    try std.testing.expect(!acl.isIpAllowed(1000, "2001:db8::0"));
+    try std.testing.expect(!acl.isIpAllowed(1001, "2001:db8::1"));
+}
+
+test "isIpAllowed with single IPv6" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    try acl.addGrant(allocator, .{
+        .user = "1000",
+        .ips = &[_][:0]const u8{"::1"},
+    });
+
+    try std.testing.expect(acl.isIpAllowed(1000, "::1"));
+    try std.testing.expect(!acl.isIpAllowed(1000, "::2"));
 }
