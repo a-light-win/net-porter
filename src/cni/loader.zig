@@ -70,13 +70,15 @@ pub const CniLoader = struct {
 
     /// Load and parse a single CNI configuration file
     fn loadConfig(self: CniLoader, path: []const u8) !CniConfig {
-        const content = try std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .unlimited); // Max 1MB per config
+        // Limit config file size to 1 MB — CNI configs are typically small (<10 KB)
+        const content = try std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(1024 * 1024));
         defer self.allocator.free(content);
 
         const parsed = try json.parseFromSlice(json.Value, self.allocator, content, .{ .ignore_unknown_fields = true });
-        // All JSON memory is allocated on self.allocator (which is an arena owned by CniManager)
-        // The arena will free all memory when CniManager.deinit() is called, so no need to deinit parsed here
-        // The CniConfig returned will reference memory owned by this arena
+        // NOTE: parsed is intentionally not deinited here.
+        // All JSON memory (including parsed metadata) is allocated on self.allocator,
+        // which is an arena owned by CniManager. The arena frees everything on deinit().
+        // The returned CniConfig references memory owned by this arena.
 
         if (parsed.value != .object) return error.InvalidConfig;
         const obj = parsed.value.object;

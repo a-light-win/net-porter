@@ -9,10 +9,6 @@ const Responser = plugin.Responser;
 const managed_type = @import("managed_type.zig");
 const StateFile = @import("StateFile.zig");
 
-// Forward declarations for types defined later in the file
-const UserSession = struct {}; // Dummy definition for type checking, actual definition follows
-const UserAttachmentMap = std.AutoHashMap(u32, *UserSession);
-
 const Cni = @This();
 
 arena: ArenaAllocator,
@@ -20,7 +16,6 @@ io: std.Io,
 cni_plugin_dir: []const u8,
 config: CniConfig,
 ipam_config: config_mod.IpamConfig,
-user_sessions: std.AutoHashMap(u32, *UserSession),
 
 mutex: std.Io.Mutex = .init,
 
@@ -37,7 +32,6 @@ pub fn init(io: std.Io, root_allocator: Allocator, resource: config_mod.Resource
         .cni_plugin_dir = cni_plugin_dir,
         .config = cni_config,
         .ipam_config = resource.ipam,
-        .user_sessions = UserAttachmentMap.init(allocator),
     };
     return cni;
 }
@@ -78,7 +72,6 @@ pub fn initFromConfig(io: std.Io, root_allocator: Allocator, config: CniConfig, 
         .cni_plugin_dir = cni_plugin_dir,
         .config = config,
         .ipam_config = ipam_config,
-        .user_sessions = std.AutoHashMap(u32, *UserSession).init(allocator),
     };
     return cni;
 }
