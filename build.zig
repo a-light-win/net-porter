@@ -1,9 +1,24 @@
 const std = @import("std");
 
+/// Extract version string from build.zig.zon content at comptime.
+/// Looks for the pattern `.version = "..."` and returns the quoted string.
+fn extractVersion(zon: []const u8) []const u8 {
+    const marker = ".version = \"";
+    const start = std.mem.indexOf(u8, zon, marker) orelse
+        @panic("version not found in build.zig.zon");
+    const version_start = start + marker.len;
+    const end = std.mem.indexOfScalar(u8, zon[version_start..], '"') orelse
+        @panic("version end not found in build.zig.zon");
+    return zon[version_start .. version_start + end];
+}
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
 pub fn build(b: *std.Build) void {
+    // Extract version from build.zig.zon at comptime — single source of truth
+    const version = comptime extractVersion(@embedFile("build.zig.zon"));
+
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -20,6 +35,12 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    // Create build_options module so source code can access version via
+    // @import("build_options").version
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", version);
+    const build_options_mod = build_options.createModule();
+
     const zigcli_pkg = b.dependency("cli", .{ .target = target });
     const zigcli_mod = zigcli_pkg.module("cli");
 
@@ -30,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "zig-cli", .module = zigcli_mod },
+            .{ .name = "build_options", .module = build_options_mod },
         },
     });
 
@@ -73,6 +95,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "zig-cli", .module = zigcli_mod },
+            .{ .name = "build_options", .module = build_options_mod },
         },
     });
 

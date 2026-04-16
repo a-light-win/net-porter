@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 
+# Update version across the project.
+# Single source of truth: build.zig.zon
+# build.zig reads it via @embedFile at comptime, so no separate version file needed.
+
 update() {
   local version="$1"
-  local module="$2"
 
   sed -i 's/[.]version = "[^"]*"/.version = "'"$version"'"/g' build.zig.zon
-  sed -i 's/pub const version = "[^"]*"/pub const version = "'"$version"'"/g' src/plugin/NetavarkPlugin.zig
   sed -i 's/PKG_VERSION=.*/PKG_VERSION='"$version"'/g' builder-env
 }
 
