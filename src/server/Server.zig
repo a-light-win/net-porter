@@ -1,6 +1,7 @@
 const std = @import("std");
 const log = std.log.scoped(.server);
 const config_mod = @import("../config.zig");
+const version = @import("../version.zig").version;
 const AclManager = @import("AclManager.zig");
 const CniManager = @import("../cni/CniManager.zig");
 const DhcpManager = @import("../cni/DhcpManager.zig");
@@ -89,7 +90,7 @@ pub fn deinit(self: *Server) void {
 
 pub fn run(self: *Server) !void {
     const io = self.io;
-    log.info("Server started, monitoring /run/user/ and ACL directory", .{});
+    log.info("net-porter {s} started, monitoring /run/user/ and ACL directory", .{version});
     const log_response = self.config.log.logEnabled(.debug, .traffic);
 
     var event_buf: [4096]u8 = undefined;
