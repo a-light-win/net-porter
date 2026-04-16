@@ -4,7 +4,6 @@ pub const DomainSocket = @import("config/DomainSocket.zig");
 pub const Resource = @import("config/Resource.zig");
 pub const IpamConfig = Resource.IpamConfig;
 pub const InterfaceConfig = Resource.InterfaceConfig;
-
 test {
     _ = @import("config/Config.zig");
     _ = @import("config/ManagedConfig.zig");

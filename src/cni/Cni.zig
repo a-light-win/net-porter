@@ -8,6 +8,11 @@ const plugin = @import("../plugin.zig");
 const Responser = plugin.Responser;
 const managed_type = @import("managed_type.zig");
 const StateFile = @import("StateFile.zig");
+
+// Forward declarations
+const UserSession = opaque {};
+const UserAttachmentMap = std.AutoHashMap(u32, *UserSession);
+
 const Cni = @This();
 
 arena: ArenaAllocator,
@@ -15,18 +20,16 @@ io: std.Io,
 cni_plugin_dir: []const u8,
 config: CniConfig,
 ipam_config: config_mod.IpamConfig,
+user_sessions: UserAttachmentMap,
 
 mutex: std.Io.Mutex = .init,
 
 pub fn init(io: std.Io, root_allocator: Allocator, resource: config_mod.Resource, cni_plugin_dir: []const u8) !*Cni {
     var arena = try ArenaAllocator.init(root_allocator);
     errdefer arena.deinit();
-
     const allocator = arena.allocator();
-
     const cni_config = try buildCniConfigFromResource(allocator, resource);
     try cni_config.validate();
-
     const cni = try allocator.create(Cni);
     cni.* = Cni{
         .io = io,
@@ -34,6 +37,43 @@ pub fn init(io: std.Io, root_allocator: Allocator, resource: config_mod.Resource
         .cni_plugin_dir = cni_plugin_dir,
         .config = cni_config,
         .ipam_config = resource.ipam,
+        .user_sessions = UserAttachmentMap.init(allocator),
+    };
+    return cni;
+}
+/// Initialize from standard CNI config (new API)
+pub fn initFromConfig(io: std.Io, root_allocator: Allocator, config: CniConfig, cni_plugin_dir: []const u8) !*Cni {
+    var arena = try ArenaAllocator.init(root_allocator);
+    errdefer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Parse ipam config from first plugin
+    const first_plugin = config.plugins.array.items[0];
+    const ipam = first_plugin.object.get("ipam") orelse {
+        log.err("CNI config '{s}' missing ipam field in first plugin", .{config.name});
+        return error.MissingIpamConfig;
+    };
+    if (ipam != .object) return error.InvalidIpamConfig;
+    const ipam_type = ipam.object.get("type") orelse return error.MissingIpamType;
+    if (ipam_type != .string) return error.InvalidIpamType;
+
+    const ipam_config: config_mod.IpamConfig =
+        if (std.mem.eql(u8, ipam_type.string, "dhcp")) .{ .dhcp = .{} } else if (std.mem.eql(u8, ipam_type.string, "static")) blk: {
+            const parsed_static = try json.parseFromValue(config_mod.Resource.StaticConfig, allocator, ipam, .{});
+            break :blk .{ .static = parsed_static.value };
+        } else {
+            log.err("Unsupported ipam type '{s}' in config '{s}'", .{ ipam_type.string, config.name });
+            return error.UnsupportedIpamType;
+        };
+
+    const cni = try allocator.create(Cni);
+    cni.* = Cni{
+        .io = io,
+        .arena = arena,
+        .cni_plugin_dir = cni_plugin_dir,
+        .config = config,
+        .ipam_config = ipam_config,
+        .user_sessions = UserAttachmentMap.init(allocator),
     };
     return cni;
 }
@@ -280,7 +320,7 @@ fn responseResult(allocator: Allocator, responser: *Responser, stdout: std.Array
     responser.write(managed_response.v);
 }
 
-const CniConfig = struct {
+pub const CniConfig = struct {
     cniVersion: []const u8,
     name: []const u8,
     disableCheck: bool = false,
