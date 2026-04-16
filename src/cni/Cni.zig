@@ -47,16 +47,27 @@ fn buildCniConfigFromResource(allocator: Allocator, resource: config_mod.Resourc
         .dhcp => try ipam_obj.put(allocator, "type", .{ .string = "dhcp" }),
     }
 
-    // Build plugin object
+    // Build plugin object — interface type from union tag, common fields via inline else
     var plugin_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
-    try plugin_obj.put(allocator, "type", .{ .string = resource.interface.type });
-    try plugin_obj.put(allocator, "master", .{ .string = resource.interface.master });
+    try plugin_obj.put(allocator, "type", .{ .string = @tagName(resource.interface) });
 
-    if (resource.interface.mode) |mode| {
+    const master: []const u8 = switch (resource.interface) {
+        inline else => |c| c.master,
+    };
+    try plugin_obj.put(allocator, "master", .{ .string = master });
+
+    const mode_str: ?[]const u8 = switch (resource.interface) {
+        inline else => |c| if (c.mode) |m| @tagName(m) else null,
+    };
+    if (mode_str) |mode| {
         try plugin_obj.put(allocator, "mode", .{ .string = mode });
     }
-    if (resource.interface.mtu) |mtu| {
-        try plugin_obj.put(allocator, "mtu", .{ .integer = @intCast(mtu) });
+
+    const mtu: ?u32 = switch (resource.interface) {
+        inline else => |c| c.mtu,
+    };
+    if (mtu) |m| {
+        try plugin_obj.put(allocator, "mtu", .{ .integer = @intCast(m) });
     }
 
     try plugin_obj.put(allocator, "ipam", .{ .object = ipam_obj });
@@ -459,33 +470,7 @@ const CniConfig = struct {
         };
     }
 
-    test "validate() will fail if the plugin type is not supported" {
-        const allocator = std.testing.allocator;
-        const data =
-            \\{
-            \\    "cniVersion": "0.3.1",
-            \\    "name": "test",
-            \\    "plugins": [
-            \\        {
-            \\            "type": "unsupported"
-            \\        }
-            \\    ]
-            \\}
-        ;
-        const parsed_config = try json.parseFromSlice(
-            CniConfig,
-            allocator,
-            data,
-            .{},
-        );
-        defer parsed_config.deinit();
-        const config = parsed_config.value;
-        config.validate() catch |err| {
-            try std.testing.expect(err == error.PluginTypeUnsupported);
-        };
-    }
-
-    test "validate() will success if the plugin type is supported" {
+    test "validate() will success if the plugin type is a string" {
         const allocator = std.testing.allocator;
         const data =
             \\{
@@ -518,7 +503,6 @@ const PluginConf = struct {
     const ValidateError = error{
         PluginTypeMissing,
         PluginTypeNotString,
-        PluginTypeUnsupported,
     };
 
     pub fn init(root_allocator: Allocator, cni_config: CniConfig, obj: json.ObjectMap) !PluginConf {
@@ -561,8 +545,8 @@ const PluginConf = struct {
             return error.PluginTypeMissing;
         };
 
-        const plugin_type = switch (type_value) {
-            .string => |s| s,
+        switch (type_value) {
+            .string => {},
             else => {
                 log.warn(
                     "The plugin type in cni config '{s}' is not string",
@@ -570,14 +554,6 @@ const PluginConf = struct {
                 );
                 return error.PluginTypeNotString;
             },
-        };
-
-        if (!isSupportedPlugin(plugin_type)) {
-            log.warn(
-                "The plugin type '{s}' in cni config '{s}' is unsupported",
-                .{ plugin_type, cni_name },
-            );
-            return error.PluginTypeUnsupported;
         }
     }
 
@@ -914,19 +890,6 @@ const PluginConf = struct {
 
     fn setCniVersion(self: *PluginConf, version: []const u8) !void {
         try self.conf.put(self.arena.?.allocator(), "cniVersion", json.Value{ .string = version });
-    }
-
-    const supported_plugins = .{
-        "macvlan",
-    };
-
-    fn isSupportedPlugin(name: []const u8) bool {
-        inline for (supported_plugins) |supported_plugin| {
-            if (std.mem.eql(u8, name, supported_plugin)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     fn shadowCopy(allocator: Allocator, src: json.ObjectMap) !json.ObjectMap {
@@ -1321,7 +1284,7 @@ test "buildCniConfigFromResource creates correct CNI config for DHCP resource" {
     const allocator = arena.allocator();
     const resource = config_mod.Resource{
         .name = "test-dhcp",
-        .interface = .{ .type = "macvlan", .master = "eth0" },
+        .interface = .{ .macvlan = .{ .master = "eth0" } },
         .ipam = .{ .dhcp = .{} },
     };
 
@@ -1356,7 +1319,7 @@ test "buildCniConfigFromResource creates correct CNI config with mode and mtu" {
     const allocator = arena.allocator();
     const resource = config_mod.Resource{
         .name = "test-mode",
-        .interface = .{ .type = "macvlan", .master = "bond0", .mode = "bridge", .mtu = 9000 },
+        .interface = .{ .macvlan = .{ .master = "bond0", .mode = .bridge, .mtu = 9000 } },
         .ipam = .{ .static = .{
             .addresses = &[_]config_mod.Resource.Address{
                 .{ .address = "10.0.0.0/16" },
@@ -1556,7 +1519,7 @@ test "Cni.init creates CNI from resource config" {
     const allocator = root_arena.allocator();
     const resource = config_mod.Resource{
         .name = "test-cni-init",
-        .interface = .{ .type = "macvlan", .master = "eth0", .mode = "bridge" },
+        .interface = .{ .macvlan = .{ .master = "eth0", .mode = .bridge } },
         .ipam = .{ .dhcp = .{} },
     };
 
@@ -1574,7 +1537,7 @@ test "Cni.init with static ipam stores ipam_config" {
     const allocator = root_arena.allocator();
     const resource = config_mod.Resource{
         .name = "test-static-cni",
-        .interface = .{ .type = "macvlan", .master = "eth0" },
+        .interface = .{ .macvlan = .{ .master = "eth0" } },
         .ipam = .{ .static = .{
             .addresses = &[_]config_mod.Resource.Address{
                 .{ .address = "192.168.1.0/24", .gateway = "192.168.1.1" },
@@ -1593,4 +1556,78 @@ test "Cni.init with static ipam stores ipam_config" {
     try std.testing.expectEqualSlices(u8, "192.168.1.1", s.addresses[0].gateway.?);
     try std.testing.expectEqualSlices(u8, "192.168.1.0/24", s.addresses[0].address);
     try std.testing.expectEqual(@as(usize, 1), s.routes.?.len);
+}
+
+test "buildCniConfigFromResource creates correct CNI config for ipvlan DHCP resource" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const resource = config_mod.Resource{
+        .name = "ipvlan-dhcp",
+        .interface = .{ .ipvlan = .{ .master = "eth0" } },
+        .ipam = .{ .dhcp = .{} },
+    };
+
+    const cni_config = try buildCniConfigFromResource(allocator, resource);
+
+    try std.testing.expectEqualSlices(u8, "1.0.0", cni_config.cniVersion);
+    try std.testing.expectEqualSlices(u8, "ipvlan-dhcp", cni_config.name);
+
+    const plugins = cni_config.plugins.array;
+    try std.testing.expectEqual(@as(usize, 1), plugins.items.len);
+
+    const plugin_obj = plugins.items[0].object;
+
+    try std.testing.expectEqualSlices(u8, "ipvlan", plugin_obj.get("type").?.string);
+    try std.testing.expectEqualSlices(u8, "eth0", plugin_obj.get("master").?.string);
+
+    const ipam = plugin_obj.get("ipam").?.object;
+    try std.testing.expectEqualSlices(u8, "dhcp", ipam.get("type").?.string);
+
+    try std.testing.expect(plugin_obj.get("mode") == null);
+    try std.testing.expect(plugin_obj.get("mtu") == null);
+}
+
+test "buildCniConfigFromResource creates correct CNI config for ipvlan with l3 mode and mtu" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const resource = config_mod.Resource{
+        .name = "ipvlan-l3",
+        .interface = .{ .ipvlan = .{ .master = "bond0", .mode = .l3, .mtu = 9000 } },
+        .ipam = .{ .static = .{
+            .addresses = &[_]config_mod.Resource.Address{
+                .{ .address = "10.0.0.0/16" },
+            },
+        } },
+    };
+
+    const cni_config = try buildCniConfigFromResource(allocator, resource);
+    const plugin_obj = cni_config.plugins.array.items[0].object;
+
+    try std.testing.expectEqualSlices(u8, "ipvlan", plugin_obj.get("type").?.string);
+    try std.testing.expectEqualSlices(u8, "bond0", plugin_obj.get("master").?.string);
+    try std.testing.expectEqualSlices(u8, "l3", plugin_obj.get("mode").?.string);
+    try std.testing.expectEqual(@as(i64, 9000), plugin_obj.get("mtu").?.integer);
+
+    const ipam = plugin_obj.get("ipam").?.object;
+    try std.testing.expectEqualSlices(u8, "static", ipam.get("type").?.string);
+}
+
+test "Cni.init creates CNI from ipvlan resource config" {
+    var root_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer root_arena.deinit();
+    const allocator = root_arena.allocator();
+    const resource = config_mod.Resource{
+        .name = "test-ipvlan-init",
+        .interface = .{ .ipvlan = .{ .master = "eth0", .mode = .l2 } },
+        .ipam = .{ .dhcp = .{} },
+    };
+
+    var cni = try Cni.init(std.testing.io, allocator, resource, "/usr/lib/cni");
+    defer cni.deinit();
+
+    try std.testing.expectEqualSlices(u8, "test-ipvlan-init", cni.config.name);
+    try std.testing.expect(cni.ipam_config == .dhcp);
+    try std.testing.expectEqualSlices(u8, "/usr/lib/cni", cni.cni_plugin_dir);
 }

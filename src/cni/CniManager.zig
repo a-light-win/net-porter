@@ -79,12 +79,12 @@ test "CniManager: findResource returns matching resource" {
         .resources = &[_]Resource{
             Resource{
                 .name = "net-a",
-                .interface = .{ .type = "macvlan", .master = "eth0" },
+                .interface = .{ .macvlan = .{ .master = "eth0" } },
                 .ipam = .{ .dhcp = .{} },
             },
             Resource{
                 .name = "net-b",
-                .interface = .{ .type = "macvlan", .master = "eth1" },
+                .interface = .{ .macvlan = .{ .master = "eth1" } },
                 .ipam = .{ .dhcp = .{} },
             },
         },
@@ -95,11 +95,12 @@ test "CniManager: findResource returns matching resource" {
 
     const found = manager.findResource("net-a");
     try std.testing.expect(found != null);
-    try std.testing.expectEqualSlices(u8, "eth0", found.?.interface.master);
+    try std.testing.expect(found.?.interface == .macvlan);
+    try std.testing.expectEqualSlices(u8, "eth0", found.?.interface.macvlan.master);
 
     const found_b = manager.findResource("net-b");
     try std.testing.expect(found_b != null);
-    try std.testing.expectEqualSlices(u8, "eth1", found_b.?.interface.master);
+    try std.testing.expectEqualSlices(u8, "eth1", found_b.?.interface.macvlan.master);
 
     const not_found = manager.findResource("not-exists");
     try std.testing.expect(not_found == null);
@@ -111,7 +112,7 @@ test "CniManager: loadCni returns ResourceNotFound for unknown resource" {
         .resources = &[_]Resource{
             Resource{
                 .name = "net-a",
-                .interface = .{ .type = "macvlan", .master = "eth0" },
+                .interface = .{ .macvlan = .{ .master = "eth0" } },
                 .ipam = .{ .dhcp = .{} },
             },
         },

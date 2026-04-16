@@ -1,14 +1,14 @@
 # net-porter
 
 `net-porter` is a [netavark](https://github.com/containers/netavark) plugin
-to provide macvlan network to rootless podman container.
+to provide macvlan/ipvlan network to rootless podman container.
 
 It consists with two major part:
 
 - `net-porter plugin`: the `netavark` plugin that called by `netavark`
   inside the rootless environment.
 - `net-porter server`: the rootful server that responsible for creating
-  the macvlan network via CNI plugins.
+  the macvlan/ipvlan network via CNI plugins.
 
 The `net-porter server` runs as a single global systemd service. It monitors `/run/user/` directories and automatically creates per-user unix sockets for each ACL-allowed user. When the container starts,
 netavark will call the `net-porter plugin`. The plugin then
@@ -16,7 +16,7 @@ will connect to the `net-porter server` via the per-user socket,
 and pass the required information to the `net-porter server`.
 
 The `net-porter server` will authenticate the request
-by the `uid/gid` of the caller (obtained via kernel `SO_PEERCRED`, cannot be forged). And then creates the macvlan network
+by the `uid/gid` of the caller (obtained via kernel `SO_PEERCRED`, cannot be forged). And then creates the macvlan/ipvlan network
 if the user has the permission.
 
 > **Why per-user sockets in `/run/user/<uid>/`?** Rootless podman runs in an isolated mount namespace and a separate network namespace (via pasta/slirp4netns). Neither filesystem sockets in `/run/` nor abstract sockets are visible across these boundaries. However, `/run/user/<uid>/` is a per-user tmpfs created by `systemd-logind` that is bind-mounted into the user namespace, making it accessible from both host and rootless podman.
@@ -291,9 +291,9 @@ You should see the macvlan interface with an IP address from your DHCP server.
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `type` | Interface type: `macvlan` | — |
+| `type` | Interface type: `macvlan` or `ipvlan` | — |
 | `master` | Host physical interface to attach to | — |
-| `mode` | Macvlan mode: `bridge`, `vepa`, `private`, `passthru` | `bridge` |
+| `mode` | macvlan mode: `bridge`, `vepa`, `private`, `passthru`; ipvlan mode: `l2`, `l3`, `l3s` | macvlan: `bridge`, ipvlan: `l2` |
 | `mtu` | MTU size for the interface | unset (use kernel default) |
 
 ### IPAM Configuration
@@ -402,7 +402,50 @@ Run a container with a specific static IP:
 podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 ```
 
-### Example 3: Mixed DHCP and static resources
+### Example 3: IPvLAN with L3 mode
+```json
+{
+  "users": ["alice"],
+  "resources": [
+    {
+      "name": "ipvlan-l3",
+      "interface": { "type": "ipvlan", "master": "eth0", "mode": "l3" },
+      "ipam": { "type": "dhcp" },
+      "acl": [
+        { "user": "alice" }
+      ]
+    }
+  ]
+}
+```
+- `alice` can use the `ipvlan-l3` network with ipvlan L3 mode
+- IPvLAN shares the parent interface's MAC address (no separate MAC per container)
+
+### Example 4: IPvLAN with static IP
+```json
+{
+  "users": ["alice", "bob"],
+  "resources": [
+    {
+      "name": "ipvlan-static",
+      "interface": { "type": "ipvlan", "master": "eth0", "mode": "l2", "mtu": 9000 },
+      "ipam": {
+        "type": "static",
+        "addresses": [
+          { "address": "10.0.0.0/24", "gateway": "10.0.0.1" }
+        ],
+        "routes": [{ "dst": "0.0.0.0/0" }]
+      },
+      "acl": [
+        { "user": "alice", "ips": ["10.0.0.10-10.0.0.20"] },
+        { "user": "bob",   "ips": ["10.0.0.30-10.0.0.40"] }
+      ]
+    }
+  ]
+}
+```
+
+### Example 5: Mixed macvlan and ipvlan resources
 ```json
 {
   "users": ["alice"],

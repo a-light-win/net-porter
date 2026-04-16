@@ -7,14 +7,101 @@ const Value = json.Value;
 const Resource = @This();
 
 name: []const u8,
-interface: Interface,
+interface: InterfaceConfig,
 ipam: IpamConfig,
 
-pub const Interface = struct {
-    type: []const u8,
+pub const ValidateError = error{
+    IpvlanL3DhcpUnsupported,
+    IpvlanL3sDhcpUnsupported,
+};
+
+/// Validate that the resource configuration is internally consistent.
+/// Called at config load time to catch incompatible combinations early.
+/// Caller is responsible for logging on error.
+pub fn validate(self: Resource) ValidateError!void {
+    switch (self.interface) {
+        .macvlan => {},
+        .ipvlan => |ipvlan_conf| {
+            if (self.ipam == .dhcp) {
+                if (ipvlan_conf.mode == .l3) {
+                    return error.IpvlanL3DhcpUnsupported;
+                }
+                if (ipvlan_conf.mode == .l3s) {
+                    return error.IpvlanL3sDhcpUnsupported;
+                }
+            }
+        },
+    }
+}
+
+// ============================================================
+// Interface types
+// ============================================================
+
+pub const MacvlanMode = enum {
+    bridge,
+    private,
+    vepa,
+    passthru,
+};
+
+pub const IpvlanMode = enum {
+    l2,
+    l3,
+    l3s,
+};
+
+pub const MacvlanConfig = struct {
     master: []const u8,
-    mode: ?[]const u8 = null,
+    mode: ?MacvlanMode = null,
     mtu: ?u32 = null,
+};
+
+pub const IpvlanConfig = struct {
+    master: []const u8,
+    mode: ?IpvlanMode = null,
+    mtu: ?u32 = null,
+};
+
+/// Tagged union for interface configuration.
+/// Uses "type" field as discriminator when parsing from JSON.
+pub const InterfaceConfig = union(enum) {
+    macvlan: MacvlanConfig,
+    ipvlan: IpvlanConfig,
+
+    pub fn jsonParse(
+        allocator: Allocator,
+        source: anytype,
+        options: ParseOptions,
+    ) !@This() {
+        const raw_value = try Value.jsonParse(allocator, source, options);
+        return jsonParseFromValue(allocator, raw_value, options);
+    }
+
+    pub fn jsonParseFromValue(
+        allocator: Allocator,
+        source: Value,
+        options: ParseOptions,
+    ) !@This() {
+        if (source != .object) return error.UnexpectedToken;
+        const obj = source.object;
+
+        // Read "type" discriminator
+        const type_val = obj.get("type") orelse return error.MissingField;
+        if (type_val != .string) return error.UnexpectedToken;
+
+        // Allow child structs to skip the "type" field (it belongs to the union, not them)
+        var relaxed = options;
+        relaxed.ignore_unknown_fields = true;
+
+        const InterfaceTag = enum { macvlan, ipvlan };
+        const tag = std.meta.stringToEnum(InterfaceTag, type_val.string) orelse return error.InvalidEnumTag;
+
+        switch (tag) {
+            .macvlan => return .{ .macvlan = try innerParseFromValue(MacvlanConfig, allocator, source, relaxed) },
+            .ipvlan => return .{ .ipvlan = try innerParseFromValue(IpvlanConfig, allocator, source, relaxed) },
+        }
+    }
 };
 
 // ============================================================
@@ -123,8 +210,8 @@ test "Resource can be loaded from json - dhcp" {
     const resource = parsed.value;
 
     try std.testing.expectEqualSlices(u8, "test", resource.name);
-    try std.testing.expectEqualSlices(u8, "macvlan", resource.interface.type);
-    try std.testing.expectEqualSlices(u8, "eth0", resource.interface.master);
+    try std.testing.expect(resource.interface == .macvlan);
+    try std.testing.expectEqualSlices(u8, "eth0", resource.interface.macvlan.master);
     try std.testing.expect(resource.ipam == .dhcp);
 }
 
@@ -201,9 +288,9 @@ test "Resource with all optional fields populated" {
     defer parsed.deinit();
 
     const r = parsed.value;
-    try std.testing.expectEqualSlices(u8, "bond0", r.interface.master);
-    try std.testing.expectEqualSlices(u8, "bridge", r.interface.mode.?);
-    try std.testing.expectEqual(@as(u32, 9000), r.interface.mtu.?);
+    try std.testing.expectEqualSlices(u8, "bond0", r.interface.macvlan.master);
+    try std.testing.expect(r.interface.macvlan.mode.? == .bridge);
+    try std.testing.expectEqual(@as(u32, 9000), r.interface.macvlan.mtu.?);
 
     try std.testing.expect(r.ipam == .static);
     const s = r.ipam.static;
@@ -239,8 +326,8 @@ test "Resource with minimal fields - optional fields default to null" {
     defer parsed.deinit();
 
     const r = parsed.value;
-    try std.testing.expect(r.interface.mode == null);
-    try std.testing.expect(r.interface.mtu == null);
+    try std.testing.expect(r.interface.macvlan.mode == null);
+    try std.testing.expect(r.interface.macvlan.mtu == null);
     try std.testing.expect(r.ipam == .dhcp);
     try std.testing.expect(r.ipam.dhcp.daemon_socket_path == null);
 }
@@ -408,4 +495,263 @@ test "Static IPAM with minimal address (no gateway)" {
     try std.testing.expect(s.addresses[0].gateway == null);
     try std.testing.expect(s.routes == null);
     try std.testing.expect(s.dns == null);
+}
+
+test "InterfaceConfig rejects unknown type" {
+    const allocator = std.testing.allocator;
+
+    const data =
+        \\{
+        \\    "name": "bad",
+        \\    "interface": { "type": "sriov", "master": "eth0" },
+        \\    "ipam": { "type": "dhcp" }
+        \\}
+    ;
+
+    try std.testing.expectError(
+        error.InvalidEnumTag,
+        json.parseFromSlice(Resource, allocator, data, .{}),
+    );
+}
+
+test "InterfaceConfig rejects missing type" {
+    const allocator = std.testing.allocator;
+
+    const data =
+        \\{
+        \\    "name": "bad",
+        \\    "interface": { "master": "eth0" },
+        \\    "ipam": { "type": "dhcp" }
+        \\}
+    ;
+
+    try std.testing.expectError(
+        error.MissingField,
+        json.parseFromSlice(Resource, allocator, data, .{}),
+    );
+}
+
+test "Ipvlan resource with l2 mode" {
+    const allocator = std.testing.allocator;
+
+    const data =
+        \\{
+        \\    "name": "ipvlan-l2",
+        \\    "interface": {
+        \\        "type": "ipvlan",
+        \\        "master": "eth0",
+        \\        "mode": "l2"
+        \\    },
+        \\    "ipam": { "type": "dhcp" }
+        \\}
+    ;
+
+    const parsed = try json.parseFromSlice(Resource, allocator, data, .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value.interface == .ipvlan);
+    try std.testing.expectEqualSlices(u8, "eth0", parsed.value.interface.ipvlan.master);
+    try std.testing.expect(parsed.value.interface.ipvlan.mode.? == .l2);
+    try std.testing.expect(parsed.value.interface.ipvlan.mtu == null);
+}
+
+test "Ipvlan resource with l3 mode and mtu" {
+    const allocator = std.testing.allocator;
+
+    const data =
+        \\{
+        \\    "name": "ipvlan-l3",
+        \\    "interface": {
+        \\        "type": "ipvlan",
+        \\        "master": "bond0",
+        \\        "mode": "l3",
+        \\        "mtu": 9000
+        \\    },
+        \\    "ipam": { "type": "dhcp" }
+        \\}
+    ;
+
+    const parsed = try json.parseFromSlice(Resource, allocator, data, .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value.interface == .ipvlan);
+    try std.testing.expectEqualSlices(u8, "bond0", parsed.value.interface.ipvlan.master);
+    try std.testing.expect(parsed.value.interface.ipvlan.mode.? == .l3);
+    try std.testing.expectEqual(@as(u32, 9000), parsed.value.interface.ipvlan.mtu.?);
+}
+
+test "Ipvlan resource defaults to null mode" {
+    const allocator = std.testing.allocator;
+
+    const data =
+        \\{
+        \\    "name": "ipvlan-default",
+        \\    "interface": { "type": "ipvlan", "master": "eth0" },
+        \\    "ipam": { "type": "dhcp" }
+        \\}
+    ;
+
+    const parsed = try json.parseFromSlice(Resource, allocator, data, .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value.interface == .ipvlan);
+    try std.testing.expect(parsed.value.interface.ipvlan.mode == null);
+    try std.testing.expect(parsed.value.interface.ipvlan.mtu == null);
+}
+
+test "Ipvlan resource with static ipam" {
+    const allocator = std.testing.allocator;
+
+    const data =
+        \\{
+        \\    "name": "ipvlan-static",
+        \\    "interface": {
+        \\        "type": "ipvlan",
+        \\        "master": "eth0",
+        \\        "mode": "l3s"
+        \\    },
+        \\    "ipam": {
+        \\        "type": "static",
+        \\        "addresses": [
+        \\            { "address": "10.0.0.0/24", "gateway": "10.0.0.1" }
+        \\        ],
+        \\        "routes": [{ "dst": "0.0.0.0/0" }]
+        \\    }
+        \\}
+    ;
+
+    const parsed = try json.parseFromSlice(Resource, allocator, data, .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value.interface == .ipvlan);
+    try std.testing.expect(parsed.value.interface.ipvlan.mode.? == .l3s);
+
+    try std.testing.expect(parsed.value.ipam == .static);
+    const s = parsed.value.ipam.static;
+    try std.testing.expectEqual(@as(usize, 1), s.addresses.len);
+    try std.testing.expectEqualSlices(u8, "10.0.0.0/24", s.addresses[0].address);
+    try std.testing.expectEqualSlices(u8, "10.0.0.1", s.addresses[0].gateway.?);
+    try std.testing.expectEqualSlices(u8, "0.0.0.0/0", s.routes.?[0].dst);
+}
+
+test "Macvlan resource rejects ipvlan modes" {
+    const allocator = std.testing.allocator;
+
+    const data =
+        \\{
+        \\    "name": "bad-macvlan",
+        \\    "interface": { "type": "macvlan", "master": "eth0", "mode": "l2" },
+        \\    "ipam": { "type": "dhcp" }
+        \\}
+    ;
+
+    try std.testing.expectError(
+        error.InvalidEnumTag,
+        json.parseFromSlice(Resource, allocator, data, .{}),
+    );
+}
+
+test "Ipvlan resource rejects macvlan modes" {
+    const allocator = std.testing.allocator;
+
+    const data =
+        \\{
+        \\    "name": "bad-ipvlan",
+        \\    "interface": { "type": "ipvlan", "master": "eth0", "mode": "bridge" },
+        \\    "ipam": { "type": "dhcp" }
+        \\}
+    ;
+
+    try std.testing.expectError(
+        error.InvalidEnumTag,
+        json.parseFromSlice(Resource, allocator, data, .{}),
+    );
+}
+
+// ============================================================
+// Resource.validate() tests
+// ============================================================
+
+test "validate accepts macvlan + DHCP" {
+    const resource = Resource{
+        .name = "macvlan-dhcp",
+        .interface = .{ .macvlan = .{ .master = "eth0" } },
+        .ipam = .{ .dhcp = .{} },
+    };
+    try resource.validate();
+}
+
+test "validate accepts macvlan + static" {
+    const resource = Resource{
+        .name = "macvlan-static",
+        .interface = .{ .macvlan = .{ .master = "eth0", .mode = .bridge } },
+        .ipam = .{ .static = .{
+            .addresses = &[_]Address{
+                .{ .address = "10.0.0.0/24" },
+            },
+        } },
+    };
+    try resource.validate();
+}
+
+test "validate accepts ipvlan L2 + DHCP" {
+    const resource = Resource{
+        .name = "ipvlan-l2-dhcp",
+        .interface = .{ .ipvlan = .{ .master = "eth0", .mode = .l2 } },
+        .ipam = .{ .dhcp = .{} },
+    };
+    try resource.validate();
+}
+
+test "validate accepts ipvlan L2 + DHCP with null mode" {
+    const resource = Resource{
+        .name = "ipvlan-l2-default",
+        .interface = .{ .ipvlan = .{ .master = "eth0" } },
+        .ipam = .{ .dhcp = .{} },
+    };
+    try resource.validate();
+}
+
+test "validate accepts ipvlan L3 + static" {
+    const resource = Resource{
+        .name = "ipvlan-l3-static",
+        .interface = .{ .ipvlan = .{ .master = "eth0", .mode = .l3 } },
+        .ipam = .{ .static = .{
+            .addresses = &[_]Address{
+                .{ .address = "10.0.0.0/24" },
+            },
+        } },
+    };
+    try resource.validate();
+}
+
+test "validate accepts ipvlan L3s + static" {
+    const resource = Resource{
+        .name = "ipvlan-l3s-static",
+        .interface = .{ .ipvlan = .{ .master = "eth0", .mode = .l3s } },
+        .ipam = .{ .static = .{
+            .addresses = &[_]Address{
+                .{ .address = "10.0.0.0/24" },
+            },
+        } },
+    };
+    try resource.validate();
+}
+
+test "validate rejects ipvlan L3 + DHCP" {
+    const resource = Resource{
+        .name = "bad-ipvlan-l3-dhcp",
+        .interface = .{ .ipvlan = .{ .master = "eth0", .mode = .l3 } },
+        .ipam = .{ .dhcp = .{} },
+    };
+    try std.testing.expectError(error.IpvlanL3DhcpUnsupported, resource.validate());
+}
+
+test "validate rejects ipvlan L3s + DHCP" {
+    const resource = Resource{
+        .name = "bad-ipvlan-l3s-dhcp",
+        .interface = .{ .ipvlan = .{ .master = "eth0", .mode = .l3s } },
+        .ipam = .{ .dhcp = .{} },
+    };
+    try std.testing.expectError(error.IpvlanL3sDhcpUnsupported, resource.validate());
 }

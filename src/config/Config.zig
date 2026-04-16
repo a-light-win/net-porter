@@ -27,6 +27,19 @@ pub fn postInit(self: *Config, io: std.Io, allocator: std.mem.Allocator, path: [
 
     self.setCNIPluginDir(io);
     self.setDefaultAclDir(allocator);
+
+    // Validate each resource configuration
+    if (self.resources) |resources| {
+        for (resources) |resource| {
+            resource.validate() catch |err| {
+                std.log.err(
+                    "Resource '{s}': ipvlan L3/L3s mode does not support DHCP (no ARP layer). Use L2 mode or static IPAM instead.",
+                    .{resource.name},
+                );
+                return err;
+            };
+        }
+    }
 }
 
 const cni_plugin_search_paths = &[_][]const u8{

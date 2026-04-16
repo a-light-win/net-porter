@@ -10,6 +10,7 @@ pub const Driver = enum {
 
 pub const NetPoerterDriver = enum {
     macvlan,
+    ipvlan,
 };
 
 pub const Mode = enum {
@@ -94,6 +95,17 @@ pub const DriverOptions = struct {
                 }
             }
         }
+        if (self.net_porter_driver == .ipvlan) {
+            if (self.parent != null) {
+                return ErrorMessage.init("parent is required for ipvlan");
+            }
+            if (self.mode) |mode| {
+                switch (mode) {
+                    .bridge, .private, .vepa, .passthru => return ErrorMessage.init("specified mode is not supported by ipvlan"),
+                    else => {},
+                }
+            }
+        }
         return ErrorMessage{};
     }
 
@@ -102,6 +114,11 @@ pub const DriverOptions = struct {
         if (self.net_porter_driver == .macvlan) {
             if (self.mode == null) {
                 self.mode = .bridge;
+            }
+        }
+        if (self.net_porter_driver == .ipvlan) {
+            if (self.mode == null) {
+                self.mode = .l2;
             }
         }
     }
@@ -314,3 +331,39 @@ pub const PortMapping = struct {
         allocator.free(self.protocol);
     }
 };
+
+test "DriverOptions.withDefaults sets l2 for ipvlan" {
+    var opts = DriverOptions{ .net_porter_driver = .ipvlan };
+    opts.withDefaults();
+    try std.testing.expect(opts.mode == .l2);
+}
+
+test "DriverOptions.withDefaults preserves explicit ipvlan mode" {
+    var opts = DriverOptions{ .net_porter_driver = .ipvlan, .mode = .l3 };
+    opts.withDefaults();
+    try std.testing.expect(opts.mode == .l3);
+}
+
+test "DriverOptions.validate rejects macvlan modes for ipvlan" {
+    const opts = DriverOptions{ .net_porter_driver = .ipvlan, .mode = .bridge };
+    const result = opts.validate();
+    try std.testing.expect(!result.isOk());
+}
+
+test "DriverOptions.validate accepts l2 mode for ipvlan" {
+    const opts = DriverOptions{ .net_porter_driver = .ipvlan, .mode = .l2 };
+    const result = opts.validate();
+    try std.testing.expect(result.isOk());
+}
+
+test "DriverOptions.validate accepts l3 mode for ipvlan" {
+    const opts = DriverOptions{ .net_porter_driver = .ipvlan, .mode = .l3 };
+    const result = opts.validate();
+    try std.testing.expect(result.isOk());
+}
+
+test "DriverOptions.validate accepts l3s mode for ipvlan" {
+    const opts = DriverOptions{ .net_porter_driver = .ipvlan, .mode = .l3s };
+    const result = opts.validate();
+    try std.testing.expect(result.isOk());
+}
