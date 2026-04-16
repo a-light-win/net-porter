@@ -5,6 +5,7 @@ const version = @import("build_options").version;
 const AclManager = @import("AclManager.zig");
 const CniManager = @import("../cni/CniManager.zig");
 const DhcpManager = @import("../cni/DhcpManager.zig");
+const StateFile = @import("../cni/StateFile.zig");
 const Handler = @import("Handler.zig");
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const SocketManager = @import("SocketManager.zig");
@@ -45,6 +46,12 @@ pub fn new(opts: Opts) !Server {
 
     var logger = @import("root").logger;
     logger.log_settings = conf.log;
+
+    // Ensure state directory exists with correct permissions
+    StateFile.ensureBaseDir() catch |err| {
+        log.err("Failed to create state directory: {s}", .{@errorName(err)});
+        return err;
+    };
 
     // Initialize AclManager and load ACL files from directory
     var acl_manager = AclManager.init(allocator, conf.acl_dir);

@@ -7,6 +7,7 @@ const config_mod = @import("../config.zig");
 const plugin = @import("../plugin.zig");
 const Responser = plugin.Responser;
 const managed_type = @import("managed_type.zig");
+const StateFile = @import("StateFile.zig");
 const Cni = @This();
 
 arena: ArenaAllocator,
@@ -16,7 +17,6 @@ config: CniConfig,
 ipam_config: config_mod.IpamConfig,
 
 mutex: std.Io.Mutex = .init,
-user_sessions: UserAttachmentMap,
 
 pub fn init(io: std.Io, root_allocator: Allocator, resource: config_mod.Resource, cni_plugin_dir: []const u8) !*Cni {
     var arena = try ArenaAllocator.init(root_allocator);
@@ -34,7 +34,6 @@ pub fn init(io: std.Io, root_allocator: Allocator, resource: config_mod.Resource
         .cni_plugin_dir = cni_plugin_dir,
         .config = cni_config,
         .ipam_config = resource.ipam,
-        .user_sessions = UserAttachmentMap.init(allocator),
     };
     return cni;
 }
@@ -84,12 +83,6 @@ fn buildCniConfigFromResource(allocator: Allocator, resource: config_mod.Resourc
 }
 
 pub fn deinit(self: *Cni) void {
-    var session_it = self.user_sessions.iterator();
-    while (session_it.next()) |entry| {
-        entry.value_ptr.*.deinit();
-    }
-    self.user_sessions.deinit();
-
     const allocator = self.arena.childAllocator();
     self.arena.deinit();
     allocator.destroy(self);
@@ -108,49 +101,35 @@ const CniCommand = enum {
     VERSION,
 };
 
-fn loadAttachment(self: *Cni, session: *UserSession, request: plugin.Request) !*Attachment {
-    // ensure that the mutex is already locked outside
-    const exec_request = request.requestExec();
-    const allocator = session.arena.allocator();
-    const attachment_key = try AttachmentKey.init(
-        allocator,
-        exec_request.container_id,
-        exec_request.network_options.interface_name,
-    );
-
-    const result = try session.attachments.getOrPut(attachment_key);
-    if (!result.found_existing) {
-        result.value_ptr.* = try Attachment.init(
-            allocator,
-            self.config,
-            self.cni_plugin_dir,
-            self.ipam_config,
-        );
-    }
-    return result.value_ptr;
-}
-
-fn getOrCreateUserSession(self: *Cni, uid: std.posix.uid_t) !*UserSession {
-    const result = try self.user_sessions.getOrPut(uid);
-    if (!result.found_existing) {
-        const session = try UserSession.init(self.arena.childAllocator());
-        result.value_ptr.* = session;
-    }
-    return result.value_ptr.*;
-}
-
 pub fn setup(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser, caller_uid: std.posix.uid_t) !void {
     try self.mutex.lock(self.io);
     defer self.mutex.unlock(self.io);
 
-    const session = try self.getOrCreateUserSession(caller_uid);
-    const attachment = try self.loadAttachment(session, request);
-    if (attachment.isExecuted()) {
+    const exec_request = request.requestExec();
+    const container_id = exec_request.container_id;
+    const ifname = exec_request.network_options.interface_name;
+
+    // Check if state file already exists (attachment already set up)
+    if (StateFile.exists(tentative_allocator, caller_uid, container_id, ifname)) {
         responser.writeError("The setup has been executed, teardown first", .{});
         return;
     }
 
+    // Create transient attachment for executing CNI plugins
+    var attachment = try Attachment.init(tentative_allocator, self.config, self.cni_plugin_dir, self.ipam_config);
+    defer attachment.deinit();
+
+    // Execute CNI ADD chain with prevResult chaining between plugins
     try attachment.setup(self.io, tentative_allocator, request, responser);
+
+    // Persist state on success: store the attachment's exec configs and final result
+    const state_json = try attachment.serializeState(tentative_allocator);
+    defer tentative_allocator.free(state_json);
+
+    StateFile.write(self.io, tentative_allocator, caller_uid, container_id, ifname, state_json) catch |err| {
+        log.warn("Failed to persist state for uid={d}, container_id={s}: {s}", .{ caller_uid, container_id, @errorName(err) });
+        // State file write failed, but CNI setup succeeded — log warning and continue
+    };
 }
 
 pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser, caller_uid: std.posix.uid_t) !void {
@@ -158,35 +137,35 @@ pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Requ
     defer self.mutex.unlock(self.io);
 
     const exec_request = request.requestExec();
-    const attachment_key = AttachmentKey{
-        .container_id = exec_request.container_id,
-        .ifname = exec_request.network_options.interface_name,
-    };
+    const container_id = exec_request.container_id;
+    const ifname = exec_request.network_options.interface_name;
 
-    const session = self.user_sessions.get(caller_uid) orelse {
-        log.warn(
-            "No session found for uid={d}, container_id={s}, skipping CNI DEL. This can happen if the server was restarted.",
-            .{ caller_uid, exec_request.container_id },
-        );
-        log.info("Teardown {s} is complete", .{request.request.exec.container_name});
-        return;
-    };
-
-    if (session.attachments.fetchRemove(attachment_key)) |kv| {
-        var key = kv.key;
-        var value = kv.value;
-        defer {
-            key.deinit();
-            value.deinit();
+    // Read state file
+    const state_json = StateFile.read(self.io, tentative_allocator, caller_uid, container_id, ifname) catch |err| {
+        if (err == error.FileNotFound) {
+            log.warn(
+                "No state file found for uid={d}, container_id={s}, ifname={s}, skipping CNI DEL. This can happen if the server was restarted.",
+                .{ caller_uid, container_id, ifname },
+            );
+            log.info("Teardown {s} is complete", .{request.request.exec.container_name});
+            return;
         }
+        log.warn("Failed to read state for uid={d}, container_id={s}: {s}", .{ caller_uid, container_id, @errorName(err) });
+        return err;
+    };
+    defer tentative_allocator.free(state_json);
 
-        try value.teardown(self.io, tentative_allocator, request, responser);
-    } else {
-        log.warn(
-            "Attachment not found for uid={d}, container_id={s}, ifname={s}, skipping CNI DEL. This can happen if the server was restarted.",
-            .{ caller_uid, exec_request.container_id, exec_request.network_options.interface_name },
-        );
-    }
+    // Deserialize state into transient attachment
+    var attachment = try Attachment.deserializeState(tentative_allocator, state_json, self.cni_plugin_dir, self.ipam_config);
+    defer attachment.deinit();
+
+    // Execute CNI DEL chain (reverse order, all plugins get final ADD result as prevResult)
+    try attachment.teardown(self.io, tentative_allocator, request, responser);
+
+    // Remove state file
+    StateFile.remove(self.io, tentative_allocator, caller_uid, container_id, ifname) catch |err| {
+        log.warn("Failed to remove state file for uid={d}, container_id={s}: {s}", .{ caller_uid, container_id, @errorName(err) });
+    };
 
     log.info("Teardown {s} for uid={d} is complete", .{ request.request.exec.container_name, caller_uid });
 }
@@ -911,6 +890,18 @@ const PluginConf = struct {
         try self.conf.put(self.arena.?.allocator(), "cniVersion", json.Value{ .string = version });
     }
 
+    /// Inject a prevResult into the plugin config from a CNI result JSON string.
+    /// The result is parsed into a proper json.Value so it serializes as a nested JSON object.
+    pub fn setPrevResult(self: *PluginConf, result: []const u8) !void {
+        const allocator = self.arena.?.allocator();
+        // Parse the result JSON string into a json.Value
+        const parsed = try json.parseFromSlice(json.Value, allocator, result, .{
+            .ignore_unknown_fields = true,
+        });
+        // Insert parsed value into conf. Memory lives in the arena; no need to deinit parsed.
+        try self.conf.put(allocator, "prevResult", parsed.value);
+    }
+
     fn shadowCopy(allocator: Allocator, src: json.ObjectMap) !json.ObjectMap {
         var new_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
         var it = src.iterator();
@@ -966,118 +957,8 @@ const PluginConf = struct {
     }
 };
 
-const AttachmentKey = struct {
-    container_id: []const u8,
-    ifname: []const u8,
-    allocator: ?Allocator = null,
-
-    pub fn init(allocator: Allocator, container_id: []const u8, ifname: []const u8) !AttachmentKey {
-        return AttachmentKey{
-            .container_id = try allocator.dupe(u8, container_id),
-            .ifname = try allocator.dupe(u8, ifname),
-            .allocator = allocator,
-        };
-    }
-
-    pub fn copy(self: AttachmentKey, allocator: Allocator) !AttachmentKey {
-        return try AttachmentKey.init(allocator, self.container_id, self.ifname);
-    }
-
-    pub fn deinit(self: AttachmentKey) void {
-        if (self.allocator) |alloc| {
-            alloc.free(self.container_id);
-            alloc.free(self.ifname);
-        }
-    }
-
-    test "copy() will success" {
-        const allocator = std.testing.allocator;
-        const key = AttachmentKey{
-            .container_id = "test",
-            .ifname = "eth0",
-        };
-        const copied_key = try key.copy(allocator);
-        defer copied_key.deinit();
-        try std.testing.expectEqualSlices(u8, "test", copied_key.container_id);
-        try std.testing.expectEqualSlices(u8, "eth0", copied_key.ifname);
-    }
-};
-
-const AttachmentKeyContext = struct {
-    pub fn hash(self: AttachmentKeyContext, key: AttachmentKey) u64 {
-        _ = self;
-        var hasher = std.hash.Wyhash.init(0);
-        std.hash.autoHashStrat(&hasher, key.container_id, .Deep);
-        std.hash.autoHashStrat(&hasher, key.ifname, .Deep);
-        return hasher.final();
-    }
-
-    test "the copy key have the same hash" {
-        const context = AttachmentKeyContext{};
-        const key = AttachmentKey{
-            .container_id = "test",
-            .ifname = "eth0",
-        };
-        const copied_key = try key.copy(std.testing.allocator);
-        defer copied_key.deinit();
-        try std.testing.expectEqual(context.hash(key), context.hash(copied_key));
-    }
-
-    pub fn eql(self: AttachmentKeyContext, one: AttachmentKey, other: AttachmentKey) bool {
-        _ = self;
-        return std.mem.eql(u8, one.container_id, other.container_id) and
-            std.mem.eql(u8, one.ifname, other.ifname);
-    }
-
-    test "the copy key is equal to the original key" {
-        const context = AttachmentKeyContext{};
-        const key = AttachmentKey{
-            .container_id = "test",
-            .ifname = "eth0",
-        };
-        const copied_key = try key.copy(std.testing.allocator);
-        defer copied_key.deinit();
-        try std.testing.expect(context.eql(key, copied_key));
-    }
-};
-
-const AttachmentMap = std.HashMap(
-    AttachmentKey,
-    Attachment,
-    AttachmentKeyContext,
-    80,
-);
-
-const UserSession = struct {
-    arena: ArenaAllocator,
-    attachments: AttachmentMap,
-
-    pub fn init(root_allocator: Allocator) !*UserSession {
-        var arena = try ArenaAllocator.init(root_allocator);
-        const allocator = arena.allocator();
-        const session = try allocator.create(UserSession);
-        session.* = .{
-            .arena = arena,
-            .attachments = AttachmentMap.init(allocator),
-        };
-        return session;
-    }
-
-    pub fn deinit(self: *UserSession) void {
-        var it = self.attachments.iterator();
-        while (it.next()) |entry| {
-            entry.key_ptr.*.deinit();
-            entry.value_ptr.*.deinit();
-        }
-        self.attachments.deinit();
-        const allocator = self.arena.childAllocator();
-        self.arena.deinit();
-        allocator.destroy(self);
-    }
-};
-
-const UserAttachmentMap = std.AutoHashMap(u32, *UserSession);
-
+/// Transient attachment — created per request, not stored in memory.
+/// State is persisted to disk via StateFile.
 const Attachment = struct {
     arena: ArenaAllocator,
     exec_configs: std.ArrayList(PluginConf),
@@ -1167,6 +1048,92 @@ const Attachment = struct {
         }
     }
 
+    /// Serialize the attachment state to JSON for disk persistence.
+    /// Stores each plugin's config and its result (if executed).
+    fn serializeState(self: Attachment, allocator: Allocator) ![]const u8 {
+        var configs = std.ArrayList(json.Value).initCapacity(allocator, self.exec_configs.items.len) catch unreachable;
+
+        for (self.exec_configs.items) |exec_config| {
+            var entry = json.Value{ .object = try json.ObjectMap.init(allocator, &.{}, &{}) };
+            // Store the plugin config
+            try entry.object.put(allocator, "conf", json.Value{ .object = exec_config.conf });
+            // Store the result (if any — should be present after setup)
+            if (exec_config.result) |result| {
+                const result_parsed = try json.parseFromSlice(json.Value, allocator, result.items, .{
+                    .ignore_unknown_fields = true,
+                });
+                try entry.object.put(allocator, "result", result_parsed.value);
+            }
+            configs.appendAssumeCapacity(entry);
+        }
+
+        var root = try json.ObjectMap.init(allocator, &.{}, &.{});
+        try root.put(allocator, "version", json.Value{ .integer = 1 });
+        try root.put(allocator, "cni_plugin_dir", json.Value{ .string = self.cni_plugin_dir });
+        try root.put(allocator, "exec_configs", json.Value{ .array = configs });
+
+        var buf = std.ArrayList(u8).empty;
+        try json.stringify(json.Value{ .object = root }, .{}, buf.writer(allocator));
+        return buf.toOwnedSlice(allocator) catch |err| {
+            buf.deinit(allocator);
+            return err;
+        };
+    }
+
+    /// Deserialize attachment state from JSON read from disk.
+    fn deserializeState(allocator: Allocator, state_json: []const u8, cni_plugin_dir: []const u8, ipam_config: config_mod.IpamConfig) !Attachment {
+        const parsed = try json.parseFromSlice(struct {
+            version: i64,
+            exec_configs: []const struct {
+                conf: json.Value,
+                result: ?json.Value = null,
+            },
+        }, allocator, state_json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+        defer parsed.deinit();
+
+        var arena = try ArenaAllocator.init(allocator);
+        var attachment = Attachment{
+            .arena = arena,
+            .exec_configs = std.ArrayList(PluginConf).empty,
+            .cni_plugin_dir = cni_plugin_dir,
+            .ipam_config = ipam_config,
+        };
+
+        const arena_alloc = arena.allocator();
+        for (parsed.value.exec_configs) |entry| {
+            // Reconstruct PluginConf from stored config
+            const conf_obj = switch (entry.conf) {
+                .object => |obj| obj,
+                else => continue,
+            };
+            const conf_copy = try shadowCopyObjectMap(arena_alloc, conf_obj);
+            var plugin_conf = PluginConf{
+                .arena = arena,
+                .conf = conf_copy,
+            };
+
+            // Restore result if present
+            if (entry.result) |result_val| {
+                var result_buf = std.ArrayList(u8).empty;
+                try json.stringify(result_val, .{}, result_buf.writer(arena_alloc));
+                plugin_conf.result = result_buf;
+            }
+
+            try attachment.exec_configs.append(arena_alloc, plugin_conf);
+        }
+
+        return attachment;
+    }
+
+    fn shadowCopyObjectMap(allocator: Allocator, src: json.ObjectMap) !json.ObjectMap {
+        var new_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
+        var it = src.iterator();
+        while (it.next()) |entry| {
+            try new_obj.put(allocator, try allocator.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
+        }
+        return new_obj;
+    }
+
     const FinalResultPos = enum { first, last };
 
     fn finalResult(self: Attachment, pos: FinalResultPos) ?std.ArrayList(u8) {
@@ -1182,15 +1149,19 @@ const Attachment = struct {
         }
     }
 
-    fn isExecuted(self: Attachment) bool {
-        return self.exec_configs.items[0].isExecuted();
-    }
-
     fn setup(self: *Attachment, io: std.Io, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
         const env_map = try self.envMap(tentative_allocator, .ADD, request);
         const pid = try std.fmt.allocPrint(tentative_allocator, "{d}", .{request.process_id.?});
 
-        for (self.exec_configs.items) |*exec_config| {
+        for (self.exec_configs.items, 0..) |*exec_config, i| {
+            // Inject prevResult from previous plugin's result (CNI spec chaining)
+            if (i > 0) {
+                const prev = self.exec_configs.items[i - 1];
+                if (prev.result) |prev_result| {
+                    try exec_config.setPrevResult(prev_result.items);
+                }
+            }
+
             if (exec_config.isDhcp()) {
                 try exec_config.setDhcpSocketPath(request.user_id.?);
             } else if (exec_config.isStatic()) {
@@ -1223,10 +1194,19 @@ const Attachment = struct {
         const env_map = try self.envMap(tentative_allocator, .DEL, request);
         const pid = try std.fmt.allocPrint(tentative_allocator, "{d}", .{request.process_id.?});
 
+        // Inject prevResult into ALL plugins (CNI spec: final ADD result)
+        const final_add_result = self.finalResult(.last);
+
         var i: usize = 0;
         const len = self.exec_configs.items.len;
         while (i < len) : (i += 1) {
             var exec_config = &self.exec_configs.items[len - (i + 1)];
+
+            // Inject prevResult for DEL (CNI spec requirement since v0.4.0)
+            if (final_add_result) |prev_result| {
+                try exec_config.setPrevResult(prev_result.items);
+            }
+
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
             const result = try exec_config.exec(io, tentative_allocator, cmd, pid, env_map);
 
@@ -1285,12 +1265,63 @@ const Attachment = struct {
         defer allocator.free(bin);
         try std.testing.expectEqualSlices(u8, "/path/to/cni/plugins/macvlan", bin);
     }
+
+    test "setPrevResult + stringify produces JSON with embedded prevResult object" {
+        const allocator = std.testing.allocator;
+        const io = std.testing.io;
+
+        // Create a PluginConf with basic config
+        var arena = try ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var conf = try json.ObjectMap.init(a, &.{}, &.{});
+        try conf.put(a, "cniVersion", json.Value{ .string = "1.0.0" });
+        try conf.put(a, "name", json.Value{ .string = "test" });
+        try conf.put(a, "type", json.Value{ .string = "macvlan" });
+
+        var plugin_conf = PluginConf{
+            .arena = arena,
+            .conf = conf,
+        };
+
+        // Set prevResult from a CNI result JSON string
+        const result_json =
+            \\{"cniVersion":"1.0.0","interfaces":[{"name":"eth0","mac":"aa:bb:cc:dd:ee:ff"}],"ips":[{"version":"4","address":"10.0.0.5/24","interface":0}]}
+        ;
+        try plugin_conf.setPrevResult(result_json);
+
+        // Stringify to pipe and verify prevResult appears as a JSON object
+        var fds: [2]i32 = undefined;
+        const rc = std.os.linux.pipe(&fds);
+        try std.testing.expect(rc == 0);
+        var in_file = std.Io.File{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+        defer in_file.close(io);
+        var out_file = std.Io.File{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+
+        try plugin_conf.stringify(io, out_file);
+        out_file.close(io);
+
+        const buf = blk: {
+            var read_buffer: [8192]u8 = undefined;
+            var file_reader = in_file.reader(io, &read_buffer);
+            break :blk try file_reader.interface.allocRemaining(allocator, .limited(8192));
+        };
+        defer allocator.free(buf);
+
+        // Verify the output contains prevResult key
+        try std.testing.expect(std.mem.indexOf(u8, buf, "\"prevResult\"") != null);
+        // Verify prevResult value is a proper JSON object (not an escaped string)
+        // If escaped, we'd see: "{\\\"cniVersion\\\":\\\"1.0.0\\\"...}"
+        // As a proper object, we see nested interfaces and ips
+        try std.testing.expect(std.mem.indexOf(u8, buf, "\"interfaces\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, buf, "\"eth0\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, buf, "10.0.0.5") != null);
+    }
 };
 
 test {
     _ = CniConfig;
-    _ = AttachmentKey;
-    _ = AttachmentKeyContext;
     _ = Attachment;
     _ = PluginConf;
 }

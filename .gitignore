@@ -5,3 +5,6 @@ zig-out/
 zig-pkg/
 
 kcov-output/
+
+# Agent working directory
+.tmp/
