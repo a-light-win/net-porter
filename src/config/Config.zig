@@ -1,7 +1,6 @@
 const std = @import("std");
 const Resource = @import("Resource.zig");
 const LogSettings = @import("../utils.zig").LogSettings;
-const user = @import("../user.zig");
 const Config = @This();
 
 config_dir: []const u8 = "",
@@ -9,14 +8,14 @@ config_path: []const u8 = "",
 // CNI plugin directory (auto-detected if not set)
 cni_plugin_dir: []const u8 = "",
 
-/// List of users (usernames or numeric UIDs) that need a net-porter.sock entry.
-/// The server creates per-user sockets only for users listed here.
-users: ?[]const [:0]const u8 = null,
+/// Directory containing dynamic ACL files.
+/// Defaults to {config_dir}/acl.d if not explicitly set.
+acl_dir: []const u8 = "",
+
 resources: ?[]const Resource = null,
 log: LogSettings = .{},
 
 pub fn postInit(self: *Config, io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
-    _ = allocator;
     self.config_path = path;
 
     if (std.Io.Dir.path.dirname(path)) |dir| {
@@ -27,6 +26,7 @@ pub fn postInit(self: *Config, io: std.Io, allocator: std.mem.Allocator, path: [
     }
 
     self.setCNIPluginDir(io);
+    self.setDefaultAclDir(allocator);
 }
 
 const cni_plugin_search_paths = &[_][]const u8{
@@ -47,74 +47,45 @@ fn setCNIPluginDir(self: *Config, io: std.Io) void {
     }
 }
 
-/// Resolve the `users` list to a deduplicated list of numeric UIDs.
-/// Returns an ArrayList owned by the caller.
-pub fn resolveUserUids(self: Config, allocator: std.mem.Allocator) !std.ArrayList(u32) {
-    var uid_set = std.AutoHashMap(u32, void).init(allocator);
-    defer uid_set.deinit();
+/// Set default acl_dir to {config_dir}/acl.d if not explicitly configured.
+fn setDefaultAclDir(self: *Config, allocator: std.mem.Allocator) void {
+    if (self.acl_dir.len > 0) return;
+    if (self.config_dir.len == 0) return;
 
-    if (self.users) |users| {
-        for (users) |username| {
-            if (resolveUsername(username)) |uid| {
-                try uid_set.put(uid, {});
-            } else {
-                std.log.warn("Failed to resolve user '{s}', skipping.", .{username});
-            }
-        }
-    }
-
-    var result = try std.ArrayList(u32).initCapacity(allocator, uid_set.count());
-    var iter = uid_set.keyIterator();
-    while (iter.next()) |uid| {
-        result.appendAssumeCapacity(uid.*);
-    }
-    return result;
-}
-
-fn resolveUsername(username: [:0]const u8) ?u32 {
-    // Try parsing as numeric UID first
-    if (std.fmt.parseUnsigned(u32, username, 10)) |uid| {
-        return uid;
-    } else |_| {}
-    return user.getUid(username);
-}
-
-test "resolveUserUids with numeric UIDs" {
-    const allocator = std.testing.allocator;
-    var config = Config{
-        .users = &[_][:0]const u8{ "1000", "2000", "1000" },
+    const default = std.fmt.allocPrint(allocator, "{s}/acl.d", .{self.config_dir}) catch {
+        std.log.warn("Failed to allocate default acl_dir path", .{});
+        return;
     };
-    var uids = try config.resolveUserUids(allocator);
-    defer uids.deinit(allocator);
-
-    try std.testing.expectEqual(@as(usize, 2), uids.items.len);
-    var found_1000 = false;
-    var found_2000 = false;
-    for (uids.items) |uid| {
-        if (uid == 1000) found_1000 = true;
-        if (uid == 2000) found_2000 = true;
-    }
-    try std.testing.expect(found_1000);
-    try std.testing.expect(found_2000);
+    self.acl_dir = default;
 }
 
-test "resolveUserUids with null users returns empty" {
-    const allocator = std.testing.allocator;
-    var config = Config{ .users = null };
-    var uids = try config.resolveUserUids(allocator);
-    defer uids.deinit(allocator);
+// ============================================================
+// Tests
+// ============================================================
 
-    try std.testing.expectEqual(@as(usize, 0), uids.items.len);
+test "postInit sets default acl_dir from config_dir" {
+    const allocator = std.testing.allocator;
+    var config = Config{};
+    try config.postInit(std.testing.io, allocator, "/etc/net-porter/config.json");
+
+    try std.testing.expectEqualSlices(u8, "/etc/net-porter/acl.d", config.acl_dir);
+    allocator.free(config.acl_dir);
 }
 
-test "resolveUserUids skips unresolvable users" {
+test "postInit preserves explicit acl_dir" {
     const allocator = std.testing.allocator;
-    var config = Config{
-        .users = &[_][:0]const u8{ "1000", "nonexistent-user-xyz" },
-    };
-    var uids = try config.resolveUserUids(allocator);
-    defer uids.deinit(allocator);
+    var config = Config{ .acl_dir = "/custom/acl/path" };
+    try config.postInit(std.testing.io, allocator, "/etc/net-porter/config.json");
 
-    try std.testing.expectEqual(@as(usize, 1), uids.items.len);
-    try std.testing.expectEqual(@as(u32, 1000), uids.items[0]);
+    try std.testing.expectEqualSlices(u8, "/custom/acl/path", config.acl_dir);
+}
+
+test "postInit sets config_dir and config_path" {
+    const allocator = std.testing.allocator;
+    var config = Config{};
+    try config.postInit(std.testing.io, allocator, "/etc/net-porter/config.json");
+
+    try std.testing.expectEqualSlices(u8, "/etc/net-porter", config.config_dir);
+    try std.testing.expectEqualSlices(u8, "/etc/net-porter/config.json", config.config_path);
+    allocator.free(config.acl_dir);
 }

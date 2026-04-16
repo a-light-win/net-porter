@@ -1,5 +1,4 @@
 {
-  "users": ["1000"],
   "resources": [
     {
       "name": "macvlan-dhcp",
@@ -9,10 +8,7 @@
       },
       "ipam": {
         "type": "dhcp"
-      },
-      "acl": [
-        { "user": "1000" }
-      ]
+      }
     }
   ]
 }

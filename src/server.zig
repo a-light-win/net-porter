@@ -41,6 +41,7 @@ test {
     _ = @import("server/Server.zig");
     _ = @import("server/Handler.zig");
     _ = @import("server/Acl.zig");
+    _ = @import("server/AclFile.zig");
     _ = @import("server/AclManager.zig");
     _ = @import("server/AclManager_test.zig");
 }

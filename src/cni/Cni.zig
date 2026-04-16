@@ -1323,9 +1323,6 @@ test "buildCniConfigFromResource creates correct CNI config for DHCP resource" {
         .name = "test-dhcp",
         .interface = .{ .type = "macvlan", .master = "eth0" },
         .ipam = .{ .dhcp = .{} },
-        .acl = &[_]config_mod.Resource.Grant{
-            .{ .user = "1000" },
-        },
     };
 
     const cni_config = try buildCniConfigFromResource(allocator, resource);
@@ -1365,9 +1362,6 @@ test "buildCniConfigFromResource creates correct CNI config with mode and mtu" {
                 .{ .address = "10.0.0.0/16" },
             },
         } },
-        .acl = &[_]config_mod.Resource.Grant{
-            .{ .user = "1000", .ips = &[_][:0]const u8{"10.0.0.5-10.0.0.10"} },
-        },
     };
 
     const cni_config = try buildCniConfigFromResource(allocator, resource);
@@ -1564,9 +1558,6 @@ test "Cni.init creates CNI from resource config" {
         .name = "test-cni-init",
         .interface = .{ .type = "macvlan", .master = "eth0", .mode = "bridge" },
         .ipam = .{ .dhcp = .{} },
-        .acl = &[_]config_mod.Resource.Grant{
-            .{ .user = "1000" },
-        },
     };
 
     var cni = try Cni.init(std.testing.io, allocator, resource, "/usr/lib/cni");
@@ -1592,9 +1583,6 @@ test "Cni.init with static ipam stores ipam_config" {
                 .{ .dst = "0.0.0.0/0" },
             },
         } },
-        .acl = &[_]config_mod.Resource.Grant{
-            .{ .user = "1000", .ips = &[_][:0]const u8{"192.168.1.10-192.168.1.20"} },
-        },
     };
 
     var cni = try Cni.init(std.testing.io, allocator, resource, "/usr/lib/cni");

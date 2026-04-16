@@ -34,10 +34,14 @@ io: std.Io,
 allowed_uids: std.ArrayList(u32),
 /// Active listening sockets.
 entries: std.ArrayList(SocketEntry),
-/// poll file descriptors: [0] = inotify_fd, [1..] = server sockets.
+/// poll file descriptors: [0..num_special_fds) = special fds, [num_special_fds..] = server sockets.
 poll_fds: std.ArrayList(std.posix.pollfd),
-/// inotify file descriptor.
+/// inotify file descriptor for /run/user/.
 inotify_fd: std.posix.fd_t,
+/// Number of special (non-server-socket) fds at the start of poll_fds.
+/// Index 0 = /run/user/ inotify. Index 1+ may be added by Server for ACL inotify etc.
+/// Server socket entries start at poll_fds[num_special_fds].
+num_special_fds: usize = 1,
 
 pub fn init(io: std.Io, allocator: Allocator, allowed_uids: std.ArrayList(u32)) !SocketManager {
     const init_rc = linux.inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
@@ -158,8 +162,8 @@ pub fn removeSocket(self: *SocketManager, uid: std.posix.uid_t) void {
             log.info("Stopped listening on {s} for uid={d}", .{ entry.path, uid });
             self.allocator.free(entry.path);
             _ = self.entries.orderedRemove(i);
-            // +1 because poll_fds[0] is inotify_fd
-            _ = self.poll_fds.orderedRemove(i + 1);
+            // +num_special_fds because poll_fds[0..num_special_fds] are inotify fds
+            _ = self.poll_fds.orderedRemove(i + self.num_special_fds);
             return;
         }
     }
@@ -198,7 +202,7 @@ pub fn updateAllowedUids(self: *SocketManager, new_uids: std.ArrayList(u32)) voi
             // Check if /run/user/<uid>/ directory exists
             var buf: [std.fs.max_path_bytes]u8 = undefined;
             const dir_path = std.fmt.bufPrint(&buf, "{s}/{d}", .{ run_user_dir, uid }) catch continue;
-            std.Io.Dir.cwd().openDir(self.io, dir_path, .{}) catch continue;
+            _ = std.Io.Dir.cwd().openDir(self.io, dir_path, .{}) catch continue;
             // Directory exists, create socket
             self.addSocket(uid) catch |err| {
                 log.warn("Failed to create socket for uid={d} after config reload: {s}", .{ uid, @errorName(err) });
@@ -256,15 +260,9 @@ pub fn poll(self: *SocketManager, timeout_ms: i32) !?usize {
     const n = try std.posix.poll(self.poll_fds.items, timeout_ms);
     if (n == 0) return null;
 
-    // Check inotify first (index 0)
-    if (self.poll_fds.items[0].revents & std.posix.POLL.IN != 0) {
-        return 0;
-    }
-
-    // Check server sockets (index 1+)
-    for (self.poll_fds.items[1..], 0..) |*pfd, i| {
+    for (self.poll_fds.items, 0..) |*pfd, i| {
         if (pfd.revents & std.posix.POLL.IN != 0) {
-            return i + 1;
+            return i;
         }
     }
 
@@ -272,10 +270,10 @@ pub fn poll(self: *SocketManager, timeout_ms: i32) !?usize {
 }
 
 /// Accept a connection on the server socket at the given poll_fds index.
-/// poll_fds index 1 corresponds to entries[0].
+/// poll_fds[num_special_fds] corresponds to entries[0].
 pub fn accept(self: *SocketManager, io: std.Io, poll_index: usize) ?Connection {
-    if (poll_index == 0) return null; // inotify fd
-    const entry_index = poll_index - 1;
+    if (poll_index < self.num_special_fds) return null; // special fd, not a server socket
+    const entry_index = poll_index - self.num_special_fds;
     if (entry_index >= self.entries.items.len) return null;
     const stream = self.entries.items[entry_index].server.accept(io) catch |err| {
         log.warn("Failed to accept connection: {s}", .{@errorName(err)});

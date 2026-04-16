@@ -9,13 +9,6 @@ const Resource = @This();
 name: []const u8,
 interface: Interface,
 ipam: IpamConfig,
-acl: []const Grant,
-
-pub const Grant = struct {
-    user: ?[:0]const u8 = null,
-    group: ?[:0]const u8 = null,
-    ips: ?[]const [:0]const u8 = null,
-};
 
 pub const Interface = struct {
     type: []const u8,
@@ -120,11 +113,7 @@ test "Resource can be loaded from json - dhcp" {
         \\    },
         \\    "ipam": {
         \\        "type": "dhcp"
-        \\    },
-        \\    "acl": [
-        \\        { "user": "alice" },
-        \\        { "group": "devops" }
-        \\    ]
+        \\    }
         \\}
     ;
 
@@ -137,12 +126,9 @@ test "Resource can be loaded from json - dhcp" {
     try std.testing.expectEqualSlices(u8, "macvlan", resource.interface.type);
     try std.testing.expectEqualSlices(u8, "eth0", resource.interface.master);
     try std.testing.expect(resource.ipam == .dhcp);
-    try std.testing.expectEqual(@as(usize, 2), resource.acl.len);
-    try std.testing.expectEqualSlices(u8, "alice", resource.acl[0].user.?);
-    try std.testing.expectEqualSlices(u8, "devops", resource.acl[1].group.?);
 }
 
-test "Resource with static ipam and ip ranges can be loaded from json" {
+test "Resource with static ipam can be loaded from json" {
     const allocator = std.testing.allocator;
 
     const data =
@@ -161,17 +147,7 @@ test "Resource with static ipam and ip ranges can be loaded from json" {
         \\        "routes": [
         \\            { "dst": "0.0.0.0/0" }
         \\        ]
-        \\    },
-        \\    "acl": [
-        \\        {
-        \\            "user": "alice",
-        \\            "ips": ["192.168.1.10-192.168.1.20"]
-        \\        },
-        \\        {
-        \\            "user": "1002",
-        \\            "ips": ["192.168.1.50"]
-        \\        }
-        \\    ]
+        \\    }
         \\}
     ;
 
@@ -189,13 +165,6 @@ test "Resource with static ipam and ip ranges can be loaded from json" {
     try std.testing.expectEqualSlices(u8, "192.168.1.1", s.addresses[0].gateway.?);
     try std.testing.expect(s.routes != null);
     try std.testing.expectEqualSlices(u8, "0.0.0.0/0", s.routes.?[0].dst);
-    try std.testing.expectEqual(@as(usize, 2), resource.acl.len);
-
-    const alice_grant = resource.acl[0];
-    try std.testing.expectEqualSlices(u8, "alice", alice_grant.user.?);
-    try std.testing.expect(alice_grant.ips != null);
-    try std.testing.expectEqual(@as(usize, 1), alice_grant.ips.?.len);
-    try std.testing.expectEqualSlices(u8, "192.168.1.10-192.168.1.20", alice_grant.ips.?[0]);
 }
 
 test "Resource with all optional fields populated" {
@@ -224,10 +193,7 @@ test "Resource with all optional fields populated" {
         \\            "domain": "example.com",
         \\            "search": ["example.com"]
         \\        }
-        \\    },
-        \\    "acl": [
-        \\        { "user": "alice", "ips": ["10.0.0.5-10.0.0.10", "10.0.1.0-10.0.1.5"] }
-        \\    ]
+        \\    }
         \\}
     ;
 
@@ -251,9 +217,6 @@ test "Resource with all optional fields populated" {
     try std.testing.expect(s.dns != null);
     try std.testing.expectEqualSlices(u8, "8.8.8.8", s.dns.?.nameservers.?[0]);
     try std.testing.expectEqualSlices(u8, "example.com", s.dns.?.domain.?);
-
-    // Multiple ips in a single grant
-    try std.testing.expectEqual(@as(usize, 2), r.acl[0].ips.?.len);
 }
 
 test "Resource with minimal fields - optional fields default to null" {
@@ -268,10 +231,7 @@ test "Resource with minimal fields - optional fields default to null" {
         \\    },
         \\    "ipam": {
         \\        "type": "dhcp"
-        \\    },
-        \\    "acl": [
-        \\        { "user": "alice" }
-        \\    ]
+        \\    }
         \\}
     ;
 
@@ -283,29 +243,6 @@ test "Resource with minimal fields - optional fields default to null" {
     try std.testing.expect(r.interface.mtu == null);
     try std.testing.expect(r.ipam == .dhcp);
     try std.testing.expect(r.ipam.dhcp.daemon_socket_path == null);
-    try std.testing.expect(r.acl[0].ips == null);
-    try std.testing.expect(r.acl[0].group == null);
-}
-
-test "Resource with grant having both user and group" {
-    const allocator = std.testing.allocator;
-
-    const data =
-        \\{
-        \\    "name": "test",
-        \\    "interface": { "type": "macvlan", "master": "eth0" },
-        \\    "ipam": { "type": "dhcp" },
-        \\    "acl": [
-        \\        { "user": "alice", "group": "devops" }
-        \\    ]
-        \\}
-    ;
-
-    const parsed = try json.parseFromSlice(Resource, allocator, data, .{});
-    defer parsed.deinit();
-
-    try std.testing.expectEqualSlices(u8, "alice", parsed.value.acl[0].user.?);
-    try std.testing.expectEqualSlices(u8, "devops", parsed.value.acl[0].group.?);
 }
 
 test "Resource parsing fails for missing required fields" {
@@ -313,32 +250,15 @@ test "Resource parsing fails for missing required fields" {
 
     // Missing interface
     const data_missing_interface =
-        \\{ "name": "test", "ipam": { "type": "dhcp" }, "acl": [] }
+        \\{ "name": "test", "ipam": { "type": "dhcp" } }
     ;
     try std.testing.expectError(error.MissingField, json.parseFromSlice(Resource, allocator, data_missing_interface, .{}));
 
     // Missing ipam
     const data_missing_ipam =
-        \\{ "name": "test", "interface": { "type": "macvlan", "master": "eth0" }, "acl": [] }
+        \\{ "name": "test", "interface": { "type": "macvlan", "master": "eth0" } }
     ;
     try std.testing.expectError(error.MissingField, json.parseFromSlice(Resource, allocator, data_missing_ipam, .{}));
-}
-
-test "Resource with empty acl array parses successfully" {
-    const allocator = std.testing.allocator;
-
-    const data =
-        \\{
-        \\    "name": "empty-acl",
-        \\    "interface": { "type": "macvlan", "master": "eth0" },
-        \\    "ipam": { "type": "dhcp" },
-        \\    "acl": []
-        \\}
-    ;
-
-    const parsed = try json.parseFromSlice(Resource, allocator, data, .{});
-    defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 0), parsed.value.acl.len);
 }
 
 test "IpamConfig rejects unknown type" {
@@ -348,8 +268,7 @@ test "IpamConfig rejects unknown type" {
         \\{
         \\    "name": "bad",
         \\    "interface": { "type": "macvlan", "master": "eth0" },
-        \\    "ipam": { "type": "host-local" },
-        \\    "acl": []
+        \\    "ipam": { "type": "host-local" }
         \\}
     ;
 
@@ -366,8 +285,7 @@ test "IpamConfig rejects missing type" {
         \\{
         \\    "name": "bad",
         \\    "interface": { "type": "macvlan", "master": "eth0" },
-        \\    "ipam": { "addresses": [] },
-        \\    "acl": []
+        \\    "ipam": { "addresses": [] }
         \\}
     ;
 
@@ -384,8 +302,7 @@ test "Static IPAM requires addresses" {
         \\{
         \\    "name": "bad-static",
         \\    "interface": { "type": "macvlan", "master": "eth0" },
-        \\    "ipam": { "type": "static" },
-        \\    "acl": []
+        \\    "ipam": { "type": "static" }
         \\}
     ;
 
@@ -406,8 +323,7 @@ test "DHCP IPAM with daemon_socket_path" {
         \\    "ipam": {
         \\        "type": "dhcp",
         \\        "daemon_socket_path": "/run/cni/dhcp.sock"
-        \\    },
-        \\    "acl": [{ "user": "root" }]
+        \\    }
         \\}
     ;
 
@@ -441,8 +357,7 @@ test "Static IPAM with dual-stack addresses" {
         \\            "domain": "example.com",
         \\            "search": ["example.com"]
         \\        }
-        \\    },
-        \\    "acl": [{ "user": "1000" }]
+        \\    }
         \\}
     ;
 
@@ -481,8 +396,7 @@ test "Static IPAM with minimal address (no gateway)" {
         \\    "ipam": {
         \\        "type": "static",
         \\        "addresses": [{ "address": "192.168.1.0/24" }]
-        \\    },
-        \\    "acl": [{ "user": "root" }]
+        \\    }
         \\}
     ;
 

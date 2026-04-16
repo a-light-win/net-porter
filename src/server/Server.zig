@@ -45,12 +45,26 @@ pub fn new(opts: Opts) !Server {
     var logger = @import("root").logger;
     logger.log_settings = conf.log;
 
-    var acl_manager = try AclManager.init(allocator, conf);
+    // Initialize AclManager and load ACL files from directory
+    var acl_manager = AclManager.init(allocator, conf.acl_dir);
     errdefer acl_manager.deinit();
+    acl_manager.startWatching(io);
 
-    const allowed_uids = try conf.resolveUserUids(allocator);
+    // Derive allowed UIDs from ACL data
+    const allowed_uids = acl_manager.getAllowedUids(io, allocator);
 
     var socket_manager = try SocketManager.init(io, allocator, allowed_uids);
+
+    // Insert ACL inotify fd into socket_manager's poll set (at index 1)
+    if (acl_manager.acl_inotify_fd) |acl_fd| {
+        try socket_manager.poll_fds.insert(socket_manager.allocator, 1, .{
+            .fd = acl_fd,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        });
+        socket_manager.num_special_fds = 2;
+    }
+
     socket_manager.scanExisting(io);
 
     return Server{
@@ -75,7 +89,7 @@ pub fn deinit(self: *Server) void {
 
 pub fn run(self: *Server) !void {
     const io = self.io;
-    log.info("Server started, monitoring /run/user/ for ACL users", .{});
+    log.info("Server started, monitoring /run/user/ and ACL directory", .{});
     const log_response = self.config.log.logEnabled(.debug, .traffic);
 
     var event_buf: [4096]u8 = undefined;
@@ -89,8 +103,19 @@ pub fn run(self: *Server) !void {
         const idx = poll_index orelse continue;
 
         if (idx == 0) {
-            // inotify event
+            // inotify event on /run/user/
             self.socket_manager.processInotifyEvents(&event_buf);
+            continue;
+        }
+
+        if (idx == 1 and self.acl_manager.acl_inotify_fd != null) {
+            // inotify event on acl_dir
+            const changed = self.acl_manager.processInotifyEvents(&event_buf);
+            if (changed) {
+                self.acl_manager.reload(io);
+                const new_uids = self.acl_manager.getAllowedUids(io, std.heap.page_allocator);
+                self.socket_manager.updateAllowedUids(new_uids);
+            }
             continue;
         }
 

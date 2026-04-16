@@ -6,9 +6,5 @@
   },
   "ipam": {
     "type": "dhcp"
-  },
-  "acl": [
-    { "user": "root" },
-    { "user": "1000" }
-  ]
+  }
 }
