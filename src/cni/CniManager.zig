@@ -1,8 +1,12 @@
 const std = @import("std");
+const json = std.json;
+const log = std.log.scoped(.cni_manager);
 const Cni = @import("Cni.zig");
 const CniConfig = @import("Cni.zig").CniConfig;
 const CniLoader = @import("loader.zig").CniLoader;
+const buildCniConfigFromResource = @import("Cni.zig").buildCniConfigFromResource;
 const Config = @import("../config.zig").Config;
+const Resource = @import("../config.zig").Resource;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 
@@ -22,9 +26,20 @@ pub fn init(io: std.Io, root_allocator: Allocator, config: Config) !CniManager {
     var arena = try ArenaAllocator.init(root_allocator);
     errdefer arena.deinit();
 
-    // Load all CNI configurations
+    // Load all CNI configurations from cni.d directory
     var loader = CniLoader.init(io, arena.allocator(), config.cni_dir, config.cni_plugin_dir);
-    const cni_configs = try loader.loadAll();
+    var cni_configs = try loader.loadAll();
+    errdefer cni_configs.deinit();
+
+    // Load legacy resources from config.json (backward compatibility)
+    if (config.resources) |resources| {
+        for (resources) |resource| {
+            const cni_config = try buildCniConfigFromResource(arena.allocator(), resource);
+            try cni_config.validate();
+            try cni_configs.put(try arena.allocator().dupe(u8, resource.name), cni_config);
+            log.info("Loaded legacy resource '{s}' from config.json", .{resource.name});
+        }
+    }
 
     return CniManager{
         .arena = arena,
@@ -42,9 +57,17 @@ pub fn deinit(self: *CniManager) void {
         plugin.*.deinit();
     }
     self.cni_plugins.deinit();
-    // Release CNI configs map (all memory is owned by arena, will be freed automatically)
+
+    // Release CNI configs
+    const allocator = self.arena.allocator();
+    var config_it = self.cni_configs.valueIterator();
+    while (config_it.next()) |cfg| {
+        var mut_cfg = cfg.*;
+        mut_cfg.deinit(allocator); // Explicitly free config memory
+    }
     self.cni_configs.deinit();
-    // Release arena (frees all allocated memory including configs)
+
+    // Release arena (frees any remaining allocated memory)
     self.arena.deinit();
 }
 

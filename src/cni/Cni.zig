@@ -9,10 +9,6 @@ const Responser = plugin.Responser;
 const managed_type = @import("managed_type.zig");
 const StateFile = @import("StateFile.zig");
 
-// Forward declarations
-const UserSession = opaque {};
-const UserAttachmentMap = std.AutoHashMap(u32, *UserSession);
-
 const Cni = @This();
 
 arena: ArenaAllocator,
@@ -48,6 +44,10 @@ pub fn initFromConfig(io: std.Io, root_allocator: Allocator, config: CniConfig, 
     const allocator = arena.allocator();
 
     // Parse ipam config from first plugin
+    if (config.plugins.array.items.len == 0) {
+        log.err("CNI config '{s}' has no plugins configured", .{config.name});
+        return error.PluginsIsEmpty;
+    }
     const first_plugin = config.plugins.array.items[0];
     const ipam = first_plugin.object.get("ipam") orelse {
         log.err("CNI config '{s}' missing ipam field in first plugin", .{config.name});
@@ -71,14 +71,14 @@ pub fn initFromConfig(io: std.Io, root_allocator: Allocator, config: CniConfig, 
         .io = io,
         .arena = arena,
         .cni_plugin_dir = cni_plugin_dir,
-        .config = config,
+        .config = try config.dupe(allocator), // Cni owns a deep copy of the config
         .ipam_config = ipam_config,
-        .user_sessions = UserAttachmentMap.init(allocator),
+        .user_sessions = std.AutoHashMap(u32, *UserSession).init(allocator),
     };
     return cni;
 }
 
-fn buildCniConfigFromResource(allocator: Allocator, resource: config_mod.Resource) !CniConfig {
+pub fn buildCniConfigFromResource(allocator: Allocator, resource: config_mod.Resource) !CniConfig {
     // Build ipam object — only "type" field; addresses/routes injected at runtime
     var ipam_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
     switch (resource.ipam) {
@@ -330,7 +330,29 @@ pub const CniConfig = struct {
         PluginsIsEmpty,
         PluginsIsNotArray,
         PluginIsNotMap,
+        MissingIpamConfig,
+        InvalidIpamConfig,
+        MissingIpamType,
+        InvalidIpamType,
+        UnsupportedIpamType,
     } || PluginConf.ValidateError;
+
+    /// Deep copy CniConfig to the given allocator
+    pub fn dupe(self: CniConfig, allocator: Allocator) !CniConfig {
+        return CniConfig{
+            .cniVersion = try allocator.dupe(u8, self.cniVersion),
+            .name = try allocator.dupe(u8, self.name),
+            .disableCheck = self.disableCheck,
+            .plugins = try self.plugins.dupe(allocator),
+        };
+    }
+
+    /// Free all allocated memory for this CniConfig
+    pub fn deinit(self: *CniConfig, allocator: Allocator) void {
+        allocator.free(self.cniVersion);
+        allocator.free(self.name);
+        self.plugins.deinit(allocator);
+    }
 
     pub fn validate(self: CniConfig) ValidateError!void {
         return switch (self.plugins) {
