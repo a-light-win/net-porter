@@ -24,6 +24,7 @@ netavark 会调用 `net-porter plugin`，plugin 通过对应用户的 socket 连
 - **单服务架构**：一个全局 root 服务服务所有用户，无需管理每用户服务实例
 - **基于 Grant 的 ACL 控制**：每资源级别的授权，支持用户/组匹配及可选的静态 IP 范围限制
 - **静态 IP 支持**：根据允许的 IP 范围校验用户请求的静态 IP —— 无需单独的 CNI 配置文件
+- **标准 CNI 配置**：支持通过 `cni.d/` 目录使用标准 CNI 1.0 格式配置文件，包括链式插件（详见 [CNI 配置指南](cni-config.md)）
 - **安全加固**：内核级身份认证、网络命名空间归属验证、默认拒绝策略
 - **DHCP 支持**：自动管理每用户 DHCP 服务实例
 - **零信任**：所有请求必须通过多级验证后才能执行
@@ -176,7 +177,10 @@ systemctl status net-porter
 ```
 
 ### 2. 配置网络资源
+
 编辑 `/etc/net-porter/config.json` 定义资源。每个资源将接口和 IPAM 合并在一处 —— 无需单独的 CNI 配置文件：
+
+> **新版本**：推荐使用 `/etc/net-porter/cni.d/` 目录放置标准 CNI 配置文件，支持标准 CNI 1.0 格式和链式插件。详见 [CNI 配置指南](cni-config.md)。
 
 ```json
 {
@@ -359,6 +363,7 @@ podman run -it --rm --network macvlan-net alpine ip addr
 | 选项 | 说明 | 默认值 |
 |------|------|--------|
 | `cni_plugin_dir` | CNI 插件二进制文件所在目录 | 自动检测（`/usr/lib/cni` 或 `/opt/cni/bin`） |
+| `cni_dir` | 标准 CNI 配置文件所在目录 | `{config_dir}/cni.d` |
 | `acl_dir` | ACL 文件所在目录 | `{config_dir}/acl.d` |
 | `log.level` | 日志级别：`debug`、`info`、`warn`、`error` | `info` |
 | `log.dump_env` | 调试用的环境信息导出 | 禁用 |

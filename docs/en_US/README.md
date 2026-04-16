@@ -27,6 +27,7 @@ if the user has the permission.
 - **Single Service Architecture**: One global root service for all users, no need to manage per-user services
 - **Grant-based ACL Control**: Per-resource grants with user/group matching and optional static IP range restrictions
 - **Static IP Support**: Validate user-requested static IPs against allowed ranges — no separate CNI config files needed
+- **Standard CNI Config**: Support standard CNI 1.0 format config files via `cni.d/` directory, including chained plugins (see [CNI Configuration Guide](cni-config.md))
 - **Security Hardened**: Kernel level identity authentication, netns ownership verification, default deny policy
 - **DHCP Support**: Automatically manage per-user DHCP service instances
 - **Zero Trust**: All requests must pass multi-level validation before execution
@@ -181,6 +182,8 @@ systemctl status net-porter
 
 ### 2. Configure network resource
 Edit `/etc/net-porter/config.json` to define resources. Each resource combines interface and IPAM in one place — no separate CNI config files needed:
+
+> **New**: The recommended approach is to place standard CNI config files in `/etc/net-porter/cni.d/`, supporting CNI 1.0 format and chained plugins. See [CNI Configuration Guide](cni-config.md).
 
 ```json
 {
@@ -363,6 +366,7 @@ When IPAM type is `static`, the caller must request a specific IP (via podman `-
 | Option | Description | Default |
 |--------|-------------|---------|
 | `cni_plugin_dir` | Directory containing CNI plugin binaries | auto-detected (`/usr/lib/cni` or `/opt/cni/bin`) |
+| `cni_dir` | Directory containing standard CNI config files | `{config_dir}/cni.d` |
 | `acl_dir` | Directory containing ACL files | `{config_dir}/acl.d` |
 | `log.level` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 | `log.dump_env` | Environment dump for debugging | disabled |
