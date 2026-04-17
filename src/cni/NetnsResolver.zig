@@ -69,23 +69,12 @@ fn readNetnsInodeViaRoot(allocator: Allocator, plugin_pid: std.posix.pid_t, netn
     const rc = linux.readlink(full_path, &buf, buf.len);
     if (rc < 0) {
         const err = std.posix.errno(rc);
+        log.warn("readlink(\"{s}\") failed: {s} (raw_netns=\"{s}\", plugin_pid={d})", .{ full_path, @tagName(err), netns_path, plugin_pid });
         switch (err) {
-            .NOENT, .NOTDIR => {
-                log.warn("Netns path not found in plugin namespace: {s}", .{full_path});
-                return error.NetnsNotFound;
-            },
-            .INVAL => {
-                log.warn("Netns path is not a symlink (possibly bind-mounted): {s}", .{full_path});
-                return error.NetnsNotAccessible;
-            },
-            .ACCES => {
-                log.warn("Permission denied reading netns: {s}", .{full_path});
-                return error.NetnsNotAccessible;
-            },
-            else => {
-                log.warn("Failed to readlink {s}: {s}", .{ full_path, @tagName(err) });
-                return error.NetnsNotAccessible;
-            },
+            .NOENT, .NOTDIR => return error.NetnsNotFound,
+            .INVAL => return error.NetnsNotAccessible,
+            .ACCES => return error.NetnsNotAccessible,
+            else => return error.NetnsNotAccessible,
         }
     }
     const len: usize = @intCast(rc);
@@ -95,7 +84,10 @@ fn readNetnsInodeViaRoot(allocator: Allocator, plugin_pid: std.posix.pid_t, netn
     const inode = buf[0..len];
 
     // Validate it looks like a netns inode: "net:[<number>]"
-    if (!std.mem.startsWith(u8, inode, "net:[")) return error.InvalidNetnsInode;
+    if (!std.mem.startsWith(u8, inode, "net:[")) {
+        log.warn("readlink(\"{s}\") returned unexpected format: {s}", .{ full_path, inode });
+        return error.InvalidNetnsInode;
+    }
     if (inode[inode.len - 1] != ']') return error.InvalidNetnsInode;
 
     return try allocator.dupe(u8, inode);

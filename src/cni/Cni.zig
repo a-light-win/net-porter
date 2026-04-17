@@ -1088,7 +1088,7 @@ const Attachment = struct {
         const host_netns = netns_path: {
             if (request.netns) |raw_netns| {
                 break :netns_path NetnsResolver.resolve(tentative_allocator, request.process_id.?, raw_netns) catch |err| {
-                    log.warn("NetnsResolver failed, falling back to raw path: {s}", .{@errorName(err)});
+                    log.warn("NetnsResolver failed for plugin_pid={}, raw_netns={s}: {s} — falling back to raw path", .{ request.process_id.?, raw_netns, @errorName(err) });
                     break :netns_path raw_netns;
                 };
             } else {
@@ -1140,7 +1140,7 @@ const Attachment = struct {
         const host_netns = netns_path: {
             if (request.netns) |raw_netns| {
                 break :netns_path NetnsResolver.resolve(tentative_allocator, request.process_id.?, raw_netns) catch |err| {
-                    log.warn("NetnsResolver failed, falling back to raw path: {s}", .{@errorName(err)});
+                    log.warn("NetnsResolver failed for plugin_pid={}, raw_netns={s}: {s} — falling back to raw path", .{ request.process_id.?, raw_netns, @errorName(err) });
                     break :netns_path raw_netns;
                 };
             } else {
