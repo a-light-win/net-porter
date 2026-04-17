@@ -150,10 +150,6 @@ pub fn handle(self: *Handler) !void {
             }
         }
     };
-
-    if (self.responser.is_error) {
-        self.dumpEnv(tentative_allocator, request);
-    }
 }
 
 fn execAction(
@@ -265,104 +261,4 @@ fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !v
         });
         return error.IpNotAllowed;
     }
-}
-
-const dump_env_sh = @embedFile("files/dump_env.sh");
-
-fn dumpEnv(self: *Handler, allocator: std.mem.Allocator, request: plugin.Request) void {
-    const env_log = std.log.scoped(.dump_env);
-    const io = self.io;
-
-    const dump_env = self.config.log.dump_env;
-    if (!dump_env.enabled) {
-        return;
-    }
-
-    switch (request.request) {
-        .network => return,
-        .exec => {},
-    }
-
-    // Ensure the path of dump env exist
-    std.Io.Dir.cwd().createDirPath(io, dump_env.path) catch |err| {
-        env_log.warn(
-            "Failed to create dump env path {s}: {s}",
-            .{ dump_env.path, @errorName(err) },
-        );
-    };
-
-    var child = std.process.spawn(io, .{
-        .argv = &[_][]const u8{"sh"},
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .pipe,
-    }) catch |err| {
-        env_log.warn("Failed to spawn child process: {s}", .{@errorName(err)});
-        return;
-    };
-
-    if (child.stdin) |stdin| {
-        var write_buffer: [4096]u8 = undefined;
-        var stdin_writer = stdin.writer(io, &write_buffer);
-        stdin_writer.interface.writeAll(dump_env_sh) catch |err| {
-            env_log.warn("Failed to prepare the dump script: {s}", .{@errorName(err)});
-        };
-        stdin_writer.end() catch {};
-        stdin.close(io);
-        child.stdin = null;
-    }
-
-    const exec_request = request.requestExec();
-    const file_path = std.fmt.allocPrintSentinel(
-        allocator,
-        "{s}/{s}-{s}.log",
-        .{
-            dump_env.path,
-            exec_request.container_name,
-            exec_request.container_id,
-        },
-        0,
-    ) catch unreachable;
-    defer allocator.free(file_path);
-    env_log.info("Dumping env to {s}", .{file_path});
-
-    const file = std.Io.Dir.cwd().createFile(io, file_path, .{}) catch |err| {
-        env_log.warn("Failed to create dump env file {s}: {s}", .{ file_path, @errorName(err) });
-        return;
-    };
-    defer file.close(io);
-    file.setPermissions(io, @enumFromInt(0o640)) catch |err| {
-        env_log.warn("Failed to chmod the file {s}: {s}", .{ file_path, @errorName(err) });
-    };
-
-    const dump_stdout = std.Thread.spawn(.{}, dumpToFile, .{ io, allocator, child.stdout.?, file }) catch |err| {
-        env_log.warn("Failed to spawn thread: {s}", .{@errorName(err)});
-        return;
-    };
-    defer dump_stdout.join();
-
-    const dump_stderr = std.Thread.spawn(.{}, dumpToFile, .{ io, allocator, child.stderr.?, file }) catch |err| {
-        env_log.warn("Failed to spawn thread: {s}", .{@errorName(err)});
-        return;
-    };
-    defer dump_stderr.join();
-
-    _ = child.wait(io) catch |err| {
-        env_log.warn("Failed to wait child process: {s}", .{@errorName(err)});
-    };
-}
-
-fn dumpToFile(io: std.Io, allocator: std.mem.Allocator, in: std.Io.File, out: std.Io.File) void {
-    _ = allocator;
-    const env_log = std.log.scoped(.dump_env);
-
-    var read_buffer: [4096]u8 = undefined;
-    var write_buffer: [4096]u8 = undefined;
-    var file_reader = in.reader(io, &read_buffer);
-    var file_writer = out.writer(io, &write_buffer);
-
-    _ = file_reader.interface.stream(&file_writer.interface, .unlimited) catch |err| {
-        env_log.warn("Failed to dump env: {s}", .{@errorName(err)});
-    };
-    file_writer.end() catch {};
 }

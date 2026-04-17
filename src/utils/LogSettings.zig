@@ -6,17 +6,11 @@ const ScopeLog = struct {
     level: std.log.Level,
 };
 
-const EnvLog = struct {
-    enabled: bool = false,
-    path: []const u8 = "/var/log/net-porter/env",
-};
-
 level: std.log.Level = .info,
 scope_levels: []const ScopeLog = &[_]ScopeLog{
     // Do not output request and response logs
     .{ .scope = "traffic", .level = .warn },
 },
-dump_env: EnvLog = .{},
 
 pub inline fn logEnabled(
     settings: LogSettings,
