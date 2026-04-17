@@ -3,7 +3,6 @@ const json = std.json;
 const log = std.log.scoped(.cni);
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
-const config_mod = @import("../config.zig");
 const plugin = @import("../plugin.zig");
 const Responser = plugin.Responser;
 const managed_type = @import("managed_type.zig");
@@ -15,17 +14,15 @@ arena: ArenaAllocator,
 io: std.Io,
 cni_plugin_dir: []const u8,
 config: CniConfig,
-ipam_config: config_mod.IpamConfig,
-
 mutex: std.Io.Mutex = .init,
 
-/// Initialize from standard CNI config
+/// Initialize from standard CNI config.
+/// Validates that the first plugin has a valid ipam configuration.
 pub fn initFromConfig(io: std.Io, root_allocator: Allocator, config: CniConfig, cni_plugin_dir: []const u8) !*Cni {
     var arena = try ArenaAllocator.init(root_allocator);
     errdefer arena.deinit();
-    const allocator = arena.allocator();
 
-    // Parse ipam config from first plugin
+    // Validate ipam config in first plugin
     if (config.plugins.array.items.len == 0) {
         log.err("CNI config '{s}' has no plugins configured", .{config.name});
         return error.PluginsIsEmpty;
@@ -39,23 +36,18 @@ pub fn initFromConfig(io: std.Io, root_allocator: Allocator, config: CniConfig, 
     const ipam_type = ipam.object.get("type") orelse return error.MissingIpamType;
     if (ipam_type != .string) return error.InvalidIpamType;
 
-    const ipam_config: config_mod.IpamConfig =
-        if (std.mem.eql(u8, ipam_type.string, "dhcp")) .{ .dhcp = .{} } else if (std.mem.eql(u8, ipam_type.string, "static")) blk: {
-            const parsed_static = try json.parseFromValue(config_mod.Resource.StaticConfig, allocator, ipam, .{ .ignore_unknown_fields = true });
-            break :blk .{ .static = parsed_static.value };
-        } else {
-            log.err("Unsupported ipam type '{s}' in config '{s}'", .{ ipam_type.string, config.name });
-            return error.UnsupportedIpamType;
-        };
+    // Validate ipam type is supported (dhcp or static)
+    if (!std.mem.eql(u8, ipam_type.string, "dhcp") and !std.mem.eql(u8, ipam_type.string, "static")) {
+        log.err("Unsupported ipam type '{s}' in config '{s}'", .{ ipam_type.string, config.name });
+        return error.UnsupportedIpamType;
+    }
 
-    const cni = try allocator.create(Cni);
-    // All config memory is owned by CniManager's arena, which will outlive Cni
+    const cni = try arena.allocator().create(Cni);
     cni.* = Cni{
         .io = io,
         .arena = arena,
         .cni_plugin_dir = cni_plugin_dir,
         .config = config,
-        .ipam_config = ipam_config,
     };
     return cni;
 }
@@ -94,7 +86,7 @@ pub fn setup(self: *Cni, tentative_allocator: Allocator, request: plugin.Request
     }
 
     // Create transient attachment for executing CNI plugins
-    var attachment = try Attachment.init(tentative_allocator, self.config, self.cni_plugin_dir, self.ipam_config);
+    var attachment = try Attachment.init(tentative_allocator, self.config, self.cni_plugin_dir);
     defer attachment.deinit();
 
     // Execute CNI ADD chain with prevResult chaining between plugins
@@ -134,7 +126,7 @@ pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Requ
     defer tentative_allocator.free(state_json);
 
     // Deserialize state into transient attachment
-    var attachment = try Attachment.deserializeState(tentative_allocator, state_json, self.cni_plugin_dir, self.ipam_config);
+    var attachment = try Attachment.deserializeState(tentative_allocator, state_json, self.cni_plugin_dir);
     defer attachment.deinit();
 
     // Execute CNI DEL chain (reverse order, all plugins get final ADD result as prevResult)
@@ -635,115 +627,74 @@ const PluginConf = struct {
         return std.mem.indexOf(u8, addr, ":") != null;
     }
 
-    fn findMatchingSubnet(ip: []const u8, addresses: []const config_mod.Resource.Address) ?usize {
+    /// Find the index of a template address entry matching the given IP's address family.
+    fn findMatchingSubnet(ip: []const u8, template_addrs: []const json.Value) ?usize {
         const ip_v6 = isIpv6(ip);
-        for (addresses, 0..) |addr, i| {
-            if (isIpv6(addr.address) == ip_v6) {
-                return i;
-            }
+        for (template_addrs, 0..) |addr_val, i| {
+            const addr_obj = switch (addr_val) {
+                .object => |o| o,
+                else => continue,
+            };
+            const addr_str = switch (addr_obj.get("address") orelse continue) {
+                .string => |s| s,
+                else => continue,
+            };
+            if (isIpv6(addr_str) == ip_v6) return i;
         }
         return null;
     }
 
-    fn setStaticIps(self: *PluginConf, ips: []const []const u8, ipam_config: config_mod.IpamConfig) !void {
+    /// Replace template addresses in the ipam config with actual IPs.
+    /// Routes, DNS, and other ipam fields are preserved from the CNI config as-is.
+    fn patchAddresses(self: *PluginConf, ips: []const []const u8) !void {
         const allocator = self.arena.?.allocator();
 
-        // Only applicable to static IPAM
-        const static_conf = switch (ipam_config) {
-            .static => |s| s,
-            .dhcp => return,
-        };
-
-        // Read original ipam type (read-only, shared)
+        // Read ipam from this plugin's own config JSON
         const ipam = self.conf.get("ipam") orelse return;
         const ipam_obj = switch (ipam) {
             .object => |obj| obj,
             else => return,
         };
+
+        // Only applicable to static IPAM
         const ipam_type = ipam_obj.get("type") orelse return;
-        const type_str = switch (ipam_type) {
-            .string => |s| s,
+        if (ipam_type != .string or !std.mem.eql(u8, "static", ipam_type.string)) return;
+
+        // Get template addresses from the CNI config's ipam
+        const template_addrs = switch (ipam_obj.get("addresses") orelse return) {
+            .array => |a| a.items,
             else => return,
         };
 
-        if (static_conf.addresses.len == 0) return error.InvalidSubnet;
-
-        // Build address objects for each requested IP, matched by address family
-        var addresses = json.Array.initCapacity(allocator, ips.len) catch unreachable;
+        // Build actual addresses by matching requested IPs to template subnets by address family
+        var new_addrs = try json.Array.initCapacity(allocator, ips.len);
         for (ips) |ip| {
-            const subnet_idx = findMatchingSubnet(ip, static_conf.addresses) orelse continue;
+            const idx = findMatchingSubnet(ip, template_addrs) orelse continue;
+            const tmpl_obj = template_addrs[idx].object;
+            const tmpl_addr = switch (tmpl_obj.get("address") orelse continue) {
+                .string => |s| s,
+                else => continue,
+            };
 
-            // Extract prefix length from matching subnet
-            const subnet = static_conf.addresses[subnet_idx].address;
-            const slash_pos = std.mem.lastIndexOf(u8, subnet, "/") orelse continue;
-            const prefix = subnet[slash_pos + 1 ..];
+            // Extract prefix from template address (e.g. "192.168.1.0/24" → "24")
+            const slash_pos = std.mem.lastIndexOf(u8, tmpl_addr, "/") orelse continue;
+            const prefix = tmpl_addr[slash_pos + 1 ..];
 
-            // Build address string with prefix (replace subnet with actual IP)
-            const address = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ip, prefix });
+            // Build actual address: "192.168.1.15/24"
+            const actual_addr = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ip, prefix });
 
-            // Build address object
             var addr_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
-            try addr_obj.put(allocator, "address", .{ .string = address });
-            if (static_conf.addresses[subnet_idx].gateway) |gw| {
-                try addr_obj.put(allocator, "gateway", .{ .string = gw });
+            try addr_obj.put(allocator, "address", .{ .string = actual_addr });
+            // Copy gateway from template if present
+            if (tmpl_obj.get("gateway")) |gw| {
+                try addr_obj.put(allocator, "gateway", gw);
             }
-            addresses.appendAssumeCapacity(.{ .object = addr_obj });
+            new_addrs.appendAssumeCapacity(.{ .object = addr_obj });
         }
 
-        // Build a fresh ipam ObjectMap to avoid mutating the shared original
-        var new_ipam = try json.ObjectMap.init(allocator, &.{}, &.{});
-        try new_ipam.put(allocator, "type", .{ .string = type_str });
-
-        // Set addresses
-        try new_ipam.put(allocator, "addresses", .{ .array = addresses });
-
-        // Set routes if present
-        if (static_conf.routes) |rts| {
-            var routes_arr = json.Array.initCapacity(allocator, rts.len) catch unreachable;
-            for (rts) |r| {
-                var route_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
-                try route_obj.put(allocator, "dst", .{ .string = r.dst });
-                if (r.gw) |gw| {
-                    try route_obj.put(allocator, "gw", .{ .string = gw });
-                }
-                if (r.priority) |p| {
-                    try route_obj.put(allocator, "priority", .{ .integer = @as(i64, @intCast(p)) });
-                }
-                routes_arr.appendAssumeCapacity(.{ .object = route_obj });
-            }
-            try new_ipam.put(allocator, "routes", .{ .array = routes_arr });
-        }
-
-        // Set dns if present
-        if (static_conf.dns) |dns_conf| {
-            var dns_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
-            if (dns_conf.nameservers) |ns| {
-                var ns_arr = json.Array.initCapacity(allocator, ns.len) catch unreachable;
-                for (ns) |n| {
-                    ns_arr.appendAssumeCapacity(.{ .string = n });
-                }
-                try dns_obj.put(allocator, "nameservers", .{ .array = ns_arr });
-            }
-            if (dns_conf.domain) |d| {
-                try dns_obj.put(allocator, "domain", .{ .string = d });
-            }
-            if (dns_conf.search) |s| {
-                var s_arr = json.Array.initCapacity(allocator, s.len) catch unreachable;
-                for (s) |item| {
-                    s_arr.appendAssumeCapacity(.{ .string = item });
-                }
-                try dns_obj.put(allocator, "search", .{ .array = s_arr });
-            }
-            if (dns_conf.options) |o| {
-                var o_arr = json.Array.initCapacity(allocator, o.len) catch unreachable;
-                for (o) |item| {
-                    o_arr.appendAssumeCapacity(.{ .string = item });
-                }
-                try dns_obj.put(allocator, "options", .{ .array = o_arr });
-            }
-            try new_ipam.put(allocator, "dns", .{ .object = dns_obj });
-        }
-
+        // Build new ipam: shadow-copy existing fields, replace only addresses
+        var new_ipam = try shadowCopy(allocator, ipam_obj);
+        try new_ipam.put(allocator, "addresses", .{ .array = new_addrs });
         try self.conf.put(allocator, "ipam", .{ .object = new_ipam });
     }
 
@@ -946,16 +897,14 @@ const Attachment = struct {
     arena: ArenaAllocator,
     exec_configs: std.ArrayList(PluginConf),
     cni_plugin_dir: []const u8,
-    ipam_config: config_mod.IpamConfig,
 
-    pub fn init(root_allocator: Allocator, cni_config: CniConfig, cni_plugin_dir: []const u8, ipam_config: config_mod.IpamConfig) !Attachment {
+    pub fn init(root_allocator: Allocator, cni_config: CniConfig, cni_plugin_dir: []const u8) !Attachment {
         const arena = try ArenaAllocator.init(root_allocator);
 
         var attachment = Attachment{
             .arena = arena,
             .exec_configs = std.ArrayList(PluginConf).empty,
             .cni_plugin_dir = cni_plugin_dir,
-            .ipam_config = ipam_config,
         };
         errdefer attachment.deinit();
 
@@ -995,8 +944,7 @@ const Attachment = struct {
         const cni_config = parsed_cni_config.value;
         defer parsed_cni_config.deinit();
 
-        const ipam: config_mod.IpamConfig = .{ .dhcp = .{} };
-        var attachment = try Attachment.init(allocator, cni_config, "", ipam);
+        var attachment = try Attachment.init(allocator, cni_config, "");
         defer attachment.deinit();
 
         try std.testing.expect(attachment.exec_configs.items.len == 1);
@@ -1060,7 +1008,7 @@ const Attachment = struct {
     }
 
     /// Deserialize attachment state from JSON read from disk.
-    fn deserializeState(allocator: Allocator, state_json: []const u8, cni_plugin_dir: []const u8, ipam_config: config_mod.IpamConfig) !Attachment {
+    fn deserializeState(allocator: Allocator, state_json: []const u8, cni_plugin_dir: []const u8) !Attachment {
         const parsed = try json.parseFromSlice(struct {
             version: i64,
             exec_configs: []const struct {
@@ -1075,7 +1023,6 @@ const Attachment = struct {
             .arena = arena,
             .exec_configs = std.ArrayList(PluginConf).empty,
             .cni_plugin_dir = cni_plugin_dir,
-            .ipam_config = ipam_config,
         };
 
         const arena_alloc = arena.allocator();
@@ -1146,7 +1093,7 @@ const Attachment = struct {
                 const exec_request = request.requestExec();
                 if (exec_request.network_options.static_ips) |static_ips| {
                     if (static_ips.len > 0) {
-                        try exec_config.setStaticIps(static_ips, self.ipam_config);
+                        try exec_config.patchAddresses(static_ips);
                     }
                 }
             }
@@ -1236,7 +1183,6 @@ const Attachment = struct {
             .arena = try ArenaAllocator.init(allocator),
             .cni_plugin_dir = "/path/to/cni/plugins",
             .exec_configs = std.ArrayList(PluginConf).empty,
-            .ipam_config = .{ .dhcp = .{} },
         };
         defer attachment.deinit();
         const bin = try attachment.cni_plugin_binary(allocator, "macvlan");
@@ -1304,17 +1250,31 @@ test {
     _ = PluginConf;
 }
 
-// -- Tests for setStaticIps --
+// -- Tests for patchAddresses --
 
-test "setStaticIps injects address with subnet prefix" {
+test "patchAddresses injects address with subnet prefix" {
     const allocator = std.testing.allocator;
     var arena = try ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    // Build a plugin conf with static ipam
+    // Build ipam with template address + routes
+    var addr_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try addr_obj.put(arena_alloc, "address", .{ .string = "192.168.1.0/24" });
+    try addr_obj.put(arena_alloc, "gateway", .{ .string = "192.168.1.1" });
+
+    var addrs = try json.Array.initCapacity(arena_alloc, 1);
+    addrs.appendAssumeCapacity(.{ .object = addr_obj });
+
+    var route_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try route_obj.put(arena_alloc, "dst", .{ .string = "0.0.0.0/0" });
+    var routes = try json.Array.initCapacity(arena_alloc, 1);
+    routes.appendAssumeCapacity(.{ .object = route_obj });
+
     var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
+    try ipam_obj.put(arena_alloc, "addresses", .{ .array = addrs });
+    try ipam_obj.put(arena_alloc, "routes", .{ .array = routes });
 
     var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
@@ -1324,41 +1284,39 @@ test "setStaticIps injects address with subnet prefix" {
 
     var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
 
-    const ipam_config: config_mod.IpamConfig = .{ .static = .{
-        .addresses = &[_]config_mod.Resource.Address{
-            .{ .address = "192.168.1.0/24", .gateway = "192.168.1.1" },
-        },
-        .routes = &[_]config_mod.Resource.Route{
-            .{ .dst = "0.0.0.0/0" },
-        },
-    } };
-
     const ips = &[_][]const u8{"192.168.1.15"};
-    try plugin_conf.setStaticIps(ips, ipam_config);
+    try plugin_conf.patchAddresses(ips);
 
-    // Verify addresses were injected
+    // Verify addresses were patched
     const result_ipam = plugin_conf.conf.get("ipam").?.object;
     const addresses = result_ipam.get("addresses").?.array;
     try std.testing.expectEqual(@as(usize, 1), addresses.items.len);
 
-    const addr_obj = addresses.items[0].object;
-    try std.testing.expectEqualSlices(u8, "192.168.1.15/24", addr_obj.get("address").?.string);
-    try std.testing.expectEqualSlices(u8, "192.168.1.1", addr_obj.get("gateway").?.string);
+    const result_addr = addresses.items[0].object;
+    try std.testing.expectEqualSlices(u8, "192.168.1.15/24", result_addr.get("address").?.string);
+    try std.testing.expectEqualSlices(u8, "192.168.1.1", result_addr.get("gateway").?.string);
 
-    // Verify routes were injected
-    const routes = result_ipam.get("routes").?.array;
-    try std.testing.expectEqual(@as(usize, 1), routes.items.len);
-    try std.testing.expectEqualSlices(u8, "0.0.0.0/0", routes.items[0].object.get("dst").?.string);
+    // Verify routes were preserved by shadowCopy
+    const result_routes = result_ipam.get("routes").?.array;
+    try std.testing.expectEqual(@as(usize, 1), result_routes.items.len);
+    try std.testing.expectEqualSlices(u8, "0.0.0.0/0", result_routes.items[0].object.get("dst").?.string);
 }
 
-test "setStaticIps with no gateway omits gateway field" {
+test "patchAddresses with no gateway omits gateway field" {
     const allocator = std.testing.allocator;
     var arena = try ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
+    var addr_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try addr_obj.put(arena_alloc, "address", .{ .string = "10.0.0.0/8" });
+
+    var addrs = try json.Array.initCapacity(arena_alloc, 1);
+    addrs.appendAssumeCapacity(.{ .object = addr_obj });
+
     var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
+    try ipam_obj.put(arena_alloc, "addresses", .{ .array = addrs });
 
     var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
@@ -1368,32 +1326,42 @@ test "setStaticIps with no gateway omits gateway field" {
 
     var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
 
-    const ipam_config: config_mod.IpamConfig = .{ .static = .{
-        .addresses = &[_]config_mod.Resource.Address{
-            .{ .address = "10.0.0.0/8" },
-        },
-    } };
-
     const ips = &[_][]const u8{"10.0.0.5"};
-    try plugin_conf.setStaticIps(ips, ipam_config);
+    try plugin_conf.patchAddresses(ips);
 
     const result_ipam = plugin_conf.conf.get("ipam").?.object;
-    const addr_obj = result_ipam.get("addresses").?.array.items[0].object;
-    try std.testing.expectEqualSlices(u8, "10.0.0.5/8", addr_obj.get("address").?.string);
-    try std.testing.expect(addr_obj.get("gateway") == null);
+    const result_addr = result_ipam.get("addresses").?.array.items[0].object;
+    try std.testing.expectEqualSlices(u8, "10.0.0.5/8", result_addr.get("address").?.string);
+    try std.testing.expect(result_addr.get("gateway") == null);
 
     // No routes configured — routes key should not exist
     try std.testing.expect(result_ipam.get("routes") == null);
 }
 
-test "setStaticIps with multiple routes injects all" {
+test "patchAddresses preserves multiple routes via shadowCopy" {
     const allocator = std.testing.allocator;
     var arena = try ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
+    var addr_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try addr_obj.put(arena_alloc, "address", .{ .string = "192.168.1.0/24" });
+    try addr_obj.put(arena_alloc, "gateway", .{ .string = "192.168.1.1" });
+    var addrs = try json.Array.initCapacity(arena_alloc, 1);
+    addrs.appendAssumeCapacity(.{ .object = addr_obj });
+
+    var route1 = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try route1.put(arena_alloc, "dst", .{ .string = "0.0.0.0/0" });
+    var route2 = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try route2.put(arena_alloc, "dst", .{ .string = "10.0.0.0/8" });
+    var routes = try json.Array.initCapacity(arena_alloc, 2);
+    routes.appendAssumeCapacity(.{ .object = route1 });
+    routes.appendAssumeCapacity(.{ .object = route2 });
+
     var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
+    try ipam_obj.put(arena_alloc, "addresses", .{ .array = addrs });
+    try ipam_obj.put(arena_alloc, "routes", .{ .array = routes });
 
     var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
@@ -1403,27 +1371,17 @@ test "setStaticIps with multiple routes injects all" {
 
     var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
 
-    const ipam_config: config_mod.IpamConfig = .{ .static = .{
-        .addresses = &[_]config_mod.Resource.Address{
-            .{ .address = "192.168.1.0/24", .gateway = "192.168.1.1" },
-        },
-        .routes = &[_]config_mod.Resource.Route{
-            .{ .dst = "0.0.0.0/0" },
-            .{ .dst = "10.0.0.0/8" },
-        },
-    } };
-
     const ips = &[_][]const u8{"192.168.1.50"};
-    try plugin_conf.setStaticIps(ips, ipam_config);
+    try plugin_conf.patchAddresses(ips);
 
     const result_ipam = plugin_conf.conf.get("ipam").?.object;
-    const routes = result_ipam.get("routes").?.array;
-    try std.testing.expectEqual(@as(usize, 2), routes.items.len);
-    try std.testing.expectEqualSlices(u8, "0.0.0.0/0", routes.items[0].object.get("dst").?.string);
-    try std.testing.expectEqualSlices(u8, "10.0.0.0/8", routes.items[1].object.get("dst").?.string);
+    const result_routes = result_ipam.get("routes").?.array;
+    try std.testing.expectEqual(@as(usize, 2), result_routes.items.len);
+    try std.testing.expectEqualSlices(u8, "0.0.0.0/0", result_routes.items[0].object.get("dst").?.string);
+    try std.testing.expectEqualSlices(u8, "10.0.0.0/8", result_routes.items[1].object.get("dst").?.string);
 }
 
-test "setStaticIps returns error when subnet is null" {
+test "patchAddresses with empty template addresses does nothing" {
     const allocator = std.testing.allocator;
     var arena = try ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -1431,6 +1389,7 @@ test "setStaticIps returns error when subnet is null" {
 
     var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
+    // No addresses key
 
     var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
@@ -1439,23 +1398,46 @@ test "setStaticIps returns error when subnet is null" {
     try conf.put(arena_alloc, "ipam", .{ .object = ipam_obj });
 
     var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
-
-    const ipam_config: config_mod.IpamConfig = .{ .static = .{
-        .addresses = &[_]config_mod.Resource.Address{},
-    } };
 
     const ips = &[_][]const u8{"192.168.1.50"};
-    try std.testing.expectError(error.InvalidSubnet, plugin_conf.setStaticIps(ips, ipam_config));
+    // No matching subnet — no addresses injected, no crash
+    try plugin_conf.patchAddresses(ips);
+
+    const result_ipam = plugin_conf.conf.get("ipam").?.object;
+    // addresses should not exist (no template, no match)
+    try std.testing.expect(result_ipam.get("addresses") == null);
 }
 
-test "setStaticIps with dual-stack IPv4 and IPv6" {
+test "patchAddresses with dual-stack IPv4 and IPv6" {
     const allocator = std.testing.allocator;
     var arena = try ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
+    var addr4 = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try addr4.put(arena_alloc, "address", .{ .string = "192.168.1.0/24" });
+    try addr4.put(arena_alloc, "gateway", .{ .string = "192.168.1.1" });
+
+    var addr6 = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try addr6.put(arena_alloc, "address", .{ .string = "2001:db8::/64" });
+    try addr6.put(arena_alloc, "gateway", .{ .string = "2001:db8::1" });
+
+    var addrs = try json.Array.initCapacity(arena_alloc, 2);
+    addrs.appendAssumeCapacity(.{ .object = addr4 });
+    addrs.appendAssumeCapacity(.{ .object = addr6 });
+
+    var route1 = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try route1.put(arena_alloc, "dst", .{ .string = "0.0.0.0/0" });
+    var route2 = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try route2.put(arena_alloc, "dst", .{ .string = "::/0" });
+    var routes = try json.Array.initCapacity(arena_alloc, 2);
+    routes.appendAssumeCapacity(.{ .object = route1 });
+    routes.appendAssumeCapacity(.{ .object = route2 });
+
     var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
+    try ipam_obj.put(arena_alloc, "addresses", .{ .array = addrs });
+    try ipam_obj.put(arena_alloc, "routes", .{ .array = routes });
 
     var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
@@ -1465,19 +1447,8 @@ test "setStaticIps with dual-stack IPv4 and IPv6" {
 
     var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
 
-    const ipam_config: config_mod.IpamConfig = .{ .static = .{
-        .addresses = &[_]config_mod.Resource.Address{
-            .{ .address = "192.168.1.0/24", .gateway = "192.168.1.1" },
-            .{ .address = "2001:db8::/64", .gateway = "2001:db8::1" },
-        },
-        .routes = &[_]config_mod.Resource.Route{
-            .{ .dst = "0.0.0.0/0" },
-            .{ .dst = "::/0" },
-        },
-    } };
-
     const ips = &[_][]const u8{ "192.168.1.15", "2001:db8::10" };
-    try plugin_conf.setStaticIps(ips, ipam_config);
+    try plugin_conf.patchAddresses(ips);
 
     const result_ipam = plugin_conf.conf.get("ipam").?.object;
     const addresses = result_ipam.get("addresses").?.array;
@@ -1491,21 +1462,29 @@ test "setStaticIps with dual-stack IPv4 and IPv6" {
     try std.testing.expectEqualSlices(u8, "2001:db8::10/64", addresses.items[1].object.get("address").?.string);
     try std.testing.expectEqualSlices(u8, "2001:db8::1", addresses.items[1].object.get("gateway").?.string);
 
-    // Routes injected
-    const routes = result_ipam.get("routes").?.array;
-    try std.testing.expectEqual(@as(usize, 2), routes.items.len);
-    try std.testing.expectEqualSlices(u8, "0.0.0.0/0", routes.items[0].object.get("dst").?.string);
-    try std.testing.expectEqualSlices(u8, "::/0", routes.items[1].object.get("dst").?.string);
+    // Routes preserved
+    const result_routes = result_ipam.get("routes").?.array;
+    try std.testing.expectEqual(@as(usize, 2), result_routes.items.len);
+    try std.testing.expectEqualSlices(u8, "0.0.0.0/0", result_routes.items[0].object.get("dst").?.string);
+    try std.testing.expectEqualSlices(u8, "::/0", result_routes.items[1].object.get("dst").?.string);
 }
 
-test "setStaticIps skips IP with no matching subnet family" {
+test "patchAddresses skips IP with no matching subnet family" {
     const allocator = std.testing.allocator;
     var arena = try ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
+    // Only IPv4 subnet configured
+    var addr4 = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try addr4.put(arena_alloc, "address", .{ .string = "192.168.1.0/24" });
+    try addr4.put(arena_alloc, "gateway", .{ .string = "192.168.1.1" });
+    var addrs = try json.Array.initCapacity(arena_alloc, 1);
+    addrs.appendAssumeCapacity(.{ .object = addr4 });
+
     var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
+    try ipam_obj.put(arena_alloc, "addresses", .{ .array = addrs });
 
     var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
@@ -1515,16 +1494,9 @@ test "setStaticIps skips IP with no matching subnet family" {
 
     var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
 
-    // Only IPv4 subnet configured
-    const ipam_config: config_mod.IpamConfig = .{ .static = .{
-        .addresses = &[_]config_mod.Resource.Address{
-            .{ .address = "192.168.1.0/24", .gateway = "192.168.1.1" },
-        },
-    } };
-
     // Request both IPv4 and IPv6, but only IPv4 has a matching subnet
     const ips = &[_][]const u8{ "192.168.1.15", "2001:db8::10" };
-    try plugin_conf.setStaticIps(ips, ipam_config);
+    try plugin_conf.patchAddresses(ips);
 
     const result_ipam = plugin_conf.conf.get("ipam").?.object;
     const addresses = result_ipam.get("addresses").?.array;
@@ -1533,14 +1505,21 @@ test "setStaticIps skips IP with no matching subnet family" {
     try std.testing.expectEqualSlices(u8, "192.168.1.15/24", addresses.items[0].object.get("address").?.string);
 }
 
-test "setStaticIps with IPv6 only" {
+test "patchAddresses with IPv6 only" {
     const allocator = std.testing.allocator;
     var arena = try ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
+    var addr6 = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try addr6.put(arena_alloc, "address", .{ .string = "2001:db8::/64" });
+    try addr6.put(arena_alloc, "gateway", .{ .string = "2001:db8::1" });
+    var addrs = try json.Array.initCapacity(arena_alloc, 1);
+    addrs.appendAssumeCapacity(.{ .object = addr6 });
+
     var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
+    try ipam_obj.put(arena_alloc, "addresses", .{ .array = addrs });
 
     var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
@@ -1550,14 +1529,8 @@ test "setStaticIps with IPv6 only" {
 
     var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
 
-    const ipam_config: config_mod.IpamConfig = .{ .static = .{
-        .addresses = &[_]config_mod.Resource.Address{
-            .{ .address = "2001:db8::/64", .gateway = "2001:db8::1" },
-        },
-    } };
-
     const ips = &[_][]const u8{"2001:db8::42"};
-    try plugin_conf.setStaticIps(ips, ipam_config);
+    try plugin_conf.patchAddresses(ips);
 
     const result_ipam = plugin_conf.conf.get("ipam").?.object;
     const addresses = result_ipam.get("addresses").?.array;
