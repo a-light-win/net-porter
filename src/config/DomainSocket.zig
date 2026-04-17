@@ -25,8 +25,11 @@ pub fn connect(io: std.Io, path: [:0]const u8) !std.Io.net.Stream {
 pub fn listen(io: std.Io, path: [:0]const u8, uid: std.posix.uid_t) !std.Io.net.Server {
     const address = try std.Io.net.UnixAddress.init(path);
 
-    // Remove stale socket file if it exists
-    std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    // Remove stale socket file if it exists.
+    // Use direct syscall (not io-layer) to ensure unlink completes
+    // synchronously before we call listen — the io layer may buffer
+    // operations, causing listen to see the stale file (AddressInUse).
+    _ = std.os.linux.unlink(path);
 
     const server = address.listen(io, .{}) catch |e| {
         log.err("Failed to listen on {s}: {s}", .{ path, @errorName(e) });
