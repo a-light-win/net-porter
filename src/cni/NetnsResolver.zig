@@ -67,8 +67,8 @@ fn readNetnsInodeViaRoot(allocator: Allocator, plugin_pid: std.posix.pid_t, netn
 
     var buf: [64]u8 = undefined;
     const rc = linux.readlink(full_path, &buf, buf.len);
-    if (rc < 0) {
-        const err = std.posix.errno(rc);
+    const err = std.posix.errno(rc);
+    if (err != .SUCCESS) {
         log.warn("readlink(\"{s}\") failed: {s} (raw_netns=\"{s}\", plugin_pid={d})", .{ full_path, @tagName(err), netns_path, plugin_pid });
         switch (err) {
             .NOENT, .NOTDIR => return error.NetnsNotFound,
@@ -99,7 +99,7 @@ fn findGlobalPidByNetnsInode(allocator: Allocator, target_inode: []const u8) !st
     var buf: [64]u8 = undefined;
 
     const proc_fd_rc = linux.openat(linux.AT.FDCWD, "/proc", .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
-    if (proc_fd_rc < 0) return error.ProcNotAccessible;
+    if (std.posix.errno(proc_fd_rc) != .SUCCESS) return error.ProcNotAccessible;
     const proc_fd: std.posix.fd_t = @intCast(proc_fd_rc);
     defer _ = linux.close(proc_fd);
 
@@ -140,7 +140,7 @@ fn findGlobalPidByNetnsInode(allocator: Allocator, target_inode: []const u8) !st
 fn readNsInodeFromPath(allocator: Allocator, path: [:0]const u8) ![]const u8 {
     var buf: [64]u8 = undefined;
     const rc = linux.readlink(path, &buf, buf.len);
-    if (rc < 0) {
+    if (std.posix.errno(rc) != .SUCCESS) {
         // Process may have exited between directory scan and readlink
         return error.ProcessGone;
     }
