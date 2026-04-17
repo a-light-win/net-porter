@@ -10,6 +10,8 @@ const StateFile = @import("StateFile.zig");
 
 const Cni = @This();
 
+const max_plugin_output: usize = 4 * 1024 * 1024; // 4 MB
+
 arena: ArenaAllocator,
 io: std.Io,
 cni_plugin_dir: []const u8,
@@ -874,13 +876,13 @@ const PluginConf = struct {
         if (process.stdout) |out_file| {
             var read_buffer: [4096]u8 = undefined;
             var file_reader = out_file.reader(io, &read_buffer);
-            const data = try file_reader.interface.allocRemaining(allocator, .unlimited);
+            const data = try file_reader.interface.allocRemaining(allocator, .limited(max_plugin_output));
             stdout = std.ArrayListUnmanaged(u8).fromOwnedSlice(data);
         }
         if (process.stderr) |err_file| {
             var read_buffer: [4096]u8 = undefined;
             var file_reader = err_file.reader(io, &read_buffer);
-            const data = try file_reader.interface.allocRemaining(allocator, .unlimited);
+            const data = try file_reader.interface.allocRemaining(allocator, .limited(max_plugin_output));
             stderr = std.ArrayListUnmanaged(u8).fromOwnedSlice(data);
         }
 
@@ -1168,6 +1170,9 @@ const Attachment = struct {
     }
 
     fn cni_plugin_binary(self: Attachment, allocator: Allocator, plugin_type: []const u8) ![]const u8 {
+        // Reject path traversal characters in plugin type
+        if (std.mem.indexOf(u8, plugin_type, "/") != null) return error.InvalidPluginType;
+        if (std.mem.indexOf(u8, plugin_type, "..") != null) return error.InvalidPluginType;
         const total_len = self.cni_plugin_dir.len + 1 + plugin_type.len;
         var bin = try allocator.alloc(u8, total_len);
         @memcpy(bin[0..self.cni_plugin_dir.len], self.cni_plugin_dir);
