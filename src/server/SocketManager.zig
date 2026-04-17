@@ -85,6 +85,7 @@ pub fn deinit(self: *SocketManager) void {
         std.Io.Dir.cwd().deleteFile(self.io, entry.path) catch {};
         self.allocator.free(entry.path);
     }
+    self.allowed_uids.deinit(self.allocator);
     self.entries.deinit(self.allocator);
     self.poll_fds.deinit(self.allocator);
 
@@ -210,6 +211,7 @@ pub fn updateAllowedUids(self: *SocketManager, new_uids: std.ArrayList(u32)) voi
         }
     }
 
+    self.allowed_uids.deinit(self.allocator);
     self.allowed_uids = new_uids;
 }
 
