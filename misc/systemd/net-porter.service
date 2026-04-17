@@ -11,7 +11,7 @@ RestartSec=10s
 # Security hardening
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/run /tmp
+ReadWritePaths=/run /run/user
 NoNewPrivileges=true
 ProtectKernelTunables=true
 ProtectControlGroups=true

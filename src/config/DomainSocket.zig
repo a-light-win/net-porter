@@ -26,13 +26,11 @@ pub fn listen(io: std.Io, path: [:0]const u8, uid: std.posix.uid_t) !std.Io.net.
     const address = try std.Io.net.UnixAddress.init(path);
 
     // Remove stale socket file if it exists.
-    // Use direct syscall to ensure unlink completes synchronously before listen.
-    const unlink_rc = std.os.linux.unlink(path);
-    if (unlink_rc < 0) {
-        const unlink_err = std.posix.errno(unlink_rc);
-        if (unlink_err != .NOENT) {
-            log.warn("unlink(\"{s}\") failed: {s}", .{ path, @tagName(unlink_err) });
-        }
+    // Note: std.os.linux.unlink returns usize (unsigned), so "< 0" never works.
+    // Use std.posix.errno() to properly detect errors.
+    if (std.Io.Dir.cwd().deleteFile(io, path)) {} else |err| switch (err) {
+        error.FileNotFound => {},
+        else => log.warn("Failed to remove stale socket {s}: {s}", .{ path, @errorName(err) }),
     }
 
     const server = address.listen(io, .{}) catch |e| {
