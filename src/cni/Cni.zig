@@ -8,6 +8,8 @@ const Responser = plugin.Responser;
 const managed_type = @import("managed_type.zig");
 const StateFile = @import("StateFile.zig");
 
+const NetnsResolver = @import("NetnsResolver.zig");
+
 const Cni = @This();
 
 const max_plugin_output: usize = 4 * 1024 * 1024; // 4 MB
@@ -851,12 +853,15 @@ const PluginConf = struct {
         return self.result != null;
     }
 
-    fn exec(self: *PluginConf, io: std.Io, tentative_allocator: Allocator, cmd: []const u8, pid: []const u8, env_map: std.process.Environ.Map) !std.process.Child.Term {
+    fn exec(self: *PluginConf, io: std.Io, tentative_allocator: Allocator, cmd: []const u8, env_map: std.process.Environ.Map) !std.process.Child.Term {
         _ = tentative_allocator;
         const allocator = self.arena.?.allocator();
 
+        // Execute CNI plugin directly in host namespace.
+        // No nsenter — the binary path is resolved from the host filesystem,
+        // and CNI_NETNS has been resolved to a host-valid path via NetnsResolver.
         var process = try std.process.spawn(io, .{
-            .argv = &[_][]const u8{ "nsenter", "-t", pid, "--mount", cmd },
+            .argv = &[_][]const u8{cmd},
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .pipe,
@@ -1077,8 +1082,21 @@ const Attachment = struct {
     }
 
     fn setup(self: *Attachment, io: std.Io, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
-        const env_map = try self.envMap(tentative_allocator, .ADD, request);
-        const pid = try std.fmt.allocPrint(tentative_allocator, "{d}", .{request.process_id.?});
+        // Resolve netns to a host-valid path before executing CNI plugins.
+        // This avoids entering the user's mount namespace (security: prevents
+        // binary replacement attacks via bind mounts).
+        const host_netns = netns_path: {
+            if (request.netns) |raw_netns| {
+                break :netns_path NetnsResolver.resolve(tentative_allocator, request.process_id.?, raw_netns) catch |err| {
+                    log.warn("NetnsResolver failed, falling back to raw path: {s}", .{@errorName(err)});
+                    break :netns_path raw_netns;
+                };
+            } else {
+                break :netns_path "/proc/self/ns/net";
+            }
+        };
+
+        const env_map = try self.envMap(tentative_allocator, .ADD, request, host_netns);
 
         for (self.exec_configs.items, 0..) |*exec_config, i| {
             // Inject prevResult from previous plugin's result (CNI spec chaining)
@@ -1100,7 +1118,7 @@ const Attachment = struct {
                 }
             }
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
-            const result = try exec_config.exec(io, tentative_allocator, cmd, pid, env_map);
+            const result = try exec_config.exec(io, tentative_allocator, cmd, env_map);
             if (result.exited != 0) {
                 log.warn("Setup {s} failed", .{request.request.exec.container_name});
                 try responseError(tentative_allocator, responser, exec_config.result.?);
@@ -1118,8 +1136,19 @@ const Attachment = struct {
 
     fn teardown(self: *Attachment, io: std.Io, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
         _ = responser;
-        const env_map = try self.envMap(tentative_allocator, .DEL, request);
-        const pid = try std.fmt.allocPrint(tentative_allocator, "{d}", .{request.process_id.?});
+        // Resolve netns to host-valid path (same as setup)
+        const host_netns = netns_path: {
+            if (request.netns) |raw_netns| {
+                break :netns_path NetnsResolver.resolve(tentative_allocator, request.process_id.?, raw_netns) catch |err| {
+                    log.warn("NetnsResolver failed, falling back to raw path: {s}", .{@errorName(err)});
+                    break :netns_path raw_netns;
+                };
+            } else {
+                break :netns_path "/proc/self/ns/net";
+            }
+        };
+
+        const env_map = try self.envMap(tentative_allocator, .DEL, request, host_netns);
 
         // Inject prevResult into ALL plugins (CNI spec: final ADD result)
         const final_add_result = self.finalResult(.last);
@@ -1135,7 +1164,7 @@ const Attachment = struct {
             }
 
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
-            const result = try exec_config.exec(io, tentative_allocator, cmd, pid, env_map);
+            const result = try exec_config.exec(io, tentative_allocator, cmd, env_map);
 
             if (result.exited != 0) {
                 log.warn(
@@ -1150,13 +1179,16 @@ const Attachment = struct {
         }
     }
 
-    fn envMap(self: Attachment, allocator: Allocator, cni_command: CniCommand, request: plugin.Request) !std.process.Environ.Map {
+    /// Build the CNI environment map for plugin execution.
+    /// `host_netns` is the netns path resolved to be valid from the host namespace
+    /// (via NetnsResolver), NOT the raw path from the client request.
+    fn envMap(self: Attachment, allocator: Allocator, cni_command: CniCommand, request: plugin.Request, host_netns: []const u8) !std.process.Environ.Map {
         const exec_request = request.requestExec();
 
         var env_map = std.process.Environ.Map.init(allocator);
         try env_map.put("CNI_COMMAND", @tagName(cni_command));
         try env_map.put("CNI_CONTAINERID", exec_request.container_id);
-        try env_map.put("CNI_NETNS", request.netns.?);
+        try env_map.put("CNI_NETNS", host_netns);
         try env_map.put("CNI_IFNAME", exec_request.network_options.interface_name);
         try env_map.put("CNI_PATH", self.cni_plugin_dir);
 
