@@ -96,6 +96,21 @@ pub fn handle(self: *Handler) !void {
         traffic_log.debug("{s}", .{raw_request});
     }
 
+    // Validate CNI identifiers for exec requests (path traversal prevention)
+    if (request.request == .exec) {
+        const exec_req = request.requestExec();
+        validateCniIdentifier(exec_req.container_id, "container_id") catch |err| {
+            log.err("Invalid container_id from uid={d}: {s}", .{ client_info.uid, @errorName(err) });
+            self.responser.writeError("Invalid container_id: {s}", .{@errorName(err)});
+            return;
+        };
+        validateCniIdentifier(exec_req.network_options.interface_name, "interface_name") catch |err| {
+            log.err("Invalid interface_name from uid={d}: {s}", .{ client_info.uid, @errorName(err) });
+            self.responser.writeError("Invalid interface_name: {s}", .{@errorName(err)});
+            return;
+        };
+    }
+
     self.authClient(client_info, &request) catch |err| {
         log.err("Auth failed for uid={d}, gid={d}, resource={s}: {s}", .{
             client_info.uid,
@@ -271,4 +286,61 @@ fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !v
         });
         return error.IpNotAllowed;
     }
+}
+
+/// Validate a CNI identifier (container_id or interface_name) against a whitelist.
+/// Only [a-zA-Z0-9\-_.] are allowed. Rejects empty strings, strings > 256 chars,
+/// and ".." sequences to prevent path traversal attacks.
+fn validateCniIdentifier(value: []const u8, field_name: []const u8) !void {
+    if (value.len == 0) return error.InvalidParameter;
+    if (value.len > 256) return error.InvalidParameter;
+    for (value) |c| {
+        switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.' => {},
+            else => {
+                log.warn("Invalid character in {s}: '{c}'", .{ field_name, c });
+                return error.InvalidParameter;
+            },
+        }
+    }
+    if (std.mem.indexOf(u8, value, "..") != null) return error.InvalidParameter;
+}
+
+test "validateCniIdentifier accepts valid identifiers" {
+    try validateCniIdentifier("abc123", "test_field");
+    try validateCniIdentifier("my-container-id", "test_field");
+    try validateCniIdentifier("eth0", "test_field");
+    try validateCniIdentifier("a.b_c-d", "test_field");
+    try validateCniIdentifier("container.123", "test_field");
+    try validateCniIdentifier(".", "test_field");
+}
+
+test "validateCniIdentifier rejects empty string" {
+    try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("", "test_field"));
+}
+
+test "validateCniIdentifier rejects string exceeding 256 chars" {
+    const long_id = "a" ** 257;
+    try std.testing.expectError(error.InvalidParameter, validateCniIdentifier(long_id, "test_field"));
+}
+
+test "validateCniIdentifier accepts exactly 256 chars" {
+    const max_id = "a" ** 256;
+    try validateCniIdentifier(max_id, "test_field");
+}
+
+test "validateCniIdentifier rejects path traversal characters" {
+    try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("abc/def", "test_field"));
+    try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("../etc/passwd", "test_field"));
+    try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("..", "test_field"));
+    try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("a..b", "test_field"));
+}
+
+test "validateCniIdentifier rejects special characters" {
+    try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("abc def", "test_field"));
+    try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("abc\x00def", "test_field"));
+    try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("abc;rm -rf /", "test_field"));
+    try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("abc|def", "test_field"));
+    try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("abc`def", "test_field"));
+    try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("abc$def", "test_field"));
 }
