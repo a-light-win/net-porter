@@ -14,7 +14,7 @@ ReadWritePaths=/run
 NoNewPrivileges=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
-RestrictNamespaces=true
+RestrictNamespaces=~net
 
 [Install]
 WantedBy=multi-user.target
