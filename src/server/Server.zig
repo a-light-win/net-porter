@@ -12,6 +12,8 @@ const SocketManager = @import("SocketManager.zig");
 const Responser = @import("../plugin/Responser.zig");
 const Server = @This();
 
+const max_concurrent_handlers: usize = 64;
+
 config: config_mod.Config,
 io: std.Io,
 acl_manager: AclManager,
@@ -19,6 +21,7 @@ cni_manager: CniManager,
 dhcp_manager: DhcpManager,
 socket_manager: SocketManager,
 managed_config: config_mod.ManagedConfig,
+active_handlers: std.atomic.Value(usize) = .init(0),
 
 pub const Opts = struct {
     config_path: ?[]const u8 = null,
@@ -130,6 +133,14 @@ pub fn run(self: *Server) !void {
         // Server socket event — accept connection
         var conn = self.socket_manager.accept(io, idx) orelse continue;
 
+        // Limit concurrent handlers to prevent resource exhaustion
+        if (self.active_handlers.fetchAdd(1, .acquire) >= max_concurrent_handlers) {
+            _ = self.active_handlers.fetchSub(1, .release);
+            log.warn("Too many concurrent connections (max={d}), dropping", .{max_concurrent_handlers});
+            conn.stream.close(io);
+            continue;
+        }
+
         var handler = Handler{
             .io = io,
             .arena = try ArenaAllocator.init(std.heap.page_allocator),
@@ -145,13 +156,17 @@ pub fn run(self: *Server) !void {
             },
         };
 
-        _ = std.Thread.spawn(.{}, handleRequests, .{&handler}) catch |e| {
+        _ = std.Thread.spawn(.{}, handleRequests, .{ &handler, &self.active_handlers }) catch |e| {
+            _ = self.active_handlers.fetchSub(1, .release);
             log.warn("Failed to spawn thread: {s}", .{@errorName(e)});
         };
     }
 }
 
-fn handleRequests(handler: *Handler) !void {
-    defer handler.deinit();
+fn handleRequests(handler: *Handler, active_handlers: *std.atomic.Value(usize)) !void {
+    defer {
+        handler.deinit();
+        _ = active_handlers.fetchSub(1, .release);
+    }
     try handler.handle();
 }
