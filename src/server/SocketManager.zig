@@ -134,7 +134,6 @@ pub fn addSocket(self: *SocketManager, uid: std.posix.uid_t) !void {
 
     const server = DomainSocket.listen(self.io, path, uid) catch |err| {
         log.warn("Failed to listen on {s}: {s}", .{ path, @errorName(err) });
-        self.allocator.free(path);
         return err;
     };
 
