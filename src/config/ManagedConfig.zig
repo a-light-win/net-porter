@@ -142,7 +142,6 @@ test "parseConfig() should successfully parse a valid config file" {
     const config = try parseConfig(io, allocator, "src/config/tests/config.json");
     defer config.deinit();
 
-    // Verify resources are parsed
-    try std.testing.expect(config.value.resources != null);
-    try std.testing.expectEqualSlices(u8, "macvlan-dhcp", config.value.resources.?[0].name);
+    // Config parsed successfully with default values
+    try std.testing.expectEqualSlices(u8, "", config.value.cni_dir);
 }

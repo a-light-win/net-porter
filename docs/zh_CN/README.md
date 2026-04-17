@@ -178,22 +178,18 @@ systemctl status net-porter
 
 ### 2. 配置网络资源
 
-编辑 `/etc/net-porter/config.json` 定义资源。每个资源将接口和 IPAM 合并在一处 —— 无需单独的 CNI 配置文件：
+在 `/etc/net-porter/cni.d/` 目录下创建 CNI 配置文件（支持标准 CNI 1.0 格式，详见 [CNI 配置指南](cni-config.md)）：
 
-> **新版本**：推荐使用 `/etc/net-porter/cni.d/` 目录放置标准 CNI 配置文件，支持标准 CNI 1.0 格式和链式插件。详见 [CNI 配置指南](cni-config.md)。
-
+`/etc/net-porter/cni.d/10-macvlan-dhcp.conflist`：
 ```json
 {
-  "resources": [
+  "cniVersion": "1.0.0",
+  "name": "macvlan-dhcp",
+  "plugins": [
     {
-      "name": "macvlan-dhcp",
-      "interface": {
-        "type": "macvlan",
-        "master": "eth0"
-      },
-      "ipam": {
-        "type": "dhcp"
-      }
+      "type": "macvlan",
+      "master": "eth0",
+      "ipam": { "type": "dhcp" }
     }
   ]
 }
@@ -246,34 +242,6 @@ podman run -it --rm --network macvlan-net alpine ip addr
 ```json
 {
   "cni_plugin_dir": "/usr/lib/cni",
-  "resources": [
-    {
-      "name": "macvlan-dhcp",
-      "interface": {
-        "type": "macvlan",
-        "master": "eth0"
-      },
-      "ipam": {
-        "type": "dhcp"
-      }
-    },
-    {
-      "name": "macvlan-static",
-      "interface": {
-        "type": "macvlan",
-        "master": "eth0",
-        "mode": "bridge",
-        "mtu": 9000
-      },
-      "ipam": {
-        "type": "static",
-        "addresses": [
-          { "address": "192.168.1.0/24", "gateway": "192.168.1.1" }
-        ],
-        "routes": [{ "dst": "0.0.0.0/0" }]
-      }
-    }
-  ],
   "log": {
     "level": "info",
     "dump_env": {
@@ -284,40 +252,9 @@ podman run -it --rm --network macvlan-net alpine ip addr
 }
 ```
 
+CNI 网络配置通过 `/etc/net-porter/cni.d/` 目录管理，详见 [CNI 配置指南](cni-config.md)。
+
 访问控制在 `/etc/net-porter/acl.d/` 目录中单独配置 —— 详见下文 [ACL 配置](#acl-配置)。
-
-### 资源字段
-
-| 字段 | 说明 | 必填 |
-|------|------|------|
-| `name` | 资源名称，用于创建 podman 网络时引用 | ✅ |
-| `interface` | 网络接口配置（见下文） | ✅ |
-| `ipam` | IP 地址管理配置（见下文） | ✅ |
-
-### 接口配置
-
-| 字段 | 说明 | 默认值 |
-|------|------|--------|
-| `type` | 接口类型：`macvlan` 或 `ipvlan` | — |
-| `master` | 要附加的宿主机物理接口 | — |
-| `mode` | macvlan 模式：`bridge`、`vepa`、`private`、`passthru`；ipvlan 模式：`l2`、`l3`、`l3s` | macvlan: `bridge`，ipvlan: `l2` |
-| `mtu` | 接口的 MTU 大小 | 未设置（使用内核默认值） |
-
-> ⚠️ **注意**：ipvlan L3/L3s 模式不支持 DHCP（无 ARP 层），请使用静态 IPAM。
-
-### IPAM 配置
-
-| 字段 | 说明 | 必填 |
-|------|------|------|
-| `type` | IPAM 类型：`dhcp` 或 `static` | ✅ |
-
-对于 `type: "static"`，还有以下字段：
-
-| 字段 | 说明 | 必填 |
-|------|------|------|
-| `addresses` | `{ "address": "<cidr>", "gateway": "<ip>" }` 条目的数组 | static: ✅ |
-| `routes` | `{ "dst": "<cidr>", "gw": "<ip>", "priority": <num> }` 路由数组 | static: 可选 |
-| `dns` | `{ "nameservers": [...], "domain": "...", "search": [...] }` | static: 可选 |
 
 ### ACL 配置
 
@@ -372,20 +309,24 @@ podman run -it --rm --network macvlan-net alpine ip addr
 
 ### 示例 1：多用户使用不同网络
 
-`/etc/net-porter/config.json`：
+`/etc/net-porter/cni.d/10-vlan-100.conflist`：
 ```json
 {
-  "resources": [
-    {
-      "name": "vlan-100",
-      "interface": { "type": "macvlan", "master": "eth0.100" },
-      "ipam": { "type": "dhcp" }
-    },
-    {
-      "name": "vlan-200",
-      "interface": { "type": "macvlan", "master": "eth0.200" },
-      "ipam": { "type": "dhcp" }
-    }
+  "cniVersion": "1.0.0",
+  "name": "vlan-100",
+  "plugins": [
+    { "type": "macvlan", "master": "eth0.100", "ipam": { "type": "dhcp" } }
+  ]
+}
+```
+
+`/etc/net-porter/cni.d/20-vlan-200.conflist`：
+```json
+{
+  "cniVersion": "1.0.0",
+  "name": "vlan-200",
+  "plugins": [
+    { "type": "macvlan", "master": "eth0.200", "ipam": { "type": "dhcp" } }
   ]
 }
 ```
@@ -424,13 +365,15 @@ podman run -it --rm --network macvlan-net alpine ip addr
 
 ### 示例 2：静态 IP 及每用户 IP 范围
 
-`/etc/net-porter/config.json`：
+`/etc/net-porter/cni.d/10-static-net.conflist`：
 ```json
 {
-  "resources": [
+  "cniVersion": "1.0.0",
+  "name": "static-net",
+  "plugins": [
     {
-      "name": "static-net",
-      "interface": { "type": "macvlan", "master": "eth0" },
+      "type": "macvlan",
+      "master": "eth0",
       "ipam": {
         "type": "static",
         "addresses": [
@@ -473,13 +416,16 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 
 ### 示例 3：IPvLAN L3 模式
 
-`/etc/net-porter/config.json`：
+`/etc/net-porter/cni.d/10-ipvlan-l3.conflist`：
 ```json
 {
-  "resources": [
+  "cniVersion": "1.0.0",
+  "name": "ipvlan-l3",
+  "plugins": [
     {
-      "name": "ipvlan-l3",
-      "interface": { "type": "ipvlan", "master": "eth0", "mode": "l3" },
+      "type": "ipvlan",
+      "master": "eth0",
+      "mode": "l3",
       "ipam": {
         "type": "static",
         "addresses": [
@@ -506,13 +452,17 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 
 ### 示例 4：IPvLAN L2 + DHCP
 
-`/etc/net-porter/config.json`：
+`/etc/net-porter/cni.d/10-ipvlan-dhcp.conflist`：
 ```json
 {
-  "resources": [
+  "cniVersion": "1.0.0",
+  "name": "ipvlan-dhcp",
+  "plugins": [
     {
-      "name": "ipvlan-dhcp",
-      "interface": { "type": "ipvlan", "master": "eth0", "mode": "l2", "mtu": 9000 },
+      "type": "ipvlan",
+      "master": "eth0",
+      "mode": "l2",
+      "mtu": 9000,
       "ipam": { "type": "dhcp" }
     }
   ]
@@ -529,20 +479,30 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 }
 ```
 
-### 示例 5：混合 macvlan 和 ipvlan 资源
+### 示例 5：混合 macvlan 和 ipvlan
 
-`/etc/net-porter/config.json`：
+`/etc/net-porter/cni.d/10-macvlan-dhcp.conflist`：
 ```json
 {
-  "resources": [
+  "cniVersion": "1.0.0",
+  "name": "macvlan-dhcp",
+  "plugins": [
+    { "type": "macvlan", "master": "eth0", "ipam": { "type": "dhcp" } }
+  ]
+}
+```
+
+`/etc/net-porter/cni.d/20-macvlan-static.conflist`：
+```json
+{
+  "cniVersion": "1.0.0",
+  "name": "macvlan-static",
+  "plugins": [
     {
-      "name": "macvlan-dhcp",
-      "interface": { "type": "macvlan", "master": "eth0" },
-      "ipam": { "type": "dhcp" }
-    },
-    {
-      "name": "macvlan-static",
-      "interface": { "type": "macvlan", "master": "eth0", "mode": "bridge", "mtu": 9000 },
+      "type": "macvlan",
+      "master": "eth0",
+      "mode": "bridge",
+      "mtu": 9000,
       "ipam": {
         "type": "static",
         "addresses": [
@@ -621,8 +581,9 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 #### 5. 找不到资源
 **错误**：`Resource 'xxx' not found in config`
 **解决方案**：
-- 检查 `/etc/net-porter/config.json` 中是否存在该资源
-- 确保 `name` 字段与你通过 `net_porter_resource` 传入的值匹配
+- 检查 `/etc/net-porter/cni.d/` 目录下是否有对应的 CNI 配置文件
+- 确保配置文件中的 `name` 字段与你通过 `net_porter_resource` 传入的值匹配
+- 确认文件后缀是 `.conf` 或 `.conflist`
 - 修改配置后重启服务
 
 ### 日志

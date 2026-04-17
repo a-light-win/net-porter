@@ -1,12 +1,9 @@
 const std = @import("std");
-const json = std.json;
 const log = std.log.scoped(.cni_manager);
 const Cni = @import("Cni.zig");
 const CniConfig = @import("Cni.zig").CniConfig;
 const CniLoader = @import("loader.zig").CniLoader;
-const buildCniConfigFromResource = @import("Cni.zig").buildCniConfigFromResource;
 const Config = @import("../config.zig").Config;
-const Resource = @import("../config.zig").Resource;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 
@@ -30,16 +27,6 @@ pub fn init(io: std.Io, root_allocator: Allocator, config: Config) !CniManager {
     var loader = CniLoader.init(io, arena.allocator(), config.cni_dir, config.cni_plugin_dir);
     var cni_configs = try loader.loadAll();
     errdefer cni_configs.deinit();
-
-    // Load legacy resources from config.json (backward compatibility)
-    if (config.resources) |resources| {
-        for (resources) |resource| {
-            const cni_config = try buildCniConfigFromResource(arena.allocator(), resource);
-            try cni_config.validate();
-            try cni_configs.put(try arena.allocator().dupe(u8, resource.name), cni_config);
-            log.info("Loaded legacy resource '{s}' from config.json", .{resource.name});
-        }
-    }
 
     return CniManager{
         .arena = arena,

@@ -1,5 +1,4 @@
 const std = @import("std");
-const Resource = @import("Resource.zig");
 const LogSettings = @import("../utils.zig").LogSettings;
 const Config = @This();
 
@@ -16,9 +15,6 @@ acl_dir: []const u8 = "",
 /// Defaults to {config_dir}/cni.d if not explicitly set.
 cni_dir: []const u8 = "",
 
-/// Legacy resource configurations (deprecated, use cni.d directory instead)
-resources: ?[]const Resource = null,
-
 log: LogSettings = .{},
 
 pub fn postInit(self: *Config, io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
@@ -34,19 +30,6 @@ pub fn postInit(self: *Config, io: std.Io, allocator: std.mem.Allocator, path: [
     self.setCNIPluginDir(io);
     self.setDefaultAclDir(allocator);
     self.setDefaultCniDir(allocator);
-
-    // Validate legacy resource configurations
-    if (self.resources) |resources| {
-        for (resources) |resource| {
-            resource.validate() catch |err| {
-                std.log.err(
-                    "Legacy resource '{s}': ipvlan L3/L3s mode does not support DHCP (no ARP layer). Use L2 mode or static IPAM instead.",
-                    .{resource.name},
-                );
-                return err;
-            };
-        }
-    }
 }
 
 const cni_plugin_search_paths = &[_][]const u8{

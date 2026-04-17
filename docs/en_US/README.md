@@ -181,22 +181,19 @@ systemctl status net-porter
 ```
 
 ### 2. Configure network resource
-Edit `/etc/net-porter/config.json` to define resources. Each resource combines interface and IPAM in one place — no separate CNI config files needed:
 
-> **New**: The recommended approach is to place standard CNI config files in `/etc/net-porter/cni.d/`, supporting CNI 1.0 format and chained plugins. See [CNI Configuration Guide](cni-config.md).
+Create CNI config files in `/etc/net-porter/cni.d/` (supports standard CNI 1.0 format, see [CNI Configuration Guide](cni-config.md)):
 
+`/etc/net-porter/cni.d/10-macvlan-dhcp.conflist`:
 ```json
 {
-  "resources": [
+  "cniVersion": "1.0.0",
+  "name": "macvlan-dhcp",
+  "plugins": [
     {
-      "name": "macvlan-dhcp",
-      "interface": {
-        "type": "macvlan",
-        "master": "eth0"
-      },
-      "ipam": {
-        "type": "dhcp"
-      }
+      "type": "macvlan",
+      "master": "eth0",
+      "ipam": { "type": "dhcp" }
     }
   ]
 }
@@ -249,34 +246,6 @@ You should see the macvlan interface with an IP address from your DHCP server.
 ```json
 {
   "cni_plugin_dir": "/usr/lib/cni",
-  "resources": [
-    {
-      "name": "macvlan-dhcp",
-      "interface": {
-        "type": "macvlan",
-        "master": "eth0"
-      },
-      "ipam": {
-        "type": "dhcp"
-      }
-    },
-    {
-      "name": "macvlan-static",
-      "interface": {
-        "type": "macvlan",
-        "master": "eth0",
-        "mode": "bridge",
-        "mtu": 9000
-      },
-      "ipam": {
-        "type": "static",
-        "addresses": [
-          { "address": "192.168.1.0/24", "gateway": "192.168.1.1" }
-        ],
-        "routes": [{ "dst": "0.0.0.0/0" }]
-      }
-    }
-  ],
   "log": {
     "level": "info",
     "dump_env": {
@@ -287,40 +256,9 @@ You should see the macvlan interface with an IP address from your DHCP server.
 }
 ```
 
+CNI network configuration is managed through the `/etc/net-porter/cni.d/` directory. See [CNI Configuration Guide](cni-config.md) for details.
+
 Access control is configured separately in the `/etc/net-porter/acl.d/` directory — see [ACL Configuration](#acl-configuration) below.
-
-### Resource Fields
-
-| Field | Description | Required |
-|-------|-------------|----------|
-| `name` | Resource name, used to reference this resource in podman network creation | ✅ |
-| `interface` | Network interface configuration (see below) | ✅ |
-| `ipam` | IP address management configuration (see below) | ✅ |
-
-### Interface Configuration
-
-| Field | Description | Default |
-|-------|-------------|---------|
-| `type` | Interface type: `macvlan` or `ipvlan` | — |
-| `master` | Host physical interface to attach to | — |
-| `mode` | macvlan mode: `bridge`, `vepa`, `private`, `passthru`; ipvlan mode: `l2`, `l3`, `l3s` | macvlan: `bridge`, ipvlan: `l2` |
-| `mtu` | MTU size for the interface | unset (use kernel default) |
-
-> ⚠️ **Note**: ipvlan L3/L3s modes do not support DHCP (no ARP layer). Use static IPAM with these modes.
-
-### IPAM Configuration
-
-| Field | Description | Required |
-|-------|-------------|----------|
-| `type` | IPAM type: `dhcp` or `static` | ✅ |
-
-For `type: "static"`, additional fields:
-
-| Field | Description | Required |
-|-------|-------------|----------|
-| `addresses` | Array of `{ "address": "<cidr>", "gateway": "<ip>" }` entries | static: ✅ |
-| `routes` | Array of `{ "dst": "<cidr>", "gw": "<ip>", "priority": <num> }` routes | static: optional |
-| `dns` | `{ "nameservers": [...], "domain": "...", "search": [...] }` | static: optional |
 
 ### ACL Configuration
 
@@ -375,20 +313,24 @@ When IPAM type is `static`, the caller must request a specific IP (via podman `-
 
 ### Example 1: Multiple users with different networks
 
-`/etc/net-porter/config.json`:
+`/etc/net-porter/cni.d/10-vlan-100.conflist`:
 ```json
 {
-  "resources": [
-    {
-      "name": "vlan-100",
-      "interface": { "type": "macvlan", "master": "eth0.100" },
-      "ipam": { "type": "dhcp" }
-    },
-    {
-      "name": "vlan-200",
-      "interface": { "type": "macvlan", "master": "eth0.200" },
-      "ipam": { "type": "dhcp" }
-    }
+  "cniVersion": "1.0.0",
+  "name": "vlan-100",
+  "plugins": [
+    { "type": "macvlan", "master": "eth0.100", "ipam": { "type": "dhcp" } }
+  ]
+}
+```
+
+`/etc/net-porter/cni.d/20-vlan-200.conflist`:
+```json
+{
+  "cniVersion": "1.0.0",
+  "name": "vlan-200",
+  "plugins": [
+    { "type": "macvlan", "master": "eth0.200", "ipam": { "type": "dhcp" } }
   ]
 }
 ```
@@ -432,13 +374,15 @@ podman network create -d net-porter -o net_porter_resource=vlan-100 vlan100
 
 ### Example 2: Static IP with per-user ranges
 
-`/etc/net-porter/config.json`:
+`/etc/net-porter/cni.d/10-static-net.conflist`:
 ```json
 {
-  "resources": [
+  "cniVersion": "1.0.0",
+  "name": "static-net",
+  "plugins": [
     {
-      "name": "static-net",
-      "interface": { "type": "macvlan", "master": "eth0" },
+      "type": "macvlan",
+      "master": "eth0",
       "ipam": {
         "type": "static",
         "addresses": [
@@ -481,13 +425,16 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 
 ### Example 3: IPvLAN with L3 mode
 
-`/etc/net-porter/config.json`:
+`/etc/net-porter/cni.d/10-ipvlan-l3.conflist`:
 ```json
 {
-  "resources": [
+  "cniVersion": "1.0.0",
+  "name": "ipvlan-l3",
+  "plugins": [
     {
-      "name": "ipvlan-l3",
-      "interface": { "type": "ipvlan", "master": "eth0", "mode": "l3" },
+      "type": "ipvlan",
+      "master": "eth0",
+      "mode": "l3",
       "ipam": {
         "type": "static",
         "addresses": [
@@ -514,13 +461,17 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 
 ### Example 4: IPvLAN L2 with DHCP
 
-`/etc/net-porter/config.json`:
+`/etc/net-porter/cni.d/10-ipvlan-dhcp.conflist`:
 ```json
 {
-  "resources": [
+  "cniVersion": "1.0.0",
+  "name": "ipvlan-dhcp",
+  "plugins": [
     {
-      "name": "ipvlan-dhcp",
-      "interface": { "type": "ipvlan", "master": "eth0", "mode": "l2", "mtu": 9000 },
+      "type": "ipvlan",
+      "master": "eth0",
+      "mode": "l2",
+      "mtu": 9000,
       "ipam": { "type": "dhcp" }
     }
   ]
@@ -537,20 +488,30 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 }
 ```
 
-### Example 5: Mixed macvlan and ipvlan resources
+### Example 5: Mixed macvlan and ipvlan
 
-`/etc/net-porter/config.json`:
+`/etc/net-porter/cni.d/10-macvlan-dhcp.conflist`:
 ```json
 {
-  "resources": [
+  "cniVersion": "1.0.0",
+  "name": "macvlan-dhcp",
+  "plugins": [
+    { "type": "macvlan", "master": "eth0", "ipam": { "type": "dhcp" } }
+  ]
+}
+```
+
+`/etc/net-porter/cni.d/20-macvlan-static.conflist`:
+```json
+{
+  "cniVersion": "1.0.0",
+  "name": "macvlan-static",
+  "plugins": [
     {
-      "name": "macvlan-dhcp",
-      "interface": { "type": "macvlan", "master": "eth0" },
-      "ipam": { "type": "dhcp" }
-    },
-    {
-      "name": "macvlan-static",
-      "interface": { "type": "macvlan", "master": "eth0", "mode": "bridge", "mtu": 9000 },
+      "type": "macvlan",
+      "master": "eth0",
+      "mode": "bridge",
+      "mtu": 9000,
       "ipam": {
         "type": "static",
         "addresses": [
@@ -629,8 +590,9 @@ See the [Migration Guide (0.3 → 0.4)](migration-guide-0.3-to-0.4.md) for upgra
 #### 5. Resource not found
 **Error**: `Resource 'xxx' not found in config`
 **Solutions**:
-- Check if the resource exists in `/etc/net-porter/config.json`
+- Check if a CNI config file for this network exists in `/etc/net-porter/cni.d/`
 - Ensure the `name` field matches what you pass via `net_porter_resource`
+- Confirm the file suffix is `.conf` or `.conflist`
 - Restart the service after modifying configuration
 
 ### Logs

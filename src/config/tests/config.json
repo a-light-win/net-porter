@@ -1,14 +1,1 @@
-{
-  "resources": [
-    {
-      "name": "macvlan-dhcp",
-      "interface": {
-        "type": "macvlan",
-        "master": "eth0"
-      },
-      "ipam": {
-        "type": "dhcp"
-      }
-    }
-  ]
-}
+{}

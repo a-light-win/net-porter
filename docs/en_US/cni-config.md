@@ -2,12 +2,7 @@
 
 > Version: v0.6.0+
 
-net-porter supports two ways to configure CNI networks:
-
-| Method | Location | Use case |
-|--------|----------|----------|
-| **Standard CNI config (recommended)** | `/etc/net-porter/cni.d/` | Standard CNI 1.0 format, including chained plugins |
-| **Inline resource config (legacy)** | `resources` field in `/etc/net-porter/config.json` | Backward compatibility for simple setups |
+net-porter manages CNI network configuration through the `/etc/net-porter/cni.d/` directory, supporting standard CNI 1.0 format (including chained plugins).
 
 ## Standard CNI Configuration
 
@@ -152,24 +147,6 @@ Files without `.conf` or `.conflist` suffixes are ignored (e.g., files with `.ex
   ]
 }
 ```
-
-## Legacy Resource Configuration (Backward Compatible)
-
-If you define a `resources` field in `config.json`, net-porter loads both `cni.d/` directory configs and `resources` entries. If both define a network with the same name, the `cni.d/` version takes priority.
-
-```json
-{
-  "resources": [
-    {
-      "name": "legacy-dhcp",
-      "interface": { "type": "macvlan", "master": "eth0" },
-      "ipam": { "type": "dhcp" }
-    }
-  ]
-}
-```
-
-> **Recommendation**: Use the `cni.d/` directory approach for new deployments. The `resources` field will be removed in a future version.
 
 ## ACL Association
 
