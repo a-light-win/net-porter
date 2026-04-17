@@ -91,17 +91,17 @@ fn setupInotify(self: *AclManager, io: std.Io) void {
     log.info("Watching ACL directory: {s}", .{self.acl_dir});
 }
 
-/// Load all ACL entries from files in the ACL directory.
-/// Replaces the current ACL set atomically.
-pub fn loadFromDir(self: *AclManager, io: std.Io) void {
+/// Scan ACL directory and build a new ACL list from all .json files.
+/// Caller is responsible for thread safety — must either hold the mutex
+/// or be in a single-threaded context (e.g. initial load).
+fn scanAclDir(self: *AclManager, io: std.Io) ?std.ArrayList(Acl) {
     const arena_allocator = self.arena.allocator();
 
-    // Build new ACL map from files
     var new_acls = std.ArrayList(Acl).empty;
 
     var dir = std.Io.Dir.cwd().openDir(io, self.acl_dir, .{ .iterate = true }) catch |err| {
-        log.warn("Failed to open ACL directory '{s}': {s}, skipping initial load", .{ self.acl_dir, @errorName(err) });
-        return;
+        log.warn("Failed to open ACL directory '{s}': {s}", .{ self.acl_dir, @errorName(err) });
+        return null;
     };
     defer dir.close(io);
 
@@ -117,6 +117,14 @@ pub fn loadFromDir(self: *AclManager, io: std.Io) void {
 
         self.loadAclFile(io, arena_allocator, &new_acls, file_path, entry.name);
     }
+
+    return new_acls;
+}
+
+/// Load all ACL entries from files in the ACL directory.
+/// Replaces the current ACL set atomically (acquires mutex internally).
+pub fn loadFromDir(self: *AclManager, io: std.Io) void {
+    const new_acls = self.scanAclDir(io) orelse return;
 
     // Atomically swap: lock, replace, unlock
     self.mutex.lock(io) catch return;
@@ -218,19 +226,33 @@ pub fn processInotifyEvents(self: *AclManager, event_buf: []u8) bool {
 }
 
 /// Reload ACLs from the directory. Called after inotify events.
+/// Thread-safe: acquires mutex before freeing old data to prevent
+/// use-after-free from concurrent handler threads.
 pub fn reload(self: *AclManager, io: std.Io) void {
     log.info("Reloading ACL directory: {s}", .{self.acl_dir});
 
-    // Clean up old arena and create a new one
+    // Acquire mutex BEFORE freeing old data — prevents concurrent handlers
+    // from accessing ACL data while we tear down and rebuild.
+    self.mutex.lock(io) catch return;
+    defer self.mutex.unlock(io);
+
+    // Properly clean up ACL objects while their memory is still valid
+    self.deinitAcls();
+
+    // Free all arena memory (ACL internals already deinited above)
     self.arena.deinit();
     self.arena = ArenaAllocator.init(self.allocator) catch {
         log.err("Failed to create arena for ACL reload", .{});
         return;
     };
-    // Reset acls to empty since old arena is gone — loadFromDir will rebuild
     self.acls = std.ArrayList(Acl).empty;
 
-    self.loadFromDir(io);
+    // Rebuild from directory (already under mutex — handler threads are blocked)
+    if (self.scanAclDir(io)) |new_acls| {
+        self.acls = new_acls;
+    }
+
+    log.info("Loaded {} ACL entries from {s}", .{ self.acls.items.len, self.acl_dir });
 }
 
 /// Get all allowed UIDs derived from current ACLs.
