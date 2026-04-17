@@ -217,9 +217,12 @@ pub fn updateAllowedUids(self: *SocketManager, new_uids: std.ArrayList(u32)) voi
 /// Caller provides a buffer for reading events.
 pub fn processInotifyEvents(self: *SocketManager, event_buf: []u8) void {
     while (true) {
-        const n = std.posix.read(self.inotify_fd, event_buf) catch |err| {
-            log.warn("Failed to read inotify events: {s}", .{@errorName(err)});
-            return;
+        const n = std.posix.read(self.inotify_fd, event_buf) catch |err| switch (err) {
+            error.WouldBlock => return,
+            else => {
+                log.warn("Failed to read inotify events: {s}", .{@errorName(err)});
+                return;
+            },
         };
         if (n == 0) return;
 
