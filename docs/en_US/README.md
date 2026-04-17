@@ -535,26 +535,29 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 }
 ```
 
-## Upgrade from v0.4
+## Upgrade from v0.5
 
-Version 0.5.0 moves access control from inline `acl` fields to a separate `acl.d/` directory. See the [Migration Guide (0.4 → 0.5)](migration-guide-0.4-to-0.5.md) for detailed instructions.
+Version 0.6.0 moves network resource configuration from the inline `resources` array to standard CNI 1.0 files in the `cni.d/` directory. See the [Migration Guide (0.5 → 0.6)](migration-guide-0.5-to-0.6.md) for detailed instructions.
 
 Quick steps:
 
-1. Create the ACL directory:
+1. Create CNI config files in `cni.d/` from your existing `resources` (see [CNI Configuration Guide](cni-config.md)):
    ```bash
-   mkdir -p /etc/net-porter/acl.d
+   mkdir -p /etc/net-porter/cni.d
    ```
-2. Create an ACL file for each user/group based on your existing `acl` grants (see [ACL Configuration](#acl-configuration))
-3. Remove `users` and `acl` fields from `/etc/net-porter/config.json`
-4. Restart the service:
+2. Remove the `resources` field from `/etc/net-porter/config.json`
+3. Restart the service:
    ```bash
    systemctl restart net-porter
    ```
 
+## Upgrade from v0.4
+
+See the [Migration Guide (0.4 → 0.5)](migration-guide-0.4-to-0.5.md) for upgrading from v0.4. Then follow the v0.5 → 0.6 migration above.
+
 ## Upgrade from v0.3 or earlier
 
-See the [Migration Guide (0.3 → 0.4)](migration-guide-0.3-to-0.4.md) for upgrading from v0.3 or earlier. Then follow the v0.4 → v0.5 migration above.
+See the [Migration Guide (0.3 → 0.4)](migration-guide-0.3-to-0.4.md) for upgrading from v0.3 or earlier. Then follow the v0.4 → 0.5 and v0.5 → 0.6 migrations in order.
 
 ## Troubleshooting
 

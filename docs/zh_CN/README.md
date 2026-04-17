@@ -526,26 +526,29 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 }
 ```
 
-## 从 v0.4 升级
+## 从 v0.5 升级
 
-0.5.0 版本将访问控制从内联 `acl` 字段迁移到独立的 `acl.d/` 目录。详见 [迁移指南（0.4 → 0.5）](migration-guide-0.4-to-0.5.md)。
+0.6.0 版本将网络资源配置从内联 `resources` 数组迁移到 `cni.d/` 目录下的标准 CNI 1.0 格式文件。详见 [迁移指南（0.5 → 0.6）](migration-guide-0.5-to-0.6.md)。
 
 快速步骤：
 
-1. 创建 ACL 目录：
+1. 根据现有的 `resources` 在 `cni.d/` 中创建 CNI 配置文件（详见 [CNI 配置指南](cni-config.md)）：
    ```bash
-   mkdir -p /etc/net-porter/acl.d
+   mkdir -p /etc/net-porter/cni.d
    ```
-2. 根据现有的 `acl` 授权为每个用户/组创建 ACL 文件（见 [ACL 配置](#acl-配置)）
-3. 从 `/etc/net-porter/config.json` 中删除 `users` 和 `acl` 字段
-4. 重启服务：
+2. 从 `/etc/net-porter/config.json` 中删除 `resources` 字段
+3. 重启服务：
    ```bash
    systemctl restart net-porter
    ```
 
+## 从 v0.4 升级
+
+详见 [迁移指南（0.4 → 0.5）](migration-guide-0.4-to-0.5.md) 升级到 v0.5，然后再按上述步骤迁移到 v0.6。
+
 ## 从 v0.3 或更早版本升级
 
-详见 [迁移指南（0.3 → 0.4）](migration-guide-0.3-to-0.4.md) 升级到 v0.4，然后再按上述步骤迁移到 v0.5。
+详见 [迁移指南（0.3 → 0.4）](migration-guide-0.3-to-0.4.md) 升级到 v0.4，然后依次按 0.4 → 0.5、0.5 → 0.6 的步骤迁移。
 
 ## 故障排查
 

@@ -5,6 +5,44 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.0] - 2025-04-17
+
+### 新增
+
+- **标准 CNI 配置目录（`cni.d/`）**：网络资源现在通过 `/etc/net-porter/cni.d/` 目录下的标准 CNI 1.0 格式文件（`.conf` 和 `.conflist`）进行配置，支持单插件和链式插件。详见 [CNI 配置指南](cni-config.md)。
+- **基于文件的 Attachment 持久化**：CNI attachment 状态现在持久化到磁盘 `/run/net-porter/{uid}/{container_id}_{ifname}.json`。这使得服务重启后仍能正确执行 teardown —— 此前重启的服务无法清理已有的 CNI attachment。
+- **链式插件 prevResult 支持**：CNI 插件现在按照 CNI 1.0 规范通过 `prevResult` 字段正确传递链式结果。后续插件接收前一个插件的输出，支持多插件工作流（如 macvlan + bandwidth + firewall）。
+- **CNI 配置加载校验**：插件二进制文件在加载时进行校验 —— 如果所需的插件缺失或不可执行，服务会报告明确的错误信息。
+- **安装包自动创建 `cni.d/` 目录**：安装包会自动创建 `/etc/net-porter/cni.d/` 目录并安装标准 CNI 配置示例文件（`00-example.conflist.example`），包含 DHCP、静态 IP 和链式插件的用法指南。
+- **配置文件大小限制**：CNI 配置文件限制为 1 MB，防止畸形或超大文件导致内存占用过高。
+- **新增 `cni_dir` 配置选项**：允许自定义 CNI 配置目录路径（默认为 `{config_dir}/cni.d`）。
+
+### 变更
+
+- **网络配置迁移至 `cni.d/` 目录**：`config.json` 中的 `resources` 数组不再使用。每个网络资源现在是 `cni.d/` 目录下的标准 CNI 配置文件。这是一个**破坏性变更** —— 详见 [迁移指南（0.5 → 0.6）](migration-guide-0.5-to-0.6.md)。
+- **CNI 配置格式改为标准 CNI 1.0**：自定义的 `interface` / `ipam` 结构替换为标准 CNI 字段（`type`、`master`、`mode`、`ipam` 等），直接位于插件配置内。CNI 配置中的未知字段会被静默忽略，提升了与标准 CNI 配置的兼容性。
+
+### 移除
+
+- **`config.json` 中的 `resources` 字段**：网络资源不再内联定义，改用 `cni.d/` 目录。
+
+### 修复
+
+- 增加配置文件大小限制（1 MB），防止畸形文件导致内存占用过高。
+
+### 内部优化
+
+- 将已弃用的 `std.fs` 和 `std.os.linux` 调用迁移至 Zig 0.16.0 的首选 API。
+- 修复 Zig 0.16.0 stdlib API 兼容性问题。
+- 修复 CNI 模块测试中的内存泄漏。
+- 移除无用的 `user_sessions` 代码。
+
+### 迁移
+
+详见 [迁移指南（0.5 → 0.6）](migration-guide-0.5-to-0.6.md)。
+
+---
+
 ## [0.5.0] - 2025-04-16
 
 ### 新增
@@ -100,6 +138,7 @@
 
 _初始公开发布，采用每用户服务架构。_
 
+[0.6.0]: https://github.com/a-light-win/net-porter/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/a-light-win/net-porter/compare/0.4.0...0.5.0
 [0.4.0]: https://github.com/a-light-win/net-porter/compare/0.3.4...0.4.0
 [0.3.4]: https://github.com/a-light-win/net-porter/compare/0.3.3...0.3.4

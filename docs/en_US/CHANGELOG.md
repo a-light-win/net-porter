@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2025-04-17
+
+### Added
+
+- **Standard CNI configuration directory (`cni.d/`)**: Network resources are now configured using standard CNI 1.0 format files (`.conf` and `.conflist`) in `/etc/net-porter/cni.d/`. Supports single-plugin and chained-plugin configurations. See [CNI Configuration Guide](cni-config.md) for details.
+- **File-based attachment persistence**: CNI attachment state is now persisted to disk at `/run/net-porter/{uid}/{container_id}_{ifname}.json`. This enables proper teardown after server restart — previously, a restarted server could not clean up existing CNI attachments.
+- **Chained plugin support with `prevResult`**: CNI plugins now properly chain results using the `prevResult` field per CNI 1.0 spec. Each subsequent plugin receives the previous plugin's output, enabling multi-plugin workflows (e.g., macvlan + bandwidth + firewall).
+- **CNI config loader validation**: Plugin binaries are validated at load time — the service reports clear errors if a required plugin is missing or not executable.
+- **Installer creates `cni.d/` directory**: The package now auto-creates `/etc/net-porter/cni.d/` and installs a standard CNI config example (`00-example.conflist.example`) with DHCP, static IP, and chained plugin usage guides.
+- **Config file size limit**: CNI config files are limited to 1 MB to prevent excessive memory usage from malformed or oversized files.
+- **New `cni_dir` configuration option**: Allows customizing the CNI config directory path (defaults to `{config_dir}/cni.d`).
+
+### Changed
+
+- **Network configuration moved to `cni.d/` directory**: The `resources` array in `config.json` is no longer used. Each network resource is now a standard CNI config file in `cni.d/`. This is a **breaking change** — see the [Migration Guide (0.5 → 0.6)](migration-guide-0.5-to-0.6.md).
+- **CNI config format is now standard CNI 1.0**: The custom `interface` / `ipam` structure has been replaced by standard CNI fields (`type`, `master`, `mode`, `ipam`, etc.) directly in the plugin config. Unknown fields in CNI configs are silently ignored for better compatibility with standard CNI configurations.
+
+### Removed
+
+- **`resources` field from `config.json`**: Network resources are no longer defined inline. Use the `cni.d/` directory instead.
+
+### Fixed
+
+- Added config file size limit (1 MB) to prevent excessive memory usage from malformed files.
+
+### Internal
+
+- Migrated deprecated `std.fs` and `std.os.linux` calls to preferred Zig 0.16.0 APIs.
+- Resolved Zig 0.16.0 stdlib API compatibility issues.
+- Fixed test memory leaks in CNI module.
+- Removed dead `user_sessions` code.
+
+### Migration
+
+See the [Migration Guide (0.5 → 0.6)](migration-guide-0.5-to-0.6.md) for step-by-step upgrade instructions.
+
+---
+
 ## [0.5.0] - 2025-04-16
 
 ### Added
@@ -100,6 +138,7 @@ See the [Migration Guide (0.4 → 0.5)](migration-guide-0.4-to-0.5.md) for step-
 
 _Initial public release with per-user service architecture._
 
+[0.6.0]: https://github.com/a-light-win/net-porter/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/a-light-win/net-porter/compare/0.4.0...0.5.0
 [0.4.0]: https://github.com/a-light-win/net-porter/compare/0.3.4...0.4.0
 [0.3.4]: https://github.com/a-light-win/net-porter/compare/0.3.3...0.3.4
