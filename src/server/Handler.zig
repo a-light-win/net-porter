@@ -8,6 +8,7 @@ const AclManager = @import("AclManager.zig");
 const DhcpManager = @import("../cni/DhcpManager.zig");
 const Cni = @import("../cni/Cni.zig");
 const CniManager = @import("../cni/CniManager.zig");
+const StateFile = @import("../cni/StateFile.zig");
 const Responser = plugin.Responser;
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const SocketManager = @import("SocketManager.zig");
@@ -172,6 +173,15 @@ fn execAction(
         .create => try cni.create(allocator, request, &self.responser),
         .setup => try cni.setup(allocator, request, &self.responser, caller_uid),
         .teardown => try cni.teardown(allocator, request, &self.responser, caller_uid),
+    }
+
+    // After teardown, stop DHCP service if no active attachments remain
+    if (request.action == .teardown) {
+        if (!self.acl_manager.isStaticResource(self.io, request.resource())) {
+            if (!StateFile.hasActiveAttachments(self.io, caller_uid)) {
+                self.dhcp_manager.stop(caller_uid);
+            }
+        }
     }
 }
 

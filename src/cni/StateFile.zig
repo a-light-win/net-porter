@@ -32,6 +32,20 @@ pub fn exists(allocator: Allocator, uid: u32, container_id: []const u8, ifname: 
     return statExists(path);
 }
 
+/// Check if a user has any active attachments by scanning their state directory.
+/// Returns true if at least one state file exists for the given uid.
+pub fn hasActiveAttachments(io: std.Io, uid: u32) bool {
+    var buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrint(&buf, "{s}/{d}", .{ default_base_dir, uid }) catch return false;
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+    var iter = dir.iterate();
+    while (iter.next(io) catch null) |entry| {
+        if (entry.kind == .file) return true;
+    }
+    return false;
+}
+
 /// Read the state file content for a given attachment.
 pub fn read(io: std.Io, allocator: Allocator, uid: u32, container_id: []const u8, ifname: []const u8) ![]const u8 {
     const path = try filePath(allocator, uid, container_id, ifname);

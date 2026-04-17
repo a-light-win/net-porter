@@ -54,3 +54,16 @@ pub fn ensureStarted(self: *DhcpManager, uid: u32) !void {
     }
     try result.value_ptr.*.*.ensureStarted();
 }
+
+/// Stop and remove the DHCP service for the given uid.
+/// Safe to call even if no service exists for this uid.
+pub fn stop(self: *DhcpManager, uid: u32) void {
+    self.mutex.lock(self.io) catch return;
+    defer self.mutex.unlock(self.io);
+
+    if (self.services.fetchRemove(uid)) |removed| {
+        removed.value.deinit();
+        self.allocator.destroy(removed.value);
+        log.info("Stopped DHCP service for uid={d}", .{uid});
+    }
+}
