@@ -41,7 +41,7 @@ pub fn initFromConfig(io: std.Io, root_allocator: Allocator, config: CniConfig, 
 
     const ipam_config: config_mod.IpamConfig =
         if (std.mem.eql(u8, ipam_type.string, "dhcp")) .{ .dhcp = .{} } else if (std.mem.eql(u8, ipam_type.string, "static")) blk: {
-            const parsed_static = try json.parseFromValue(config_mod.Resource.StaticConfig, allocator, ipam, .{});
+            const parsed_static = try json.parseFromValue(config_mod.Resource.StaticConfig, allocator, ipam, .{ .ignore_unknown_fields = true });
             break :blk .{ .static = parsed_static.value };
         } else {
             log.err("Unsupported ipam type '{s}' in config '{s}'", .{ ipam_type.string, config.name });
