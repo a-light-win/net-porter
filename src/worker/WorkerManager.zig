@@ -410,6 +410,9 @@ fn checkProcessUidByStat(pid: std.posix.pid_t, target_uid: u32) bool {
 /// Read /proc/<pid>/comm and check if the process name is "catatonit".
 /// The comm field comes from the kernel (task_struct->comm), set from the
 /// binary's filename — not spoofable via argv or command-line arguments.
+/// Uses readPositionalAll (pread) instead of Reader.allocRemaining to avoid
+/// the sendFile path which incorrectly returns EndOfStream for /proc files
+/// (stat reports size=0 for procfs).
 fn isCatatonit(io: std.Io, pid: std.posix.pid_t) bool {
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/comm", .{pid}) catch return false;
@@ -417,12 +420,11 @@ fn isCatatonit(io: std.Io, pid: std.posix.pid_t) bool {
     var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
     defer file.close(io);
 
-    var read_buf: [64]u8 = undefined;
-    var reader = file.reader(io, &read_buf);
-    const data = reader.interface.allocRemaining(std.heap.page_allocator, .limited(64)) catch return false;
-    defer std.heap.page_allocator.free(data);
+    var buf: [64]u8 = undefined;
+    const n = file.readPositionalAll(io, &buf, 0) catch return false;
+    if (n == 0) return false;
 
-    const name = std.mem.trim(u8, data, " \t\r\n");
+    const name = std.mem.trim(u8, buf[0..n], " \t\r\n");
     return std.mem.eql(u8, name, "catatonit");
 }
 
@@ -455,4 +457,22 @@ test "isCatatonit returns false for current process" {
     // The test runner is not catatonit
     const own_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
     try std.testing.expect(!isCatatonit(std.testing.io, own_pid));
+}
+
+test "isCatatonit reads /proc/<pid>/comm correctly (not empty)" {
+    const test_io = std.testing.io;
+    const own_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
+
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/comm", .{own_pid}) catch return error.Unexpected;
+
+    var file = std.Io.Dir.cwd().openFile(test_io, path, .{}) catch return error.Unexpected;
+    defer file.close(test_io);
+
+    var buf: [64]u8 = undefined;
+    const n = file.readPositionalAll(test_io, &buf, 0) catch return error.Unexpected;
+    try std.testing.expect(n > 0);
+
+    const comm = std.mem.trim(u8, buf[0..n], " \t\r\n");
+    try std.testing.expect(comm.len > 0);
 }
