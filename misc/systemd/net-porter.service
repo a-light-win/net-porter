@@ -10,12 +10,16 @@ RestartSec=10s
 
 # Security hardening
 ProtectSystem=strict
-ReadWritePaths=/run
+ReadWritePaths=/run /tmp
 # NoNewPrivileges=true blocks setns() which CNI plugins require
-# RestrictNamespaces=~net limits namespace operations to net only
+NoNewPrivileges=false
 ProtectKernelTunables=true
 ProtectControlGroups=true
-RestrictNamespaces=~net
+# Allow-list: only net and mnt namespace operations are permitted.
+# Worker needs: setns(CLONE_NEWNS), unshare(CLONE_NEWNS), and
+# CNI plugins need setns(CLONE_NEWNET).
+# Using allow-list (no ~ prefix) for explicit control.
+RestrictNamespaces=net mnt
 
 [Install]
 WantedBy=multi-user.target
