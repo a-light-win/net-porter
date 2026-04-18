@@ -307,11 +307,7 @@ pub const CniConfig = struct {
         );
         defer parsed_config.deinit();
 
-        const config = parsed_config.value;
-
-        config.validate() catch |err| {
-            try std.testing.expect(err == error.PluginsIsNotArray);
-        };
+        try std.testing.expectError(error.PluginsIsNotArray, parsed_config.value.validate());
     }
 
     test "validate() will fail if plugins is empty" {
@@ -330,10 +326,7 @@ pub const CniConfig = struct {
             .{},
         );
         defer parsed_config.deinit();
-        const config = parsed_config.value;
-        config.validate() catch |err| {
-            try std.testing.expect(err == error.PluginsIsEmpty);
-        };
+        try std.testing.expectError(error.PluginsIsEmpty, parsed_config.value.validate());
     }
 
     fn validatePlugin(self: CniConfig, p: json.Value) ValidateError!void {
@@ -370,10 +363,7 @@ pub const CniConfig = struct {
             .{},
         );
         defer parsed_config.deinit();
-        const config = parsed_config.value;
-        config.validate() catch |err| {
-            try std.testing.expect(err == error.PluginIsNotMap);
-        };
+        try std.testing.expectError(error.PluginIsNotMap, parsed_config.value.validate());
     }
 
     test "validate() will fail if the plugin type is missing" {
@@ -394,10 +384,7 @@ pub const CniConfig = struct {
             .{},
         );
         defer parsed_config.deinit();
-        const config = parsed_config.value;
-        config.validate() catch |err| {
-            try std.testing.expect(err == error.PluginTypeMissing);
-        };
+        try std.testing.expectError(error.PluginTypeMissing, parsed_config.value.validate());
     }
 
     test "validate() will fail if the plugin type is not string" {
@@ -420,10 +407,7 @@ pub const CniConfig = struct {
             .{},
         );
         defer parsed_config.deinit();
-        const config = parsed_config.value;
-        config.validate() catch |err| {
-            try std.testing.expect(err == error.PluginTypeNotString);
-        };
+        try std.testing.expectError(error.PluginTypeNotString, parsed_config.value.validate());
     }
 
     test "validate() will success if the plugin type is a string" {

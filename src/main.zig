@@ -4,9 +4,9 @@ const plugin = @import("plugin.zig");
 const server = @import("server.zig");
 const worker_mod = @import("worker.zig");
 const json = @import("json.zig");
-const network = @import("network.zig");
 const utils = @import("utils.zig");
 const Logger = utils.Logger;
+const ErrorMessage = utils.ErrorMessage;
 
 pub var logger = Logger.newLogger();
 
@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
         switch (err) {
             error.AlreadyHandled => {},
             else => {
-                const error_message = network.ErrorMessage.init(@errorName(err));
+                const error_message = ErrorMessage.init(@errorName(err));
                 try json.stringifyToStdout(init.io, error_message);
             },
         }
@@ -68,7 +68,6 @@ pub fn main(init: std.process.Init) !void {
 test {
     _ = @import("config.zig");
     _ = @import("json.zig");
-    _ = @import("network.zig");
     _ = @import("plugin.zig");
     _ = @import("server.zig");
     _ = @import("user.zig");
