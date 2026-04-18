@@ -285,7 +285,7 @@ fn resolveGroup(groupname: [:0]const u8) ?u32 {
     return user.getGid(groupname);
 }
 
-fn parseIpRanges(allocator: Allocator, ips: []const [:0]const u8) !std.ArrayList(IpRange) {
+pub fn parseIpRanges(allocator: Allocator, ips: []const [:0]const u8) !std.ArrayList(IpRange) {
     var ranges = std.ArrayList(IpRange).empty;
     errdefer ranges.deinit(allocator);
 

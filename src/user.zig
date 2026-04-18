@@ -26,6 +26,18 @@ pub fn getUid(username: [:0]const u8) ?std.posix.uid_t {
     return pwd.pw_uid;
 }
 
+pub fn getUsername(allocator: std.mem.Allocator, uid: std.posix.uid_t) ?[:0]const u8 {
+    var buf: [1024]u8 = undefined;
+    var pwd: c.struct_passwd = undefined;
+    var result: ?*c.struct_passwd = null;
+
+    const ret = c.getpwuid_r(uid, &pwd, &buf[0], buf.len, &result);
+    if (ret != 0 or result == null) return null;
+
+    const name = std.mem.sliceTo(pwd.pw_name, 0);
+    return allocator.dupeZ(u8, name) catch null;
+}
+
 pub fn getGid(groupname: [:0]const u8) ?std.posix.gid_t {
     var buf: [1024]u8 = undefined; // Buffer for `getgrnam_r`
     var grp: c.struct_group = undefined; // Struct to store the result

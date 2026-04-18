@@ -51,4 +51,5 @@ test {
     _ = @import("worker/Worker.zig");
     _ = @import("worker/WorkerManager.zig");
     _ = @import("worker/Handler.zig");
+    _ = @import("worker/AclManager.zig");
 }
