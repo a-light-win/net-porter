@@ -45,7 +45,3 @@ pub fn parseStrict(allocator: std.mem.Allocator, s: []const u8) json.ParseError(
 pub fn parseValue(comptime T: type, allocator: std.mem.Allocator, s: json.Value) json.ParseError(json.Scanner)!json.Parsed(T) {
     return json.parseFromValue(T, allocator, s, loose_parse_options);
 }
-
-pub fn parseValueStrict(comptime T: type, allocator: std.mem.Allocator, s: json.Value) json.ParseError(json.Scanner)!json.Parsed(T) {
-    return json.parseFromSlice(T, allocator, s, strict_parse_options);
-}
