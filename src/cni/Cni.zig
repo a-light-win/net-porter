@@ -1110,7 +1110,7 @@ const Attachment = struct {
 
     fn teardown(self: *Attachment, io: std.Io, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
         _ = responser;
-        // In the per-user daemon architecture, netns path is directly usable.
+        // Response is sent by Handler.handle() after this returns.
         const netns: []const u8 = request.netns orelse "/proc/self/ns/net";
 
         const env_map = try self.envMap(tentative_allocator, .DEL, request, netns);

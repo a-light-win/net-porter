@@ -163,7 +163,14 @@ pub fn handle(self: *Handler) !void {
                 std.log.warn("Trace: {any}", .{trace});
             }
         }
+        return;
     };
+
+    // Ensure a response is always sent (e.g., teardown succeeds without
+    // calling responser.write — the client is waiting for data).
+    if (!self.responser.done) {
+        self.responser.write("{}");
+    }
 }
 
 fn execAction(
