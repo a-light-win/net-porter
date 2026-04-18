@@ -188,6 +188,9 @@ pub fn run(self: *Worker) !void {
         _ = std.Thread.spawn(.{}, handleRequests, .{ &handler, &self.active_handlers }) catch |e| {
             _ = self.active_handlers.fetchSub(1, .release);
             log.warn("Failed to spawn handler thread: {s}", .{@errorName(e)});
+            handler.arena.deinit();
+            self.pageAllocator().destroy(conn);
+            continue;
         };
     }
 }
