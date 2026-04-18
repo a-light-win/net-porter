@@ -221,27 +221,37 @@ fn killWorker(self: *WorkerManager, entry: WorkerEntry) void {
 }
 
 /// Discover the catatonit PID for a given UID by scanning /proc directly.
-/// Reads /proc/<pid>/status for UID and /proc/<pid>/comm for the process name.
-/// This avoids trusting an external `pgrep` binary which could be spoofed.
+/// Uses statx on /proc/<pid> directories to check ownership (UID), and
+/// reads /proc/<pid>/comm for the process name (kernel-provided, not spoofable).
+/// This avoids trusting an external `pgrep` binary which could be replaced.
 fn discoverCatatonitPid(io: std.Io, uid: u32) ?std.posix.pid_t {
-    var proc_dir = std.Io.Dir.cwd().openDir(io, "/proc", .{ .iterate = true }) catch return null;
+    var proc_dir = std.Io.Dir.cwd().openDir(io, "/proc", .{ .iterate = true }) catch {
+        log.warn("discoverCatatonitPid: failed to open /proc", .{});
+        return null;
+    };
     defer proc_dir.close(io);
 
     var iter = proc_dir.iterate();
 
     while (iter.next(io) catch null) |entry| {
-        if (entry.kind != .directory) continue;
+        // NOTE: Do NOT check entry.kind — /proc may report DT_UNKNOWN for
+        // d_type, making entry.kind = .unknown and filtering out ALL entries.
+        // isAllDigits is sufficient to filter PID directory entries.
         if (!isAllDigits(entry.name)) continue;
 
         const pid = std.fmt.parseUnsigned(std.posix.pid_t, entry.name, 10) catch continue;
 
-        // Check UID from /proc/<pid>/status
-        if (!checkProcessUid(io, pid, uid)) continue;
+        // Check process UID via statx on /proc/<pid> directory
+        if (!checkProcessUidByStat(pid, uid)) continue;
 
         // Check process name from /proc/<pid>/comm (kernel-provided, not argv)
-        if (isCatatonit(io, pid)) return pid;
+        if (isCatatonit(io, pid)) {
+            log.info("discoverCatatonitPid: found catatonit pid={d} for uid={d}", .{ pid, uid });
+            return pid;
+        }
     }
 
+    log.debug("discoverCatatonitPid: no catatonit found for uid={d}", .{uid});
     return null;
 }
 
@@ -257,30 +267,17 @@ fn isAllDigits(s: []const u8) bool {
     return true;
 }
 
-/// Read /proc/<pid>/status and check if the real UID matches the target.
-fn checkProcessUid(io: std.Io, pid: std.posix.pid_t, target_uid: u32) bool {
-    var path_buf: [64]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/status", .{pid}) catch return false;
+/// Check process UID by statx()ing /proc/<pid> directory.
+/// In /proc, PID directories are owned by the process's effective UID.
+fn checkProcessUidByStat(pid: std.posix.pid_t, target_uid: u32) bool {
+    var path_buf: [64:0]u8 = undefined;
+    const path = std.fmt.bufPrint(path_buf[0..], "/proc/{d}", .{pid}) catch return false;
+    path_buf[path.len] = 0;
 
-    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
-    defer file.close(io);
-
-    var read_buf: [1024]u8 = undefined;
-    var reader = file.reader(io, &read_buf);
-    const data = reader.interface.allocRemaining(std.heap.page_allocator, .limited(1024)) catch return false;
-    defer std.heap.page_allocator.free(data);
-
-    // Parse "Uid:\t<real_uid>\t..." line — first value is the real UID
-    if (std.mem.indexOf(u8, data, "Uid:\t")) |idx| {
-        const rest = data[idx + "Uid:\t".len ..];
-        if (std.mem.indexOf(u8, rest, "\t")) |tab_idx| {
-            const uid_str = rest[0..tab_idx];
-            const process_uid = std.fmt.parseUnsigned(u32, uid_str, 10) catch return false;
-            return process_uid == target_uid;
-        }
-    }
-
-    return false;
+    var statx_buf: linux.Statx = undefined;
+    const rc = linux.statx(linux.AT.FDCWD, &path_buf, 0, .{ .UID = true }, &statx_buf);
+    if (rc != 0) return false;
+    return statx_buf.uid == target_uid;
 }
 
 /// Read /proc/<pid>/comm and check if the process name is "catatonit".
@@ -319,14 +316,12 @@ test "discoverCatatonitPid returns null for non-existent UID" {
     try std.testing.expect(result == null);
 }
 
-test "checkProcessUid reads /proc/self/status correctly" {
-    // Our own process should have a valid /proc/<pid>/status
+test "checkProcessUidByStat reads /proc/<pid> ownership" {
+    // Our own process should have a valid /proc/<pid> directory
     const own_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
-    // We can't easily know our own UID in test, but we can at least verify
-    // the function doesn't crash and returns a boolean
-    const io = std.testing.io;
-    _ = checkProcessUid(io, own_pid, 0); // Likely false unless running as root
-    _ = checkProcessUid(io, own_pid, std.math.maxInt(u32)); // Definitely false
+    // Verify the function doesn't crash and returns a boolean
+    _ = checkProcessUidByStat(own_pid, 0); // Likely false unless running as root
+    _ = checkProcessUidByStat(own_pid, std.math.maxInt(u32)); // Definitely false
 }
 
 test "isCatatonit returns false for current process" {
