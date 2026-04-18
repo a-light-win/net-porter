@@ -73,6 +73,7 @@ pub fn ensureWorker(self: *WorkerManager, uid: u32) !void {
     if (self.workers.get(uid)) |existing| {
         if (existing.catatonit_pid == catatonit_pid) {
             // Worker already running with correct catatonit PID
+            log.debug("Worker already running for uid={d} (pid={d})", .{ uid, existing.pid });
             return;
         }
         // Catatonit PID changed — restart worker

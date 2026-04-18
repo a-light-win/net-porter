@@ -140,10 +140,11 @@ pub fn run(self: *Server) !void {
 
 /// Synchronize workers with current ACL and /run/user/ state.
 /// Starts workers for UIDs that are allowed and have a directory.
-/// Stops workers for UIDs that are no longer allowed.
 fn syncWorkers(self: *Server) void {
     var active_uids = self.socket_manager.getActiveUids();
     defer active_uids.deinit(self.socket_manager.allocator);
+
+    log.info("syncWorkers: {} active UIDs", .{active_uids.items.len});
 
     for (active_uids.items) |uid| {
         self.worker_manager.ensureWorker(uid) catch |err| {

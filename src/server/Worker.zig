@@ -57,6 +57,7 @@ active_handlers: std.atomic.Value(usize) = .init(0),
 /// Initialize the worker. Performs all setup in the correct order:
 /// load config → create socket → namespace setup → init subsystems.
 pub fn new(opts: Opts) !Worker {
+    log.info("Worker initializing: uid={?d} catatonit_pid={?d} config={s}", .{ opts.uid, opts.catatonit_pid, opts.config_path orelse "(default)" });
     const io = opts.io orelse return error.IoNotInitialized;
     const uid = opts.uid orelse return error.MissingUid;
     const catatonit_pid = opts.catatonit_pid orelse return error.MissingCatatonitPid;
