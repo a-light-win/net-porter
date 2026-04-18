@@ -97,12 +97,10 @@ fn isAlive(self: DhcpService) bool {
 
 fn stop(self: *DhcpService) void {
     if (self.process) |*process| {
-        // Send SIGTERM for graceful shutdown.
-        // kill() may internally reap the child via waitpid().
+        // kill() sends SIGTERM, waits for exit, reaps the child, and
+        // sets child.id = null. In Zig 0.16.0, calling wait() after kill()
+        // would panic because wait() asserts child.id != null.
         process.kill(self.io);
-        // wait() reaps the child; if kill() already reaped it, this is a no-op
-        // or returns an error — either way, swallow it.
-        _ = process.wait(self.io) catch {};
         self.process = null;
     }
 }
