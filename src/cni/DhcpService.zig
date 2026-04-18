@@ -97,11 +97,12 @@ fn isAlive(self: DhcpService) bool {
 
 fn stop(self: *DhcpService) void {
     if (self.process) |*process| {
+        // Send SIGTERM for graceful shutdown.
+        // kill() may internally reap the child via waitpid().
         process.kill(self.io);
-        _ = process.wait(self.io) catch |err| {
-            log.warn("Failed to wait for DHCP service to stop: {s}", .{@errorName(err)});
-            return;
-        };
+        // wait() reaps the child; if kill() already reaped it, this is a no-op
+        // or returns an error — either way, swallow it.
+        _ = process.wait(self.io) catch {};
         self.process = null;
     }
 }
