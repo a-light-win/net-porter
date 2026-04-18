@@ -92,41 +92,83 @@ pub fn load(self: *WorkerAclManager) void {
 }
 
 /// Reload from disk (e.g. after inotify event).
+/// Uses two-phase swap: loads new ACLs into a fresh arena first, then atomically
+/// swaps under the lock. If loading fails, the old ACLs remain intact.
 pub fn reload(self: *WorkerAclManager) void {
     log.info("Reloading ACL for uid={d} (username={s})", .{ self.uid, self.username });
-    self.mutex.lock(self.io) catch return;
-    defer self.mutex.unlock(self.io);
 
-    self.deinitAcls();
-    self.arena.deinit();
-    self.arena = ArenaAllocator.init(self.allocator) catch return;
-    self.acls = .empty;
-    self.group_names = .empty;
+    // Phase 1: Build new ACLs in a separate arena (no lock needed — only reads
+    // immutable fields: acl_dir, username, uid, io).
+    var new_arena = ArenaAllocator.init(self.allocator) catch return;
+    errdefer new_arena.deinit();
 
-    self.doLoad();
+    const new_alloc = new_arena.allocator();
+    var new_acls: std.ArrayList(Acl) = .empty;
+    var new_group_names: std.ArrayList([]const u8) = .empty;
+
+    self.doLoadInto(new_alloc, &new_acls, &new_group_names) catch {
+        log.warn("ACL reload failed, keeping existing ACLs", .{});
+        new_arena.deinit();
+        return;
+    };
+
+    // Phase 2: Atomic swap under lock.
+    self.mutex.lock(self.io) catch {
+        new_arena.deinit();
+        return;
+    };
+
+    var old_arena = self.arena;
+    var old_acls = self.acls;
+    var old_group_names = self.group_names;
+
+    self.arena = new_arena;
+    self.acls = new_acls;
+    self.group_names = new_group_names;
+
+    self.mutex.unlock(self.io);
+
+    // Phase 3: Clean up old state (no lock — we hold the only reference now).
+    for (old_acls.items) |*acl| {
+        acl.deinit();
+    }
+    old_acls.deinit(old_arena.allocator());
+    old_group_names.deinit(old_arena.allocator());
+    old_arena.deinit();
 }
 
 fn doLoad(self: *WorkerAclManager) void {
     const arena_alloc = self.arena.allocator();
+    self.doLoadInto(arena_alloc, &self.acls, &self.group_names) catch {};
+}
 
+/// Load user ACL + referenced groups into the provided lists.
+/// Returns error if the user ACL file cannot be loaded (fatal).
+/// Group loading failures are logged but non-fatal (partial data is accepted).
+fn doLoadInto(
+    self: *WorkerAclManager,
+    arena_alloc: Allocator,
+    acls: *std.ArrayList(Acl),
+    group_names: *std.ArrayList([]const u8),
+) !void {
     // 1. Load user ACL file: <acl_dir>/<username>.json
     const user_path = std.fmt.allocPrint(arena_alloc, "{s}/{s}.json", .{ self.acl_dir, self.username }) catch return;
 
     const user_entry = self.parseAclFile(user_path) catch |err| {
         log.warn("Failed to load user ACL {s}: {s}", .{ user_path, @errorName(err) });
-        return;
+        return err;
     };
     defer user_entry.deinit();
 
     // 2. Add user grants as ACLs
-    self.addGrantsFromEntry(arena_alloc, user_entry.value) catch return;
+    self.addGrantsTo(arena_alloc, acls, user_entry.value) catch return;
 
     // 3. Load referenced groups
     if (user_entry.value.groups) |groups| {
         for (groups) |group_name| {
             // Store the group name for later reference
             const name_copy = arena_alloc.dupe(u8, group_name) catch continue;
-            self.group_names.append(arena_alloc, name_copy) catch continue;
+            group_names.append(arena_alloc, name_copy) catch continue;
 
             // Load group file: <acl_dir>/@<groupname>.json
             const group_path = std.fmt.allocPrint(arena_alloc, "{s}/@{s}.json", .{ self.acl_dir, group_name }) catch continue;
@@ -136,12 +178,12 @@ fn doLoad(self: *WorkerAclManager) void {
             };
             defer group_entry.deinit();
 
-            self.addGrantsFromEntry(arena_alloc, group_entry.value) catch continue;
+            self.addGrantsTo(arena_alloc, acls, group_entry.value) catch continue;
             log.info("Loaded group '@{s}': {} grants", .{ group_name, group_entry.value.grants.len });
         }
     }
 
-    log.info("Loaded ACL for uid={d}: {} grants, {} groups", .{ self.uid, self.acls.items.len, self.group_names.items.len });
+    log.info("Loaded ACL for uid={d}: {} grants, {} groups", .{ self.uid, acls.items.len, group_names.items.len });
 }
 
 fn parseAclFile(self: WorkerAclManager, path: []const u8) !std.json.Parsed(AclFile.Entry) {
@@ -159,7 +201,7 @@ fn parseAclFile(self: WorkerAclManager, path: []const u8) !std.json.Parsed(AclFi
     });
 }
 
-fn addGrantsFromEntry(self: *WorkerAclManager, arena_alloc: Allocator, entry: AclFile.Entry) !void {
+fn addGrantsTo(self: *WorkerAclManager, arena_alloc: Allocator, acls: *std.ArrayList(Acl), entry: AclFile.Entry) !void {
     for (entry.grants) |grant| {
         // Copy resource name into arena — parsed data will be freed by caller.
         const resource_name = try arena_alloc.dupe(u8, grant.resource);
@@ -169,7 +211,7 @@ fn addGrantsFromEntry(self: *WorkerAclManager, arena_alloc: Allocator, entry: Ac
             const ranges = try Acl.parseIpRanges(arena_alloc, ips);
             try acl.ip_ranges.put(self.uid, ranges);
         }
-        try self.acls.append(arena_alloc, acl);
+        try acls.append(arena_alloc, acl);
     }
 }
 
@@ -319,4 +361,103 @@ test "isRelevantFile rejects non-matching patterns" {
     try std.testing.expect(!isRelevantFile("alice", groups, "README.md"));
     try std.testing.expect(!isRelevantFile("alice", groups, "alice"));
     try std.testing.expect(!isRelevantFile("alice", groups, ""));
+}
+
+test "reload preserves existing ACLs when user file is removed" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Create temp ACL directory
+    var path_buf: [128]u8 = undefined;
+    const tmp_path = std.fmt.bufPrint(&path_buf, "/tmp/acl_reload_test_{d}", .{std.os.linux.getpid()}) catch return;
+
+    try std.Io.Dir.cwd().createDirPath(testing.io, tmp_path);
+    defer {
+        std.Io.Dir.cwd().deleteTree(testing.io, tmp_path) catch {};
+    }
+
+    // Write valid user ACL
+    var file_buf: [256]u8 = undefined;
+    const user_file = std.fmt.bufPrint(&file_buf, "{s}/testuser.json", .{tmp_path}) catch return;
+    const user_json =
+        \\{"grants":[{"resource":"tenant-a"}]}
+    ;
+    {
+        var file = std.Io.Dir.cwd().createFile(testing.io, user_file, .{}) catch return;
+        defer file.close(testing.io);
+        var write_buf: [4096]u8 = undefined;
+        var file_writer = file.writer(testing.io, &write_buf);
+        file_writer.interface.writeAll(user_json) catch return;
+        file_writer.end() catch return;
+    }
+
+    // Create manager and load
+    var mgr = init(allocator, testing.io, tmp_path, "testuser", 1000);
+    defer mgr.deinit();
+    mgr.load();
+
+    // Verify ACLs loaded
+    try testing.expect(mgr.hasAnyPermission());
+    try testing.expect(mgr.isAllowed("tenant-a"));
+
+    // Remove the user file
+    std.Io.Dir.cwd().deleteFile(testing.io, user_file) catch return;
+
+    // Reload should fail but preserve old ACLs
+    mgr.reload();
+    try testing.expect(mgr.hasAnyPermission());
+    try testing.expect(mgr.isAllowed("tenant-a"));
+}
+
+test "reload swaps to new ACLs when user file changes" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var path_buf: [128]u8 = undefined;
+    const tmp_path = std.fmt.bufPrint(&path_buf, "/tmp/acl_reload_swap_{d}", .{std.os.linux.getpid()}) catch return;
+
+    try std.Io.Dir.cwd().createDirPath(testing.io, tmp_path);
+    defer {
+        std.Io.Dir.cwd().deleteTree(testing.io, tmp_path) catch {};
+    }
+
+    // Write initial user ACL
+    var file_buf: [256]u8 = undefined;
+    const user_file = std.fmt.bufPrint(&file_buf, "{s}/swapuser.json", .{tmp_path}) catch return;
+    const json_v1 =
+        \\{"grants":[{"resource":"tenant-old"}]}
+    ;
+    {
+        var file = std.Io.Dir.cwd().createFile(testing.io, user_file, .{}) catch return;
+        defer file.close(testing.io);
+        var write_buf: [4096]u8 = undefined;
+        var file_writer = file.writer(testing.io, &write_buf);
+        file_writer.interface.writeAll(json_v1) catch return;
+        file_writer.end() catch return;
+    }
+
+    var mgr = init(allocator, testing.io, tmp_path, "swapuser", 2000);
+    defer mgr.deinit();
+    mgr.load();
+
+    try testing.expect(mgr.isAllowed("tenant-old"));
+    try testing.expect(!mgr.isAllowed("tenant-new"));
+
+    // Overwrite with new ACL
+    const json_v2 =
+        \\{"grants":[{"resource":"tenant-new"}]}
+    ;
+    {
+        var file = std.Io.Dir.cwd().createFile(testing.io, user_file, .{}) catch return;
+        defer file.close(testing.io);
+        var write_buf: [4096]u8 = undefined;
+        var file_writer = file.writer(testing.io, &write_buf);
+        file_writer.interface.writeAll(json_v2) catch return;
+        file_writer.end() catch return;
+    }
+
+    mgr.reload();
+
+    try testing.expect(!mgr.isAllowed("tenant-old"));
+    try testing.expect(mgr.isAllowed("tenant-new"));
 }

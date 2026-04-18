@@ -73,4 +73,5 @@ test {
     _ = @import("user.zig");
     _ = @import("utils.zig");
     _ = @import("cni.zig");
+    _ = @import("worker.zig");
 }

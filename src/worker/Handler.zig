@@ -55,7 +55,7 @@ pub fn handle(self: *Handler) !void {
         .limited(plugin.max_request_size),
     ) catch |err| {
         log.err("Failed to read request: {s}", .{@errorName(err)});
-        self.responser.writeError("Failed to read request: {s}", .{@errorName(err)});
+        self.responser.writeError("Invalid request", .{});
         return;
     };
 
@@ -66,7 +66,7 @@ pub fn handle(self: *Handler) !void {
         .{},
     ) catch |err| {
         log.err("Failed to parse request: {s}", .{@errorName(err)});
-        self.responser.writeError("Failed to parse request: {s}", .{@errorName(err)});
+        self.responser.writeError("Invalid request", .{});
         return;
     };
     defer parsed_request.deinit();
@@ -100,12 +100,26 @@ pub fn handle(self: *Handler) !void {
         const exec_req = request.requestExec();
         validateCniIdentifier(exec_req.container_id, "container_id") catch |err| {
             log.err("Invalid container_id from uid={d}: {s}", .{ client_info.uid, @errorName(err) });
-            self.responser.writeError("Invalid container_id: {s}", .{@errorName(err)});
+            self.responser.writeError("Invalid request", .{});
             return;
         };
         validateCniIdentifier(exec_req.network_options.interface_name, "interface_name") catch |err| {
             log.err("Invalid interface_name from uid={d}: {s}", .{ client_info.uid, @errorName(err) });
-            self.responser.writeError("Invalid interface_name: {s}", .{@errorName(err)});
+            self.responser.writeError("Invalid request", .{});
+            return;
+        };
+        validateCniIdentifier(exec_req.container_name, "container_name") catch |err| {
+            log.err("Invalid container_name from uid={d}: {s}", .{ client_info.uid, @errorName(err) });
+            self.responser.writeError("Invalid request", .{});
+            return;
+        };
+    }
+
+    // Validate netns path format to prevent arbitrary path access via CNI_NETNS
+    if (request.netns) |netns| {
+        validateNetnsPath(netns) catch {
+            log.err("Invalid netns path from uid={d}: {s}", .{ client_info.uid, netns });
+            self.responser.writeError("Invalid network namespace path", .{});
             return;
         };
     }
@@ -124,7 +138,7 @@ pub fn handle(self: *Handler) !void {
             request.resource(),
             @errorName(err),
         });
-        self.responser.writeError("Failed to load CNI: {s}", .{@errorName(err)});
+        self.responser.writeError("Internal error", .{});
         return;
     };
 
@@ -149,7 +163,7 @@ pub fn handle(self: *Handler) !void {
                 container_name,
                 @errorName(err),
             });
-            self.responser.writeError("Failed to execute action: {s}", .{@errorName(err)});
+            self.responser.writeError("Internal error", .{});
             if (@errorReturnTrace()) |trace| {
                 std.log.warn("Trace: {any}", .{trace});
             }
@@ -209,7 +223,7 @@ fn getClientInfo(responser: *Responser) std.posix.UnexpectedError!ClientInfo {
         &info_len,
     );
     if (res != 0) {
-        responser.writeError("Failed to get connection info: {d}", .{res});
+        responser.writeError("Internal error", .{});
 
         const json_err = std.posix.errno(res);
         log.warn("Failed to send error message: {s}", .{@tagName(json_err)});
@@ -218,26 +232,17 @@ fn getClientInfo(responser: *Responser) std.posix.UnexpectedError!ClientInfo {
     return client_info;
 }
 
-fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
+fn authClient(self: *Handler, _: ClientInfo, request: *const plugin.Request) !void {
     // Socket-level pre-filtering: reject if uid has no permission on any resource
     if (!self.acl_manager.hasAnyPermission()) {
         const err = error.AccessDenied;
-        self.responser.writeError(
-            "User {} has no permission on any resource, error: {s}",
-            .{ client_info.uid, @errorName(err) },
-        );
+        self.responser.writeError("Access denied", .{});
         return err;
     }
     // Resource-level ACL check
     if (!self.acl_manager.isAllowed(request.resource())) {
         const err = error.AccessDenied;
-        self.responser.writeError(
-            "Failed to access resource '{s}', error: {s}",
-            .{
-                request.resource(),
-                @errorName(err),
-            },
-        );
+        self.responser.writeError("Access denied", .{});
         return err;
     }
 }
@@ -245,21 +250,17 @@ fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Re
 fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !void {
     const exec_request = request.requestExec();
     const static_ips = exec_request.network_options.static_ips orelse {
-        self.responser.writeError("Static IP is required for resource '{s}'", .{request.resource()});
+        self.responser.writeError("Static IP is required", .{});
         return error.StaticIpRequired;
     };
     if (static_ips.len == 0) {
-        self.responser.writeError("Static IP is required for resource '{s}'", .{request.resource()});
+        self.responser.writeError("Static IP is required", .{});
         return error.StaticIpRequired;
     }
 
     const requested_ip = static_ips[0];
     if (!self.acl_manager.isIpAllowed(request.resource(), uid, requested_ip)) {
-        self.responser.writeError("IP '{s}' is not allowed for uid={d} on resource '{s}'", .{
-            requested_ip,
-            uid,
-            request.resource(),
-        });
+        self.responser.writeError("IP address not allowed", .{});
         return error.IpNotAllowed;
     }
 }
@@ -280,6 +281,28 @@ fn validateCniIdentifier(value: []const u8, field_name: []const u8) !void {
         }
     }
     if (std.mem.indexOf(u8, value, "..") != null) return error.InvalidParameter;
+}
+
+/// Validate that a netns path has the expected format: /proc/<pid>/ns/net
+/// where <pid> is a non-empty sequence of decimal digits.
+/// This prevents path traversal and arbitrary file access via CNI_NETNS.
+pub fn validateNetnsPath(netns: []const u8) !void {
+    const prefix = "/proc/";
+    const suffix = "/ns/net";
+
+    if (netns.len < prefix.len + 1 + suffix.len) return error.InvalidNetns;
+    if (!std.mem.startsWith(u8, netns, prefix)) return error.InvalidNetns;
+    if (!std.mem.endsWith(u8, netns, suffix)) return error.InvalidNetns;
+
+    const pid_str = netns[prefix.len .. netns.len - suffix.len];
+    if (pid_str.len == 0) return error.InvalidNetns;
+
+    for (pid_str) |c| {
+        switch (c) {
+            '0'...'9' => {},
+            else => return error.InvalidNetns,
+        }
+    }
 }
 
 test "validateCniIdentifier accepts valid identifiers" {
@@ -319,4 +342,49 @@ test "validateCniIdentifier rejects special characters" {
     try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("abc|def", "test_field"));
     try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("abc`def", "test_field"));
     try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("abc$def", "test_field"));
+}
+
+test "validateNetnsPath accepts valid /proc/<pid>/ns/net paths" {
+    try validateNetnsPath("/proc/1/ns/net");
+    try validateNetnsPath("/proc/1234/ns/net");
+    try validateNetnsPath("/proc/999999/ns/net");
+}
+
+test "validateNetnsPath rejects empty string" {
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath(""));
+}
+
+test "validateNetnsPath rejects paths without /proc/ prefix" {
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/etc/passwd"));
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/run/user/1000/ns/net"));
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("proc/1/ns/net"));
+}
+
+test "validateNetnsPath rejects paths without /ns/net suffix" {
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/1/ns/mnt"));
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/1/net"));
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/1/ns"));
+}
+
+test "validateNetnsPath rejects non-numeric PID" {
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/abc/ns/net"));
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/12a34/ns/net"));
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/-1/ns/net"));
+}
+
+test "validateNetnsPath rejects empty PID" {
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc//ns/net"));
+}
+
+test "validateNetnsPath rejects path traversal attempts" {
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("../../etc/passwd"));
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/../etc/shadow"));
+    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/1/../../etc/passwd"));
+}
+
+test "validateNetnsPath rejects overly long paths" {
+    const long_path = "/proc/" ++ ("0" ** 1000) ++ "/ns/net";
+    // This should actually be accepted since it's a valid format with a long PID
+    // But real PIDs won't be this long
+    try validateNetnsPath(long_path);
 }

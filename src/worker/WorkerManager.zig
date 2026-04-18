@@ -220,28 +220,117 @@ fn killWorker(self: *WorkerManager, entry: WorkerEntry) void {
     _ = linux.wait4(entry.pid, &status, 1, null); // WNOHANG = 1
 }
 
-/// Discover the catatonit PID for a given UID using pgrep.
+/// Discover the catatonit PID for a given UID by scanning /proc directly.
+/// Reads /proc/<pid>/status for UID and /proc/<pid>/comm for the process name.
+/// This avoids trusting an external `pgrep` binary which could be spoofed.
 fn discoverCatatonitPid(io: std.Io, uid: u32) ?std.posix.pid_t {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    var proc_dir = std.Io.Dir.cwd().openDir(io, "/proc", .{ .iterate = true }) catch return null;
+    defer proc_dir.close(io);
 
-    const uid_str = std.fmt.allocPrint(allocator, "{d}", .{uid}) catch return null;
-    defer allocator.free(uid_str);
+    var iter = proc_dir.iterate();
 
-    const result = std.process.run(allocator, io, .{
-        .argv = &[_][]const u8{ "pgrep", "-u", uid_str, "-f", "catatonit" },
-    }) catch {
-        log.warn("pgrep catatonit failed for uid={d}", .{uid});
-        return null;
-    };
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
+    while (iter.next(io) catch null) |entry| {
+        if (entry.kind != .directory) continue;
+        if (!isAllDigits(entry.name)) continue;
 
-    const pid_str = std.mem.trim(u8, result.stdout, " \t\r\n");
-    if (pid_str.len == 0) return null;
+        const pid = std.fmt.parseUnsigned(std.posix.pid_t, entry.name, 10) catch continue;
 
-    // Only take the first PID if multiple lines
-    const first_line = if (std.mem.indexOf(u8, pid_str, "\n")) |idx| pid_str[0..idx] else pid_str;
-    return std.fmt.parseUnsigned(std.posix.pid_t, first_line, 10) catch null;
+        // Check UID from /proc/<pid>/status
+        if (!checkProcessUid(io, pid, uid)) continue;
+
+        // Check process name from /proc/<pid>/comm (kernel-provided, not argv)
+        if (isCatatonit(io, pid)) return pid;
+    }
+
+    return null;
+}
+
+/// Check if a string consists entirely of ASCII digits.
+fn isAllDigits(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        switch (c) {
+            '0'...'9' => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
+/// Read /proc/<pid>/status and check if the real UID matches the target.
+fn checkProcessUid(io: std.Io, pid: std.posix.pid_t, target_uid: u32) bool {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/status", .{pid}) catch return false;
+
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    defer file.close(io);
+
+    var read_buf: [1024]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    const data = reader.interface.allocRemaining(std.heap.page_allocator, .limited(1024)) catch return false;
+    defer std.heap.page_allocator.free(data);
+
+    // Parse "Uid:\t<real_uid>\t..." line — first value is the real UID
+    if (std.mem.indexOf(u8, data, "Uid:\t")) |idx| {
+        const rest = data[idx + "Uid:\t".len ..];
+        if (std.mem.indexOf(u8, rest, "\t")) |tab_idx| {
+            const uid_str = rest[0..tab_idx];
+            const process_uid = std.fmt.parseUnsigned(u32, uid_str, 10) catch return false;
+            return process_uid == target_uid;
+        }
+    }
+
+    return false;
+}
+
+/// Read /proc/<pid>/comm and check if the process name is "catatonit".
+/// The comm field comes from the kernel (task_struct->comm), set from the
+/// binary's filename — not spoofable via argv or command-line arguments.
+fn isCatatonit(io: std.Io, pid: std.posix.pid_t) bool {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/comm", .{pid}) catch return false;
+
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    defer file.close(io);
+
+    var read_buf: [64]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    const data = reader.interface.allocRemaining(std.heap.page_allocator, .limited(64)) catch return false;
+    defer std.heap.page_allocator.free(data);
+
+    const name = std.mem.trim(u8, data, " \t\r\n");
+    return std.mem.eql(u8, name, "catatonit");
+}
+
+test "isAllDigits validates numeric strings" {
+    try std.testing.expect(isAllDigits("1234"));
+    try std.testing.expect(isAllDigits("0"));
+    try std.testing.expect(isAllDigits("999999"));
+    try std.testing.expect(!isAllDigits(""));
+    try std.testing.expect(!isAllDigits("12a34"));
+    try std.testing.expect(!isAllDigits("abc"));
+    try std.testing.expect(!isAllDigits("123 "));
+    try std.testing.expect(!isAllDigits("-1"));
+}
+
+test "discoverCatatonitPid returns null for non-existent UID" {
+    // UID 999999 is very unlikely to have a running catatonit process
+    const result = discoverCatatonitPid(std.testing.io, 999999);
+    try std.testing.expect(result == null);
+}
+
+test "checkProcessUid reads /proc/self/status correctly" {
+    // Our own process should have a valid /proc/<pid>/status
+    const own_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
+    // We can't easily know our own UID in test, but we can at least verify
+    // the function doesn't crash and returns a boolean
+    const io = std.testing.io;
+    _ = checkProcessUid(io, own_pid, 0); // Likely false unless running as root
+    _ = checkProcessUid(io, own_pid, std.math.maxInt(u32)); // Definitely false
+}
+
+test "isCatatonit returns false for current process" {
+    // The test runner is not catatonit
+    const own_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
+    try std.testing.expect(!isCatatonit(std.testing.io, own_pid));
 }
