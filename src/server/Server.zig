@@ -88,6 +88,9 @@ pub fn run(self: *Server) !void {
     const io = self.io;
     log.info("net-porter {s} started, monitoring /run/user/ and ACL directory", .{version});
 
+    // Start workers for UIDs that already exist at startup
+    self.syncWorkers();
+
     var event_buf: [4096]u8 = undefined;
 
     while (true) {
