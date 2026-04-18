@@ -2,6 +2,7 @@ const std = @import("std");
 const cli = @import("zig-cli");
 const plugin = @import("plugin.zig");
 const server = @import("server.zig");
+const worker_mod = @import("worker.zig");
 const json = @import("json.zig");
 const network = @import("network.zig");
 const utils = @import("utils.zig");
@@ -27,6 +28,7 @@ pub fn main(init: std.process.Init) !void {
     logger.io = init.io;
     plugin.setIo(init.io);
     server.setIo(init.io);
+    worker_mod.setIo(init.io);
 
     var runner = cli.AppRunner.init(&init);
 
@@ -43,6 +45,7 @@ pub fn main(init: std.process.Init) !void {
                     try plugin.cmd_teardown(&runner),
                     plugin.cmd_info,
                     try server.cmd_server(&runner),
+                    try worker_mod.cmd_worker(&runner),
                 },
             },
         },
@@ -71,4 +74,5 @@ test {
     _ = @import("user.zig");
     _ = @import("utils.zig");
     _ = @import("cni.zig");
+    _ = @import("worker.zig");
 }
