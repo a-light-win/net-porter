@@ -1082,15 +1082,21 @@ const Attachment = struct {
     }
 
     fn setup(self: *Attachment, io: std.Io, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
-        // Resolve netns to a host-valid path before executing CNI plugins.
-        // This avoids entering the user's mount namespace (security: prevents
-        // binary replacement attacks via bind mounts).
-        const host_netns = netns_path: {
+        // Resolve netns via fd passing: open the netns file through the plugin's
+        // mount namespace, pass /proc/self/fd/<fd> to CNI plugins.
+        var netns_result: ?NetnsResolver.Result = null;
+        defer {
+            if (netns_result) |*r| r.file.close(io);
+        }
+
+        const host_netns: []const u8 = netns_path: {
             if (request.netns) |raw_netns| {
-                break :netns_path NetnsResolver.resolve(io, tentative_allocator, request.process_id.?, raw_netns) catch |err| {
+                const result = NetnsResolver.resolve(io, tentative_allocator, request.process_id.?, raw_netns) catch |err| {
                     log.warn("NetnsResolver failed for plugin_pid={}, raw_netns={s}: {s} — falling back to raw path", .{ request.process_id.?, raw_netns, @errorName(err) });
                     break :netns_path raw_netns;
                 };
+                netns_result = result;
+                break :netns_path result.path;
             } else {
                 break :netns_path "/proc/self/ns/net";
             }
@@ -1136,13 +1142,20 @@ const Attachment = struct {
 
     fn teardown(self: *Attachment, io: std.Io, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
         _ = responser;
-        // Resolve netns to host-valid path (same as setup)
-        const host_netns = netns_path: {
+        // Resolve netns via fd passing (same as setup)
+        var netns_result: ?NetnsResolver.Result = null;
+        defer {
+            if (netns_result) |*r| r.file.close(io);
+        }
+
+        const host_netns: []const u8 = netns_path: {
             if (request.netns) |raw_netns| {
-                break :netns_path NetnsResolver.resolve(io, tentative_allocator, request.process_id.?, raw_netns) catch |err| {
+                const result = NetnsResolver.resolve(io, tentative_allocator, request.process_id.?, raw_netns) catch |err| {
                     log.warn("NetnsResolver failed for plugin_pid={}, raw_netns={s}: {s} — falling back to raw path", .{ request.process_id.?, raw_netns, @errorName(err) });
                     break :netns_path raw_netns;
                 };
+                netns_result = result;
+                break :netns_path result.path;
             } else {
                 break :netns_path "/proc/self/ns/net";
             }
