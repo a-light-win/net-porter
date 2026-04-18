@@ -1,6 +1,6 @@
 const std = @import("std");
 const cli = @import("zig-cli");
-const Worker = @import("server/Worker.zig");
+const Worker = @import("worker/Worker.zig");
 
 var worker_opts = Worker.Opts{};
 
@@ -45,4 +45,10 @@ fn run() !void {
     defer worker.deinit();
 
     try worker.run();
+}
+
+test {
+    _ = @import("worker/Worker.zig");
+    _ = @import("worker/WorkerManager.zig");
+    _ = @import("worker/Handler.zig");
 }

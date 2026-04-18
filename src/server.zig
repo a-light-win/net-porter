@@ -39,11 +39,8 @@ fn run() !void {
 
 test {
     _ = @import("server/Server.zig");
-    _ = @import("server/Handler.zig");
     _ = @import("server/Acl.zig");
     _ = @import("server/AclFile.zig");
     _ = @import("server/AclManager.zig");
     _ = @import("server/AclManager_test.zig");
-    _ = @import("server/Worker.zig");
-    _ = @import("server/WorkerManager.zig");
 }

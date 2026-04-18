@@ -3,7 +3,7 @@ const log = std.log.scoped(.server);
 const config_mod = @import("../config.zig");
 const version = @import("build_options").version;
 const AclManager = @import("AclManager.zig");
-const WorkerManager = @import("WorkerManager.zig");
+const WorkerManager = @import("../worker/WorkerManager.zig");
 const SocketManager = @import("SocketManager.zig");
 const Server = @This();
 

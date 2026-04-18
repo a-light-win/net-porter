@@ -11,7 +11,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
-const log = std.log.scoped(.worker_manager);
+const log = std.log.scoped(.worker);
 const WorkerManager = @This();
 
 const WorkerEntry = struct {
