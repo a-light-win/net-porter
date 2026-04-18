@@ -411,27 +411,44 @@ fn rebuildMonitoredFds(self: *WorkerManager) void {
 
 // ── Internal — spawning / stopping ───────────────────────────────────
 
-fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !void {
-    const uid_str = try std.fmt.allocPrint(self.allocator, "{d}", .{uid});
-    defer self.allocator.free(uid_str);
+/// Holds the argv list and its temporary allocated strings for worker spawning.
+/// Caller owns all memory and must call `deinit`.
+const WorkerArgv = struct {
+    argv: std.ArrayList([]const u8),
+    uid_str: []const u8,
+    pid_str: []const u8,
+    scope_name: []const u8,
 
-    const pid_str = try std.fmt.allocPrint(self.allocator, "{d}", .{catatonit_pid});
-    defer self.allocator.free(pid_str);
+    fn deinit(self: *WorkerArgv, allocator: Allocator) void {
+        self.argv.deinit(allocator);
+        allocator.free(self.scope_name);
+        allocator.free(self.pid_str);
+        allocator.free(self.uid_str);
+    }
+};
 
-    // Resolve UID to username for worker ACL loading
-    const username = user_mod.getUsername(self.allocator, uid) orelse {
-        log.err("Failed to resolve uid={d} to username, cannot spawn worker", .{uid});
-        return error.UserNotFound;
-    };
-    defer self.allocator.free(username);
+/// Build the argv list for spawning a worker process via `systemd-run --scope`.
+/// Returns a `WorkerArgv` containing the built argv and all temporary strings.
+/// The caller must call `deinit` to free all memory.
+fn buildWorkerArgv(
+    allocator: Allocator,
+    uid: u32,
+    catatonit_pid: std.posix.pid_t,
+    username: []const u8,
+    config_path: ?[]const u8,
+) !WorkerArgv {
+    const uid_str = try std.fmt.allocPrint(allocator, "{d}", .{uid});
+    errdefer allocator.free(uid_str);
 
-    // Scope unit name: net-porter-worker@<uid>.scope
-    const scope_name = try std.fmt.allocPrint(self.allocator, "net-porter-worker@{d}.scope", .{uid});
-    defer self.allocator.free(scope_name);
+    const pid_str = try std.fmt.allocPrint(allocator, "{d}", .{catatonit_pid});
+    errdefer allocator.free(pid_str);
 
-    // Build argv: systemd-run --scope --unit=<scope> /proc/self/exe worker ...
-    var argv = std.ArrayList([]const u8).initCapacity(self.allocator, 16) catch return error.OutOfMemory;
-    defer argv.deinit(self.allocator);
+    const scope_name = try std.fmt.allocPrint(allocator, "net-porter-worker@{d}.scope", .{uid});
+    errdefer allocator.free(scope_name);
+
+    // 15 fixed args + 2 optional (--config + path) = 17 max
+    var argv = std.ArrayList([]const u8).initCapacity(allocator, 18) catch return error.OutOfMemory;
+    errdefer argv.deinit(allocator);
 
     argv.appendAssumeCapacity("systemd-run");
     argv.appendAssumeCapacity("--scope");
@@ -450,13 +467,32 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
     argv.appendAssumeCapacity("--catatonit-pid");
     argv.appendAssumeCapacity(pid_str);
 
-    if (self.config_path) |cp| {
+    if (config_path) |cp| {
         argv.appendAssumeCapacity("--config");
         argv.appendAssumeCapacity(cp);
     }
 
+    return .{
+        .argv = argv,
+        .uid_str = uid_str,
+        .pid_str = pid_str,
+        .scope_name = scope_name,
+    };
+}
+
+fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !void {
+    // Resolve UID to username for worker ACL loading
+    const username = user_mod.getUsername(self.allocator, uid) orelse {
+        log.err("Failed to resolve uid={d} to username, cannot spawn worker", .{uid});
+        return error.UserNotFound;
+    };
+    defer self.allocator.free(username);
+
+    var worker_argv = try buildWorkerArgv(self.allocator, uid, catatonit_pid, username, self.config_path);
+    defer worker_argv.deinit(self.allocator);
+
     const process = std.process.spawn(self.io, .{
-        .argv = argv.items,
+        .argv = worker_argv.argv.items,
     }) catch |err| {
         log.err("Failed to spawn worker via systemd-run for uid={d}: {s}", .{ uid, @errorName(err) });
         return err;
@@ -508,7 +544,7 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
 
     try self.workers.put(uid, entry);
     self.rebuildMonitoredFds();
-    log.info("Spawned worker for uid={d} (username={s}, pid={d}, scope={s}, catatonit_pid={d})", .{ uid, username, worker_pid, scope_name, catatonit_pid });
+    log.info("Spawned worker for uid={d} (username={s}, pid={d}, scope={s}, catatonit_pid={d})", .{ uid, username, worker_pid, worker_argv.scope_name, catatonit_pid });
 }
 
 /// Stop an existing worker and clean up tracking entry + both pidfds.
@@ -807,4 +843,238 @@ test "nextRetryTimeoutMs returns null when no retry scheduled" {
     var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
     defer wm.deinit();
     try std.testing.expect(wm.nextRetryTimeoutMs() == null);
+}
+
+// ── Tests: buildWorkerArgv ───────────────────────────────────────────
+
+test "buildWorkerArgv builds correct argv without config_path" {
+    const allocator = std.testing.allocator;
+
+    var wa = try buildWorkerArgv(allocator, 1000, 12345, "testuser", null);
+    defer wa.deinit(allocator);
+
+    // 15 fixed args, no --config
+    try std.testing.expectEqual(@as(usize, 15), wa.argv.items.len);
+
+    // Verify structure: systemd-run --scope --unit <scope> --property ... -- /proc/self/exe worker ...
+    try std.testing.expectEqualStrings("systemd-run", wa.argv.items[0]);
+    try std.testing.expectEqualStrings("--scope", wa.argv.items[1]);
+    try std.testing.expectEqualStrings("--unit", wa.argv.items[2]);
+    try std.testing.expectEqualStrings("net-porter-worker@1000.scope", wa.argv.items[3]);
+    try std.testing.expectEqualStrings("--property", wa.argv.items[4]);
+    try std.testing.expectEqualStrings("CollectMode=inactive-or-failed", wa.argv.items[5]);
+    try std.testing.expectEqualStrings("--", wa.argv.items[6]);
+    try std.testing.expectEqualStrings("/proc/self/exe", wa.argv.items[7]);
+    try std.testing.expectEqualStrings("worker", wa.argv.items[8]);
+    try std.testing.expectEqualStrings("--uid", wa.argv.items[9]);
+    try std.testing.expectEqualStrings("1000", wa.argv.items[10]);
+    try std.testing.expectEqualStrings("--username", wa.argv.items[11]);
+    try std.testing.expectEqualStrings("testuser", wa.argv.items[12]);
+    try std.testing.expectEqualStrings("--catatonit-pid", wa.argv.items[13]);
+    try std.testing.expectEqualStrings("12345", wa.argv.items[14]);
+
+    // Verify temporary strings match argv references
+    try std.testing.expectEqualStrings("1000", wa.uid_str);
+    try std.testing.expectEqualStrings("12345", wa.pid_str);
+    try std.testing.expectEqualStrings("net-porter-worker@1000.scope", wa.scope_name);
+}
+
+test "buildWorkerArgv builds correct argv with config_path (full parameters)" {
+    const allocator = std.testing.allocator;
+    const config = "/etc/net-porter/config.toml";
+
+    var wa = try buildWorkerArgv(allocator, 1000, 12345, "testuser", config);
+    defer wa.deinit(allocator);
+
+    // 15 fixed args + 2 optional (--config + path) = 17
+    try std.testing.expectEqual(@as(usize, 17), wa.argv.items.len);
+
+    // Verify all 15 fixed args are identical to the no-config case
+    try std.testing.expectEqualStrings("systemd-run", wa.argv.items[0]);
+    try std.testing.expectEqualStrings("--scope", wa.argv.items[1]);
+    try std.testing.expectEqualStrings("--unit", wa.argv.items[2]);
+    try std.testing.expectEqualStrings("net-porter-worker@1000.scope", wa.argv.items[3]);
+    try std.testing.expectEqualStrings("--property", wa.argv.items[4]);
+    try std.testing.expectEqualStrings("CollectMode=inactive-or-failed", wa.argv.items[5]);
+    try std.testing.expectEqualStrings("--", wa.argv.items[6]);
+    try std.testing.expectEqualStrings("/proc/self/exe", wa.argv.items[7]);
+    try std.testing.expectEqualStrings("worker", wa.argv.items[8]);
+    try std.testing.expectEqualStrings("--uid", wa.argv.items[9]);
+    try std.testing.expectEqualStrings("1000", wa.argv.items[10]);
+    try std.testing.expectEqualStrings("--username", wa.argv.items[11]);
+    try std.testing.expectEqualStrings("testuser", wa.argv.items[12]);
+    try std.testing.expectEqualStrings("--catatonit-pid", wa.argv.items[13]);
+    try std.testing.expectEqualStrings("12345", wa.argv.items[14]);
+
+    // Verify the 2 config_path args at the end
+    try std.testing.expectEqualStrings("--config", wa.argv.items[15]);
+    try std.testing.expectEqualStrings(config, wa.argv.items[16]);
+}
+
+test "buildWorkerArgv with large UID and PID values" {
+    const allocator = std.testing.allocator;
+
+    var wa = try buildWorkerArgv(allocator, 4294967294, 2147483647, "root", "/opt/config.yaml");
+    defer wa.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 17), wa.argv.items.len);
+    try std.testing.expectEqualStrings("4294967294", wa.argv.items[10]); // uid_str
+    try std.testing.expectEqualStrings("2147483647", wa.argv.items[14]); // pid_str
+    try std.testing.expectEqualStrings("net-porter-worker@4294967294.scope", wa.argv.items[3]); // scope_name
+}
+
+// ── Tests: addPendingLocked / scheduleRetry ──────────────────────────
+
+test "addPendingLocked adds UID and deduplicates" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    wm.addPendingLocked(1000);
+    try std.testing.expectEqual(@as(usize, 1), wm.pending_uids.items.len);
+    try std.testing.expectEqual(@as(u32, 1000), wm.pending_uids.items[0]);
+
+    // Duplicate should be no-op
+    wm.addPendingLocked(1000);
+    try std.testing.expectEqual(@as(usize, 1), wm.pending_uids.items.len);
+}
+
+test "addPendingLocked schedules retry if not already scheduled" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    try std.testing.expect(wm.next_retry_ns == 0);
+    wm.addPendingLocked(1000);
+    try std.testing.expect(wm.next_retry_ns > 0);
+}
+
+test "addPendingLocked handles multiple different UIDs" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    wm.addPendingLocked(1000);
+    wm.addPendingLocked(2000);
+    wm.addPendingLocked(3000);
+    wm.addPendingLocked(2000); // duplicate
+
+    try std.testing.expectEqual(@as(usize, 3), wm.pending_uids.items.len);
+}
+
+test "scheduleRetry sets next_retry_ns in the future" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    const now_ns = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds;
+    wm.scheduleRetry();
+
+    try std.testing.expect(wm.next_retry_ns > now_ns);
+}
+
+// ── Tests: ensureWorkerWithPidLocked (no-op case) ───────────────────
+
+test "ensureWorkerWithPidLocked is no-op when worker already running with same catatonit_pid" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    // Manually insert a worker entry
+    try wm.workers.put(1000, .{
+        .uid = 1000,
+        .pid = 9999,
+        .pidfd = -1,
+        .catatonit_pid = 500,
+        .catatonit_pidfd = -1,
+    });
+
+    // Call with same catatonit_pid — should be no-op (worker stays)
+    try wm.ensureWorkerWithPidLocked(1000, 500);
+
+    // Worker should still be tracked
+    const entry = wm.workers.get(1000);
+    try std.testing.expect(entry != null);
+    try std.testing.expectEqual(@as(std.posix.pid_t, 9999), entry.?.pid);
+    try std.testing.expectEqual(@as(std.posix.pid_t, 500), entry.?.catatonit_pid);
+}
+
+// ── Tests: rebuildMonitoredFds ───────────────────────────────────────
+
+test "rebuildMonitoredFds builds correct fd lists from workers" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    // Add two worker entries with valid-looking pidfds (use -1 to skip close)
+    try wm.workers.put(1000, .{
+        .uid = 1000,
+        .pid = 100,
+        .pidfd = -1,
+        .catatonit_pid = 200,
+        .catatonit_pidfd = -1,
+    });
+    try wm.workers.put(2000, .{
+        .uid = 2000,
+        .pid = 300,
+        .pidfd = -1,
+        .catatonit_pid = 400,
+        .catatonit_pidfd = -1,
+    });
+
+    wm.rebuildMonitoredFds();
+
+    // 2 workers × 2 fds each (catatonit + worker) = 4 entries
+    // But pidfd = -1 means those entries are skipped
+    try std.testing.expectEqual(@as(usize, 0), wm.monitored_pollfds.items.len);
+    try std.testing.expectEqual(@as(usize, 0), wm.monitored_metas.items.len);
+}
+
+// ── Tests: stopAndCleanup ────────────────────────────────────────────
+
+test "stopAndCleanup removes worker entry" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    try wm.workers.put(1000, .{
+        .uid = 1000,
+        .pid = 100,
+        .pidfd = -1,
+        .catatonit_pid = 200,
+        .catatonit_pidfd = -1,
+    });
+
+    try std.testing.expect(wm.workers.get(1000) != null);
+    wm.stopAndCleanup(1000);
+    try std.testing.expect(wm.workers.get(1000) == null);
+}
+
+test "stopAndCleanup is no-op for non-existent UID" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    // Should not crash
+    wm.stopAndCleanup(9999);
+    try std.testing.expectEqual(@as(usize, 0), wm.workers.count());
+}
+
+// ── Tests: stopWorker ────────────────────────────────────────────────
+
+test "stopWorker removes UID from pending list" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    wm.addPendingLocked(1000);
+    wm.addPendingLocked(2000);
+    try std.testing.expectEqual(@as(usize, 2), wm.pending_uids.items.len);
+
+    wm.stopWorker(1000);
+    try std.testing.expectEqual(@as(usize, 1), wm.pending_uids.items.len);
+    try std.testing.expectEqual(@as(u32, 2000), wm.pending_uids.items[0]);
+}
+
+// ── Tests: WorkerArgv.deinit ─────────────────────────────────────────
+
+test "WorkerArgv.deinit frees all allocated memory" {
+    const allocator = std.testing.allocator;
+
+    var wa = try buildWorkerArgv(allocator, 1000, 54321, "testuser", "/path/to/config.toml");
+    // Verify it built correctly before cleanup
+    try std.testing.expectEqual(@as(usize, 17), wa.argv.items.len);
+    // deinit should not leak — verified by std.testing.allocator (detects leaks)
+    wa.deinit(allocator);
 }
