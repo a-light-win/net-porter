@@ -1,17 +1,16 @@
-//! SocketManager monitors /run/user/ for UID directory changes.
+//! Tracks active user sessions by monitoring /run/user/ via inotify.
 //!
-//! In the per-user daemon architecture, the main process does NOT create
-//! listening sockets. Instead, it monitors /run/user/ via inotify and
-//! reports UID directory appearances/disappearances to WorkerManager,
-//! which spawns/stops per-UID worker processes.
+//! Watches for directory creation/deletion under /run/user/ and reports
+//! UID appearances/disappearances to WorkerManager, which spawns/stops
+//! per-UID worker processes.
 //!
-//! Workers create their own sockets and handle connections.
+//! Only UIDs present in the ACL allowed list are tracked.
 
 const std = @import("std");
-const log = std.log.scoped(.socket_manager);
+const log = std.log.scoped(.uid_tracker);
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
-const SocketManager = @This();
+const UidTracker = @This();
 
 const run_user_dir = "/run/user";
 
@@ -36,7 +35,7 @@ pub const UidEvents = struct {
     }
 };
 
-/// Tracked UID entry — just the UID, no socket.
+/// Tracked UID entry — a UID with an active /run/user/<uid>/ directory.
 const UidEntry = struct {
     uid: std.posix.uid_t,
 };
@@ -45,16 +44,12 @@ allocator: Allocator,
 io: std.Io,
 /// Set of uids that are allowed by ACL (owned externally).
 allowed_uids: std.ArrayList(u32),
-/// Active UID entries (directories that exist in /run/user/).
+/// Active UID entries (directories that currently exist in /run/user/).
 entries: std.ArrayList(UidEntry),
-/// poll file descriptors: [0] = inotify, [1] = ACL inotify (if any).
-poll_fds: std.ArrayList(std.posix.pollfd),
 /// inotify file descriptor for /run/user/.
 inotify_fd: std.posix.fd_t,
-/// Number of special (non-server-socket) fds at the start of poll_fds.
-num_special_fds: usize = 1,
 
-pub fn init(io: std.Io, allocator: Allocator, allowed_uids: std.ArrayList(u32)) !SocketManager {
+pub fn init(io: std.Io, allocator: Allocator, allowed_uids: std.ArrayList(u32)) !UidTracker {
     const init_rc = linux.inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (std.posix.errno(init_rc) != .SUCCESS) {
         log.err("Failed to create inotify fd: {s}", .{@tagName(std.posix.errno(init_rc))});
@@ -70,37 +65,25 @@ pub fn init(io: std.Io, allocator: Allocator, allowed_uids: std.ArrayList(u32)) 
         return error.InotifyWatchFailed;
     }
 
-    var manager = SocketManager{
+    return UidTracker{
         .allocator = allocator,
         .io = io,
         .allowed_uids = allowed_uids,
         .entries = std.ArrayList(UidEntry).empty,
-        .poll_fds = std.ArrayList(std.posix.pollfd).empty,
         .inotify_fd = ifd,
     };
-
-    // poll_fds[0] is always the inotify fd
-    try manager.poll_fds.append(manager.allocator, .{
-        .fd = ifd,
-        .events = std.posix.POLL.IN,
-        .revents = 0,
-    });
-
-    return manager;
 }
 
-pub fn deinit(self: *SocketManager) void {
+pub fn deinit(self: *UidTracker) void {
     self.entries.deinit(self.allocator);
     self.allowed_uids.deinit(self.allocator);
-    self.poll_fds.deinit(self.allocator);
 
-    // Close inotify fd
     _ = linux.close(self.inotify_fd);
 }
 
 /// Initial scan: track existing /run/user/<uid>/ directories
 /// that match allowed uids.
-pub fn scanExisting(self: *SocketManager, io: std.Io) void {
+pub fn scanExisting(self: *UidTracker, io: std.Io) void {
     var dir = std.Io.Dir.cwd().openDir(io, run_user_dir, .{ .iterate = true }) catch |err| {
         log.warn("Failed to open {s}: {s}, skipping initial scan", .{ run_user_dir, @errorName(err) });
         return;
@@ -120,7 +103,7 @@ pub fn scanExisting(self: *SocketManager, io: std.Io) void {
 }
 
 /// Check if a uid is in the allowed list.
-pub fn isUidAllowed(self: SocketManager, uid: std.posix.uid_t) bool {
+pub fn isUidAllowed(self: UidTracker, uid: std.posix.uid_t) bool {
     for (self.allowed_uids.items) |allowed| {
         if (allowed == uid) return true;
     }
@@ -128,7 +111,7 @@ pub fn isUidAllowed(self: SocketManager, uid: std.posix.uid_t) bool {
 }
 
 /// Track a UID entry.
-fn addUid(self: *SocketManager, uid: std.posix.uid_t) !void {
+fn addUid(self: *UidTracker, uid: std.posix.uid_t) !void {
     // Skip if already tracked
     for (self.entries.items) |entry| {
         if (entry.uid == uid) return;
@@ -139,7 +122,7 @@ fn addUid(self: *SocketManager, uid: std.posix.uid_t) !void {
 }
 
 /// Remove a UID entry.
-fn removeUid(self: *SocketManager, uid: std.posix.uid_t) void {
+fn removeUid(self: *UidTracker, uid: std.posix.uid_t) void {
     for (self.entries.items, 0..) |*entry, i| {
         if (entry.uid == uid) {
             _ = self.entries.orderedRemove(i);
@@ -150,7 +133,7 @@ fn removeUid(self: *SocketManager, uid: std.posix.uid_t) void {
 }
 
 /// Get list of currently active (tracked) UIDs.
-pub fn getActiveUids(self: *SocketManager) std.ArrayList(u32) {
+pub fn getActiveUids(self: *UidTracker) std.ArrayList(u32) {
     var uids = std.ArrayList(u32).initCapacity(self.allocator, self.entries.items.len) catch return .empty;
     for (self.entries.items) |entry| {
         uids.appendAssumeCapacity(entry.uid);
@@ -160,7 +143,7 @@ pub fn getActiveUids(self: *SocketManager) std.ArrayList(u32) {
 
 /// Process pending inotify events.
 /// Returns UIDs that appeared/disappeared.
-pub fn processInotifyEvents(self: *SocketManager, event_buf: []u8) UidEvents {
+pub fn processInotifyEvents(self: *UidTracker, event_buf: []u8) UidEvents {
     var created = std.ArrayList(u32).initCapacity(self.allocator, 8) catch return .{ .created = .empty, .removed = .empty };
     var removed = std.ArrayList(u32).initCapacity(self.allocator, 8) catch return .{ .created = .empty, .removed = .empty };
 

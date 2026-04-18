@@ -22,7 +22,7 @@
 │                                                              │
 │  Server                                                      │
 │  ├── AclManager: 扫描 acl.d/ → 将用户名解析为 UID            │
-│  ├── SocketManager: 通过 inotify 监听 /run/user/             │
+│  ├── UidTracker: 通过 inotify 监听 /run/user/                │
 │  └── WorkerManager: 派生/停止/重启每 UID worker              │
 │                                                              │
 │  为每个允许的 UID 通过 systemd-run 派生一个 worker：          │
@@ -162,7 +162,7 @@ net-porter/
 │   ├── server.zig                # 服务端模块（CLI: `net-porter server`）
 │   ├── server/
 │   │   ├── Server.zig            # 服务端核心 — ACL 扫描 + Worker 生命周期
-│   │   ├── SocketManager.zig     # /run/user/ 监听（inotify），报告 UID 事件
+│   │   ├── UidTracker.zig         # /run/user/ 监听（inotify），报告 UID 事件
 │   │   ├── AclManager.zig        # 服务端 ACL 扫描器（用户名 → UID 解析）
 │   │   ├── AclFile.zig           # ACL 文件格式（Grant、Entry、groups）
 │   │   └── Acl.zig               # ACL 校验 & IP 范围匹配

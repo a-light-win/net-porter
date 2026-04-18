@@ -24,7 +24,7 @@ When a container starts, netavark will call the `net-porter plugin`. The plugin 
 │                                                              │
 │  Server                                                      │
 │  ├── AclManager: scan acl.d/ → resolve usernames to UIDs    │
-│  ├── SocketManager: monitor /run/user/ via inotify           │
+│  ├── UidTracker: monitor /run/user/ via inotify              │
 │  └── WorkerManager: spawn/stop/restart per-UID workers       │
 │                                                              │
 │  For each allowed UID, spawns a worker via systemd-run:      │
@@ -165,7 +165,7 @@ net-porter/
 │   ├── server.zig                # Server module (CLI: `net-porter server`)
 │   ├── server/
 │   │   ├── Server.zig            # Server core — ACL scanner + worker lifecycle
-│   │   ├── SocketManager.zig     # /run/user/ monitor (inotify), reports UID events
+│   │   ├── UidTracker.zig         # /run/user/ monitor (inotify), reports UID events
 │   │   ├── AclManager.zig        # Server-side ACL scanner (username → UID resolution)
 │   │   ├── AclFile.zig           # ACL file format (Grant, Entry, groups)
 │   │   └── Acl.zig               # ACL validation & IP range matching

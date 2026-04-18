@@ -4,14 +4,14 @@ const config_mod = @import("../config.zig");
 const version = @import("build_options").version;
 const AclManager = @import("AclManager.zig");
 const WorkerManager = @import("../worker/WorkerManager.zig");
-const SocketManager = @import("SocketManager.zig");
+const UidTracker = @import("UidTracker.zig");
 const Server = @This();
 
 config: config_mod.Config,
 io: std.Io,
 acl_manager: AclManager,
 worker_manager: WorkerManager,
-socket_manager: SocketManager,
+uid_tracker: UidTracker,
 managed_config: config_mod.ManagedConfig,
 
 pub const Opts = struct {
@@ -48,9 +48,9 @@ pub fn new(opts: Opts) !Server {
     const allowed_uids = acl_manager.scanUids(io);
     log.info("ACL scan: {} allowed UIDs", .{allowed_uids.items.len});
 
-    var socket_manager = try SocketManager.init(io, allocator, allowed_uids);
+    var uid_tracker = try UidTracker.init(io, allocator, allowed_uids);
 
-    socket_manager.scanExisting(io);
+    uid_tracker.scanExisting(io);
 
     // Initialize worker manager for per-UID worker processes
     const worker_manager = WorkerManager.init(io, allocator, opts.config_path);
@@ -60,7 +60,7 @@ pub fn new(opts: Opts) !Server {
         .io = io,
         .acl_manager = acl_manager,
         .worker_manager = worker_manager,
-        .socket_manager = socket_manager,
+        .uid_tracker = uid_tracker,
         .managed_config = managed_config,
     };
 }
@@ -68,7 +68,7 @@ pub fn new(opts: Opts) !Server {
 pub fn deinit(self: *Server) void {
     log.info("Server shutting down...", .{});
     self.worker_manager.deinit();
-    self.socket_manager.deinit();
+    self.uid_tracker.deinit();
     self.acl_manager.deinit();
     self.managed_config.deinit();
 }
@@ -94,7 +94,7 @@ pub fn run(self: *Server) !void {
         }
 
         poll_buf[0] = .{
-            .fd = self.socket_manager.inotify_fd,
+            .fd = self.uid_tracker.inotify_fd,
             .events = std.posix.POLL.IN,
             .revents = 0,
         };
@@ -115,7 +115,7 @@ pub fn run(self: *Server) !void {
 
         // Process inotify events (index 0)
         if (poll_buf[0].revents & std.posix.POLL.IN != 0) {
-            var uid_events = self.socket_manager.processInotifyEvents(&event_buf);
+            var uid_events = self.uid_tracker.processInotifyEvents(&event_buf);
             // Start workers for newly appeared UIDs (batch — also scans pending UIDs)
             if (uid_events.created.items.len > 0) {
                 self.worker_manager.ensureWorkers(uid_events.created.items);
@@ -124,7 +124,7 @@ pub fn run(self: *Server) !void {
             for (uid_events.removed.items) |uid| {
                 self.worker_manager.stopWorker(uid);
             }
-            uid_events.deinit(self.socket_manager.allocator);
+            uid_events.deinit(self.uid_tracker.allocator);
         }
 
         // Process retry timeout
@@ -136,8 +136,8 @@ pub fn run(self: *Server) !void {
 
 /// Synchronize workers with current /run/user/ state.
 fn syncWorkers(self: *Server) void {
-    var active_uids = self.socket_manager.getActiveUids();
-    defer active_uids.deinit(self.socket_manager.allocator);
+    var active_uids = self.uid_tracker.getActiveUids();
+    defer active_uids.deinit(self.uid_tracker.allocator);
 
     log.info("syncWorkers: {} active UIDs", .{active_uids.items.len});
 
