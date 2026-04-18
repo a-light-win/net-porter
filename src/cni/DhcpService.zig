@@ -38,10 +38,8 @@ pub fn init(io: std.Io, allocator: Allocator, caller_uid: std.posix.uid_t, cni_p
 }
 
 pub fn deinit(self: *DhcpService) void {
-    {
-        self.mutex.lock(self.io) catch unreachable;
+    if (self.mutex.lock(self.io)) {
         defer self.mutex.unlock(self.io);
-
         self.stop();
     }
 
