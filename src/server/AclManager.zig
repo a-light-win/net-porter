@@ -4,8 +4,8 @@
 //! Used by Server to determine which UIDs need workers.
 //!
 //! File naming convention:
-//!   User:  acl.d/<username>.json   — scanned for UID resolution
-//!   Group: acl.d/@<groupname>.json — ignored by scanner
+//!   User:           acl.d/<username>.json   — scanned for UID resolution
+//!   Rule collection: acl.d/@<name>.json     — ignored by scanner (not a user)
 //!
 //! The server does NOT parse ACL grants or watch for changes.
 //! Workers handle their own ACL loading and hot-reloading.
@@ -31,7 +31,7 @@ pub fn deinit(self: *AclManager) void {
 }
 
 /// Scan acl.d/ for <username>.json files and resolve to UIDs.
-/// Skips files starting with '@' (group files).
+/// Skips files starting with '@' (rule collection files, not users).
 /// Returns a list of deduplicated UIDs.
 pub fn scanUids(self: AclManager, io: std.Io) std.ArrayList(u32) {
     var uid_set = std.AutoHashMap(u32, void).init(self.allocator);
@@ -47,7 +47,7 @@ pub fn scanUids(self: AclManager, io: std.Io) std.ArrayList(u32) {
     while (iter.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
-        // Skip group files (@<groupname>.json)
+        // Skip rule collection files (@<name>.json)
         if (entry.name.len > 0 and entry.name[0] == '@') continue;
 
         // Extract username: <name>.json → <name>

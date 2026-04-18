@@ -10,22 +10,45 @@ It consists with two major part:
 - `net-porter server`: the rootful server that responsible for creating
   the macvlan/ipvlan network via CNI plugins.
 
-The `net-porter server` runs as a single global systemd service. It monitors `/run/user/` directories and automatically creates per-user unix sockets for each ACL-allowed user. When the container starts,
-netavark will call the `net-porter plugin`. The plugin then
-will connect to the `net-porter server` via the per-user socket,
-and pass the required information to the `net-porter server`.
+The `net-porter server` runs as a single global systemd service. It scans the ACL directory (`acl.d/`) to resolve allowed usernames to UIDs, and monitors `/run/user/` via inotify for UID directory appearances/disappearances. For each allowed UID, the server spawns a dedicated **worker** process (via `systemd-run --scope`) that creates its own per-user socket at `/run/user/<uid>/net-porter.sock`.
 
-The `net-porter server` will authenticate the request
-by the `uid/gid` of the caller (obtained via kernel `SO_PEERCRED`, cannot be forged). And then creates the macvlan/ipvlan network
-if the user has the permission.
+When a container starts, netavark will call the `net-porter plugin`. The plugin connects to the worker's per-user socket and passes the required information. The worker authenticates the request by the `uid/gid` of the caller (obtained via kernel `SO_PEERCRED`, cannot be forged), validates ACL grants, and creates the macvlan/ipvlan network if the user has the permission.
 
 > **Why per-user sockets in `/run/user/<uid>/`?** Rootless podman runs in an isolated mount namespace and a separate network namespace (via pasta/slirp4netns). Neither filesystem sockets in `/run/` nor abstract sockets are visible across these boundaries. However, `/run/user/<uid>/` is a per-user tmpfs created by `systemd-logind` that is bind-mounted into the user namespace, making it accessible from both host and rootless podman.
+
+### Architecture Overview
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    net-porter.service (root)                  │
+│                                                              │
+│  Server                                                      │
+│  ├── AclManager: scan acl.d/ → resolve usernames to UIDs    │
+│  ├── SocketManager: monitor /run/user/ via inotify           │
+│  └── WorkerManager: spawn/stop/restart per-UID workers       │
+│                                                              │
+│  For each allowed UID, spawns a worker via systemd-run:      │
+│                                                              │
+│  ┌──────────────── Worker (per-UID, independent scope) ────┐ │
+│  │  1. Create socket at /run/user/<uid>/net-porter.sock    │ │
+│  │  2. Enter container mount namespace (setns + unshare)    │ │
+│  │  3. Bind-mount CNI plugin dir read-only (security)       │ │
+│  │  4. Accept connections → spawn handler threads           │ │
+│  │  5. Load ACL grants + hot-reload via inotify             │ │
+│  │  6. Execute CNI plugins in the correct namespace         │ │
+│  └──────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Workers run in independent systemd scopes and survive server crashes. The server only manages their lifecycle (spawn/stop/restart) but does NOT kill workers on its own shutdown.
 
 ## Features
 
 - **Dynamic Socket Management**: Automatically creates/removes per-user sockets via inotify when users log in/out
 - **Single Service Architecture**: One global root service for all users, no need to manage per-user services
-- **Grant-based ACL Control**: Per-resource grants with user/group matching and optional static IP range restrictions
+- **Per-UID Worker Processes**: Each user gets an independent worker process (crash isolation, independent namespace)
+- **Grant-based ACL Control**: Per-resource grants with optional static IP range restrictions
+- **ACL Rule Collections**: User ACLs can reference shared rule collections (`@<name>.json`), grants are merged automatically
 - **Static IP Support**: Validate user-requested static IPs against allowed ranges — no separate CNI config files needed
 - **Standard CNI Config**: Support standard CNI 1.0 format config files via `cni.d/` directory, including chained plugins (see [CNI Configuration Guide](cni-config.md))
 - **Security Hardened**: Kernel level identity authentication, netns ownership verification, default deny policy
@@ -138,28 +161,47 @@ All packages will be placed in `zig-out/` directory.
 ```
 net-porter/
 ├── src/
-│   ├── main.zig                  # Program entry point
-│   ├── server/                   # Server implementation
-│   │   ├── Server.zig            # Server core
-│   │   ├── SocketManager.zig     # Multi-socket management (inotify + poll)
-│   │   ├── Handler.zig           # Request handler
-│   │   ├── AclManager.zig        # ACL management (file-based, hot-reload)
-│   │   ├── AclFile.zig           # ACL file format definition
-│   │   ├── Acl.zig               # ACL validation
-│   │   └── version.zig           # Version string
-│   ├── cni/                      # CNI integration
+│   ├── main.zig                  # Program entry point & CLI dispatch
+│   ├── server.zig                # Server module (CLI: `net-porter server`)
+│   ├── server/
+│   │   ├── Server.zig            # Server core — ACL scanner + worker lifecycle
+│   │   ├── SocketManager.zig     # /run/user/ monitor (inotify), reports UID events
+│   │   ├── AclManager.zig        # Server-side ACL scanner (username → UID resolution)
+│   │   ├── AclFile.zig           # ACL file format (Grant, Entry, groups)
+│   │   └── Acl.zig               # ACL validation & IP range matching
+│   ├── worker.zig                # Worker module (CLI: `net-porter worker`)
+│   ├── worker/
+│   │   ├── Worker.zig            # Per-UID worker daemon (runs in container mount ns)
+│   │   ├── WorkerManager.zig     # Worker lifecycle manager (spawn/stop/restart via pidfd)
+│   │   ├── Handler.zig           # Request handler (per-connection, threaded)
+│   │   └── AclManager.zig        # Worker-side ACL loader + hot-reload (inotify)
+│   ├── cni.zig                   # CNI module re-exports
+│   ├── cni/
 │   │   ├── Cni.zig               # CNI execution logic
 │   │   ├── CniManager.zig        # CNI config management
+│   │   ├── CniLoader.zig         # CNI config file loader & validation
+│   │   ├── StateFile.zig         # CNI attachment state persistence
 │   │   ├── DhcpService.zig       # Per-user DHCP service
 │   │   └── DhcpManager.zig       # DHCP service manager
-│   ├── config/                   # Configuration
-│   │   ├── Config.zig            # Config struct
-│   │   ├── Resource.zig          # Resource, Grant, Interface, Ipam structs
-│   │   ├── ManagedConfig.zig     # Config loader
+│   ├── config.zig                # Config module re-exports
+│   ├── config/
+│   │   ├── Config.zig            # Server config struct
+│   │   ├── ManagedConfig.zig     # Config file loader
 │   │   └── DomainSocket.zig      # Socket path helpers
-│   ├── plugin/                   # Netavark plugin implementation
-│   ├── version.zig               # Version string
-│   └── utils/                    # Utilities
+│   ├── plugin.zig                # Plugin module (CLI: create/setup/teardown/info)
+│   ├── plugin/
+│   │   ├── NetavarkPlugin.zig    # Netavark plugin protocol implementation
+│   │   └── Responser.zig         # Response builder helpers
+│   ├── user.zig                  # UID/GID/username resolution (libc wrappers)
+│   ├── json.zig                  # JSON utilities (parse, stringify)
+│   ├── utils.zig                 # Utils module re-exports
+│   ├── utils/
+│   │   ├── ArenaAllocator.zig    # Arena-based allocator for per-request handling
+│   │   ├── ErrorMessage.zig      # Structured error output
+│   │   ├── Logger.zig            # Custom logger with runtime level control
+│   │   └── LogSettings.zig       # Log configuration
+│   └── test_utils/
+│       └── TempFileManager.zig   # Test helper for temporary files
 ├── misc/
 │   ├── systemd/                  # Systemd service files
 │   └── nfpm/                     # nfpm packaging configuration
@@ -205,7 +247,7 @@ systemctl restart net-porter
 ```
 
 ### 3. Configure access control
-Create an ACL file in `/etc/net-porter/acl.d/` for each user or group that should have access:
+Create an ACL file in `/etc/net-porter/acl.d/` for each user that should have access:
 
 ```bash
 mkdir -p /etc/net-porter/acl.d
@@ -214,14 +256,13 @@ mkdir -p /etc/net-porter/acl.d
 `/etc/net-porter/acl.d/alice.json`:
 ```json
 {
-  "user": "alice",
   "grants": [
     { "resource": "macvlan-dhcp" }
   ]
 }
 ```
 
-> ACL files are watched for changes. Adding, modifying, or deleting files takes effect automatically — no restart needed.
+> ACL files are watched for changes. Adding, modifying, or deleting files takes effect automatically — no restart needed. The filename determines the user: `alice.json` → user `alice`.
 
 ### 4. Create podman network
 Run this command as the rootless user (e.g., `alice`):
@@ -264,29 +305,49 @@ Access control is configured separately in the `/etc/net-porter/acl.d/` director
 
 Access control is managed through individual JSON files in the `/etc/net-porter/acl.d/` directory. The service watches this directory and applies changes automatically — no restart needed.
 
-#### ACL file format
+#### ACL file naming convention
 
-Each file must end in `.json` and follow this structure:
+- **User ACL**: `acl.d/<username>.json` — grants + optional `groups` references
+- **Rule Collection**: `acl.d/@<name>.json` — shared grant sets that users can include
 
+The username is derived from the filename (without `.json` suffix). The `user` and `group` fields from older versions are silently ignored for backward compatibility.
+
+> **Note**: The `@<name>.json` files are **not** Linux user groups. They are simply named rule collections — reusable grant sets that any user ACL can reference via the `groups` field. The name after `@` is an arbitrary label, not a group name from `/etc/group`.
+
+#### User ACL file format
+
+`/etc/net-porter/acl.d/alice.json`:
 ```json
 {
-  "user": "alice",
   "grants": [
     { "resource": "macvlan-dhcp" },
     { "resource": "static-net", "ips": ["192.168.1.10-192.168.1.20"] }
+  ],
+  "groups": ["dhcp-users"]
+}
+```
+
+#### Rule collection file format
+
+`/etc/net-porter/acl.d/@devops.json`:
+```json
+{
+  "grants": [
+    { "resource": "vlan-200" }
   ]
 }
 ```
+
+Effective permissions = user grants ∪ all grants from referenced rule collections.
 
 #### ACL file fields
 
 | Field | Description | Required |
 |-------|-------------|----------|
-| `user` | Username or numeric UID | one of `user` or `group` |
-| `group` | Group name or numeric GID | one of `user` or `group` |
 | `grants` | Array of resource grants | ✅ |
-| `grants[].resource` | Resource name (must match a resource in `config.json`) | ✅ |
+| `grants[].resource` | Resource name (must match a CNI config `name` in `cni.d/`) | ✅ |
 | `grants[].ips` | Array of allowed IP ranges or single IPs (for static IPAM resources) | static: ✅ |
+| `groups` | Array of rule collection names to include (references `@<name>.json` files) | ❌ |
 
 #### IP range formats
 
@@ -297,7 +358,7 @@ Each file must end in `.json` and follow this structure:
 
 When IPAM type is `static`, the caller must request a specific IP (via podman `--ip` or netavark static_ips option), and net-porter validates it against the user's allowed ranges.
 
-> 💡 **Tip**: You can name ACL files however you like. A common convention is to use the user or group name (e.g., `alice.json`, `devops.json`). Multiple files can reference the same resource — grants are merged automatically.
+> 💡 **Tip**: The username is determined by the filename (e.g., `alice.json` → user `alice`). Rule collections start with `@` (e.g., `@devops.json` → collection named `devops`). Multiple users can reference the same collection — grants are merged automatically.
 
 ### Top-level Options
 
@@ -338,7 +399,6 @@ When IPAM type is `static`, the caller must request a specific IP (via podman `-
 `/etc/net-porter/acl.d/alice.json`:
 ```json
 {
-  "user": "alice",
   "grants": [
     { "resource": "vlan-100" }
   ]
@@ -348,24 +408,29 @@ When IPAM type is `static`, the caller must request a specific IP (via podman `-
 `/etc/net-porter/acl.d/bob.json`:
 ```json
 {
-  "user": "bob",
   "grants": [
     { "resource": "vlan-100" }
   ]
 }
 ```
 
-`/etc/net-porter/acl.d/devops.json`:
+`/etc/net-porter/acl.d/@devops.json`:
 ```json
 {
-  "group": "devops",
   "grants": [
     { "resource": "vlan-200" }
   ]
 }
 ```
 - `alice` and `bob` can use the `vlan-100` network
-- All users in `devops` group can use the `vlan-200` network
+- Any user who references the `@devops` rule collection in their `groups` field can use the `vlan-200` network. For example, to grant `charlie` access:
+  `/etc/net-porter/acl.d/charlie.json`:
+  ```json
+  {
+    "grants": [],
+    "groups": ["devops"]
+  }
+  ```
 
 User alice creates network:
 ```bash
@@ -398,7 +463,6 @@ podman network create -d net-porter -o net_porter_resource=vlan-100 vlan100
 `/etc/net-porter/acl.d/alice.json`:
 ```json
 {
-  "user": "alice",
   "grants": [
     { "resource": "static-net", "ips": ["192.168.1.10-192.168.1.20"] }
   ]
@@ -408,7 +472,6 @@ podman network create -d net-porter -o net_porter_resource=vlan-100 vlan100
 `/etc/net-porter/acl.d/bob.json`:
 ```json
 {
-  "user": "bob",
   "grants": [
     { "resource": "static-net", "ips": ["192.168.1.30-192.168.1.40"] }
   ]
@@ -449,7 +512,6 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 `/etc/net-porter/acl.d/alice.json`:
 ```json
 {
-  "user": "alice",
   "grants": [
     { "resource": "ipvlan-l3", "ips": ["10.0.0.10-10.0.0.20"] }
   ]
@@ -481,7 +543,6 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 `/etc/net-porter/acl.d/alice.json`:
 ```json
 {
-  "user": "alice",
   "grants": [
     { "resource": "ipvlan-dhcp" }
   ]
@@ -527,13 +588,33 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 `/etc/net-porter/acl.d/alice.json`:
 ```json
 {
-  "user": "alice",
   "grants": [
     { "resource": "macvlan-dhcp" },
     { "resource": "macvlan-static", "ips": ["10.0.0.5-10.0.0.10"] }
   ]
 }
 ```
+
+## Upgrade from v0.6
+
+Version 1.0.0 introduces a per-UID worker architecture. The server now spawns independent worker processes for each allowed user instead of handling connections directly. The ACL file format has also changed — the `user`/`group` fields are replaced by filename-based identity (`<username>.json` for users), and a new `groups` field enables referencing shared rule collections (`@<name>.json`).
+
+Quick steps:
+
+1. Update ACL file format — remove `user`/`group` fields (they are silently ignored for backward compatibility):
+   ```json
+   {
+     "grants": [
+       { "resource": "macvlan-dhcp" }
+     ],
+     "groups": ["dhcp-users"]
+   }
+   ```
+2. Rename rule collection files to `@<name>.json` (e.g., `devops.json` → `@devops.json`)
+3. Restart the service:
+   ```bash
+   systemctl restart net-porter
+   ```
 
 ## Upgrade from v0.5
 
@@ -616,12 +697,12 @@ Restart service: `systemctl restart net-porter`
 ## Security
 
 ### Security Model
-1. **Per-User Socket Isolation**: Each user gets their own socket under `/run/user/<uid>/` with 0600 permissions, ensuring only the owner can connect
-2. **Identity Authentication**: Caller UID/GID is obtained via `SO_PEERCRED` from kernel, cannot be forged
-3. **Socket Filtering**: Connection is immediately rejected if the user has no permission on any resource
-4. **Grant-based ACL Check**: Each request is validated against the resource's grant list — grants support user/group matching with optional IP range restrictions
-5. **Static IP Validation**: For static IPAM resources, the requested IP is validated against the user's allowed IP ranges — requests outside the range are rejected
-6. **Netns Verification**: The network namespace file owner must match the caller UID
+1. **Server-Worker Isolation**: Workers run in independent systemd scopes — they survive server crashes. The server only manages worker lifecycle, not their runtime
+2. **Per-User Socket Isolation**: Each worker creates its own socket under `/run/user/<uid>/` with 0600 permissions, ensuring only the owner can connect
+3. **Identity Authentication**: Caller UID/GID is obtained via `SO_PEERCRED` from kernel, cannot be forged
+4. **Worker Namespace Isolation**: Workers enter the container's mount namespace via `setns + unshare`. CNI plugin dir is bind-mounted read-only to prevent binary replacement
+5. **Grant-based ACL Check**: Each request is validated against the user's grants + grants from referenced rule collections — supports optional IP range restrictions
+6. **Static IP Validation**: For static IPAM resources, the requested IP is validated against the user's allowed IP ranges — requests outside the range are rejected
 7. **Default Deny**: Any request that doesn't explicitly match a policy is rejected
 
 ### Hardening Recommendations

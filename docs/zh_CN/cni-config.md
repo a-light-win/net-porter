@@ -163,7 +163,6 @@ CNI 配置（cni.d/）         ACL 授权（acl.d/）
 ACL 授权示例（`/etc/net-porter/acl.d/alice.json`）：
 ```json
 {
-  "user": "alice",
   "grants": [
     { "resource": "dhcp-net" },
     { "resource": "static-net", "ips": ["192.168.1.10-192.168.1.20"] }

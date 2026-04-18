@@ -4,19 +4,19 @@ const Allocator = std.mem.Allocator;
 const AclFile = @This();
 
 /// A single grant entry within an ACL file.
-/// Specifies which resource the user/group can access, with optional IP constraints.
+/// Specifies which resource the caller can access, with optional IP constraints.
 pub const Grant = struct {
     resource: []const u8,
     ips: ?[]const [:0]const u8 = null,
 };
 
 /// Represents a single ACL file's contents.
-/// User ACL: grants + optional group references.
-/// Group ACL: grants only (file named @<group>.json).
+/// User ACL: grants + optional rule collection references.
+/// Rule collection: grants only (file named @<name>.json).
 pub const Entry = struct {
     grants: []const Grant = &[_]Grant{},
-    /// Names of ACL groups to include (user ACL only).
-    /// Group files are named @<name>.json in the same directory.
+    /// Names of rule collections to include (user ACL only).
+    /// References @<name>.json files. These are NOT Linux groups — just reusable grant sets.
     groups: ?[]const []const u8 = null,
 };
 

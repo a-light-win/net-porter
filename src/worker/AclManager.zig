@@ -1,11 +1,14 @@
 //! Worker-side ACL manager.
 //!
-//! Loads a single user's ACL file + referenced group ACLs.
+//! Loads a single user's ACL file + referenced rule collections.
 //! Watches the ACL directory for changes and hot-reloads.
 //!
 //! ACL file naming convention:
-//!   User:  acl.d/<username>.json   — grants + optional "groups" field
-//!   Group: acl.d/@<groupname>.json — grants only (rule collections)
+//!   User:           acl.d/<username>.json   — grants + optional "groups" field
+//!   Rule collection: acl.d/@<name>.json     — grants only (shared reusable grant sets)
+//!
+//! NOTE: Rule collections (@<name>.json) are NOT Linux user groups.
+//! They are simply named grant sets that any user ACL can reference.
 //!
 //! User ACL format:
 //!   {
@@ -13,12 +16,12 @@
 //!     "groups": ["dhcp-users", "static-users"]
 //!   }
 //!
-//! Group ACL format:
+//! Rule collection format:
 //!   {
 //!     "grants": [ { "resource": "dhcp-net" } ]
 //!   }
 //!
-//! Effective permissions = user grants ∪ all referenced group grants.
+//! Effective permissions = user grants ∪ all referenced rule collection grants.
 
 const std = @import("std");
 const log = std.log.scoped(.worker);
@@ -47,7 +50,7 @@ io: std.Io,
 acl_dir: []const u8,
 username: []const u8,
 uid: u32,
-/// Effective ACLs: user grants + all referenced group grants.
+/// Effective ACLs: user grants + all referenced rule collection grants.
 acls: std.ArrayList(Acl),
 /// Group names referenced by the user ACL.
 group_names: std.ArrayList([]const u8),
@@ -85,7 +88,7 @@ fn deinitAcls(self: *WorkerAclManager) void {
     self.group_names.deinit(arena_alloc);
 }
 
-/// Load user ACL + referenced groups. Should be called once at startup.
+/// Load user ACL + referenced rule collections. Should be called once at startup.
 pub fn load(self: *WorkerAclManager) void {
     self.doLoad();
     self.setupInotify();
@@ -142,9 +145,9 @@ fn doLoad(self: *WorkerAclManager) void {
     self.doLoadInto(arena_alloc, &self.acls, &self.group_names) catch {};
 }
 
-/// Load user ACL + referenced groups into the provided lists.
+/// Load user ACL + referenced rule collections into the provided lists.
 /// Returns error if the user ACL file cannot be loaded (fatal).
-/// Group loading failures are logged but non-fatal (partial data is accepted).
+/// Rule collection loading failures are logged but non-fatal (partial data is accepted).
 fn doLoadInto(
     self: *WorkerAclManager,
     arena_alloc: Allocator,
@@ -163,27 +166,27 @@ fn doLoadInto(
     // 2. Add user grants as ACLs
     self.addGrantsTo(arena_alloc, acls, user_entry.value) catch return;
 
-    // 3. Load referenced groups
+    // 3. Load referenced rule collections
     if (user_entry.value.groups) |groups| {
         for (groups) |group_name| {
-            // Store the group name for later reference
+            // Store the collection name for later reference
             const name_copy = arena_alloc.dupe(u8, group_name) catch continue;
             group_names.append(arena_alloc, name_copy) catch continue;
 
-            // Load group file: <acl_dir>/@<groupname>.json
+            // Load rule collection: <acl_dir>/@<name>.json
             const group_path = std.fmt.allocPrint(arena_alloc, "{s}/@{s}.json", .{ self.acl_dir, group_name }) catch continue;
             const group_entry = self.parseAclFile(group_path) catch |err| {
-                log.warn("Group '@{s}' not found ({s}), skipping", .{ group_name, @errorName(err) });
+                log.warn("Rule collection '@{s}' not found ({s}), skipping", .{ group_name, @errorName(err) });
                 continue;
             };
             defer group_entry.deinit();
 
             self.addGrantsTo(arena_alloc, acls, group_entry.value) catch continue;
-            log.info("Loaded group '@{s}': {} grants", .{ group_name, group_entry.value.grants.len });
+            log.info("Loaded rule collection '@{s}': {} grants", .{ group_name, group_entry.value.grants.len });
         }
     }
 
-    log.info("Loaded ACL for uid={d}: {} grants, {} groups", .{ self.uid, acls.items.len, group_names.items.len });
+    log.info("Loaded ACL for uid={d}: {} grants, {} rule collections", .{ self.uid, acls.items.len, group_names.items.len });
 }
 
 fn parseAclFile(self: WorkerAclManager, path: []const u8) !std.json.Parsed(AclFile.Entry) {
@@ -259,7 +262,7 @@ pub fn processInotifyEvents(self: *WorkerAclManager, event_buf: []u8) bool {
 
             // Check if the changed file is relevant to this worker:
             // - <username>.json (user's own ACL)
-            // - @<groupname>.json where groupname is in our group_names
+            // - @<name>.json where name is in our group_names (referenced rule collections)
             if (isRelevantFile(self.username, self.group_names.items, name)) {
                 log.info("ACL file changed: {s}, reloading", .{name});
                 changed = true;
@@ -279,7 +282,7 @@ fn isRelevantFile(username: []const u8, group_names: []const []const u8, filenam
         std.mem.eql(u8, filename[0 .. filename.len - ".json".len], username))
         return true;
 
-    // Check if it's a referenced group file: @<groupname>.json
+    // Check if it's a referenced rule collection: @<name>.json
     for (group_names) |group_name| {
         if (filename.len > 0 and filename[0] == '@' and
             std.mem.endsWith(u8, filename, ".json") and

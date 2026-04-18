@@ -163,7 +163,6 @@ CNI Config (cni.d/)          ACL Grant (acl.d/)
 ACL grant example (`/etc/net-porter/acl.d/alice.json`):
 ```json
 {
-  "user": "alice",
   "grants": [
     { "resource": "dhcp-net" },
     { "resource": "static-net", "ips": ["192.168.1.10-192.168.1.20"] }

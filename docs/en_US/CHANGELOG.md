@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2025-04-18
+
+### Security
+
+- **Eliminated `nsenter` privilege escalation risk**: Previous versions used the `nsenter` command to enter container namespaces for CNI plugin execution. A root process executing `nsenter` is a well-known privilege escalation vector — a compromised or malicious namespace could exploit the root context. Workers now run directly in the correct namespace, so CNI plugins execute without `nsenter`.
+- **Hardened CNI plugin execution**: CNI plugin directory is bind-mounted read-only inside the worker namespace, preventing binary replacement attacks.
+- **Fixed 7 attack surfaces** found in security audit, including path traversal via CNI_NETNS, container name injection, TOCTOU race on domain socket creation, and information leakage in error messages.
+
+### Changed
+
+- **Per-UID worker architecture**: The server now spawns an independent worker process for each user. Workers run in isolated systemd scopes — they survive server crashes and are independently managed. This architecture eliminates the need for the root process to execute commands inside user-controlled namespaces.
+- **ACL file format simplified**: The `user` and `group` fields are no longer used for identity — they are silently ignored for backward compatibility. Identity is now determined by the filename: `<username>.json` for users, `@<name>.json` for shared rule collections.
+- **New `groups` field in ACL**: User ACL files can reference shared rule collections via the `groups` field. For example, `"groups": ["dhcp-users"]` includes all grants from `@dhcp-users.json`. These are NOT Linux user groups — they are simply reusable grant sets.
+- **Group ACL files renamed**: Shared rule collection files now use the `@<name>.json` prefix (e.g., `devops.json` → `@devops.json`) to distinguish them from user ACL files.
+
+### Removed
+
+- **`nsenter` command execution**: No longer used anywhere. Workers are already in the correct namespace.
+- **`user` and `group` fields from ACL files**: Replaced by filename-based identity. Existing files with these fields continue to work — the fields are silently ignored.
+
+---
+
 ## [0.6.0] - 2025-04-17
 
 ### Added
@@ -138,6 +160,7 @@ See the [Migration Guide (0.4 → 0.5)](migration-guide-0.4-to-0.5.md) for step-
 
 _Initial public release with per-user service architecture._
 
+[1.0.0]: https://github.com/a-light-win/net-porter/compare/0.6.0...1.0.0
 [0.6.0]: https://github.com/a-light-win/net-porter/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/a-light-win/net-porter/compare/0.4.0...0.5.0
 [0.4.0]: https://github.com/a-light-win/net-porter/compare/0.3.4...0.4.0
