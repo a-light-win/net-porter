@@ -1,7 +1,6 @@
 const std = @import("std");
 const json = std.json;
 const log = std.log.scoped(.server);
-const traffic_log = std.log.scoped(.traffic);
 const Responser = @This();
 
 io: std.Io,

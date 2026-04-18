@@ -833,10 +833,6 @@ const PluginConf = struct {
         return new_obj;
     }
 
-    fn isExecuted(self: PluginConf) bool {
-        return self.result != null;
-    }
-
     fn exec(self: *PluginConf, io: std.Io, tentative_allocator: Allocator, cmd: []const u8, env_map: std.process.Environ.Map) !std.process.Child.Term {
         _ = tentative_allocator;
         const allocator = self.arena.?.allocator();

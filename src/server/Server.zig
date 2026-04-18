@@ -102,8 +102,7 @@ pub fn run(self: *Server) !void {
             for (uid_events.removed.items) |uid| {
                 self.worker_manager.stopWorker(uid);
             }
-            uid_events.created.deinit(self.socket_manager.allocator);
-            uid_events.removed.deinit(self.socket_manager.allocator);
+            uid_events.deinit(self.socket_manager.allocator);
             continue;
         }
 

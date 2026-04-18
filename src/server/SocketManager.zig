@@ -30,9 +30,9 @@ pub const UidEvents = struct {
     created: std.ArrayList(u32),
     removed: std.ArrayList(u32),
 
-    pub fn deinit(self: *UidEvents) void {
-        self.created.deinit();
-        self.removed.deinit();
+    pub fn deinit(self: *UidEvents, allocator: Allocator) void {
+        self.created.deinit(allocator);
+        self.removed.deinit(allocator);
     }
 };
 
@@ -156,51 +156,6 @@ pub fn getActiveUids(self: *SocketManager) std.ArrayList(u32) {
         uids.appendAssumeCapacity(entry.uid);
     }
     return uids;
-}
-
-/// Update the allowed uid list (e.g. after config reload).
-/// Adds UIDs for new entries, removes UIDs for removed entries.
-pub fn updateAllowedUids(self: *SocketManager, new_uids: std.ArrayList(u32)) void {
-    // Remove entries for uids no longer in the list
-    var i: usize = self.entries.items.len;
-    while (i > 0) {
-        i -= 1;
-        const uid = self.entries.items[i].uid;
-        var found = false;
-        for (new_uids.items) |new_uid| {
-            if (new_uid == uid) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            self.removeUid(uid);
-        }
-    }
-
-    // Add entries for new uids
-    for (new_uids.items) |uid| {
-        var exists = false;
-        for (self.entries.items) |entry| {
-            if (entry.uid == uid) {
-                exists = true;
-                break;
-            }
-        }
-        if (!exists) {
-            // Check if /run/user/<uid>/ directory exists
-            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const dir_path = std.fmt.bufPrint(&buf, "{s}/{d}", .{ run_user_dir, uid }) catch continue;
-            _ = std.Io.Dir.cwd().openDir(self.io, dir_path, .{}) catch continue;
-            // Directory exists, track it
-            self.addUid(uid) catch |err| {
-                log.warn("Failed to track uid={d} after config reload: {s}", .{ uid, @errorName(err) });
-            };
-        }
-    }
-
-    self.allowed_uids.deinit(self.allocator);
-    self.allowed_uids = new_uids;
 }
 
 /// Process pending inotify events.

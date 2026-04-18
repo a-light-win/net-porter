@@ -1,7 +1,6 @@
 const std = @import("std");
 const c = @cImport({
     @cInclude("pwd.h");
-    @cInclude("grp.h");
     @cInclude("unistd.h");
     @cInclude("stddef.h");
 });
@@ -36,20 +35,6 @@ pub fn getUsername(allocator: std.mem.Allocator, uid: std.posix.uid_t) ?[:0]cons
 
     const name = std.mem.sliceTo(pwd.pw_name, 0);
     return allocator.dupeZ(u8, name) catch null;
-}
-
-pub fn getGid(groupname: [:0]const u8) ?std.posix.gid_t {
-    var buf: [1024]u8 = undefined; // Buffer for `getgrnam_r`
-    var grp: c.struct_group = undefined; // Struct to store the result
-    var result: ?*c.struct_group = null; // Pointer to the result struct
-
-    const ret = c.getgrnam_r(&groupname[0], &grp, &buf[0], buf.len, &result);
-
-    if (ret != 0 or result == null) {
-        return null; // Group not found or error
-    }
-
-    return grp.gr_gid;
 }
 
 test {
