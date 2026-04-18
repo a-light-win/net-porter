@@ -1,24 +1,20 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const DhcpService = @This();
-const log = std.log.scoped(.dhcpServer);
+const log = std.log.scoped(.dhcp_service);
 
 allocator: Allocator,
 io: std.Io,
 caller_uid: std.posix.uid_t,
 dhcp_cni_path: []const u8,
 sock_path: []const u8,
-podman_infra_pid: ?[]const u8 = null,
 process: ?std.process.Child = null,
 mutex: std.Io.Mutex = .init,
 
 pub fn init(io: std.Io, allocator: Allocator, caller_uid: std.posix.uid_t, cni_path: []const u8) !DhcpService {
-    const dhcp_sock_path = try std.fmt.allocPrint(
-        allocator,
-        "/run/user/{d}/net-porter-dhcp.sock",
-        .{caller_uid},
-    );
-    errdefer allocator.free(dhcp_sock_path);
+    // In the worker's namespace, /run/ is the container's /run/.
+    // Each worker is per-UID in its own namespace — no path conflict.
+    const dhcp_sock_path = "/run/net-porter-dhcp.sock";
 
     const dhcp_cni_path = try std.fmt.allocPrint(
         allocator,
@@ -45,12 +41,6 @@ pub fn deinit(self: *DhcpService) void {
     }
 
     self.removeSocketPath();
-
-    if (self.podman_infra_pid) |pid| {
-        self.allocator.free(pid);
-    }
-
-    self.allocator.free(self.sock_path);
     self.allocator.free(self.dhcp_cni_path);
 }
 
@@ -64,22 +54,12 @@ pub fn ensureStarted(self: *DhcpService) !void {
 }
 
 fn start(self: *DhcpService) !void {
-    // Always re-discover infra PID - it may have changed
-    // after podman session restart
-    if (self.podman_infra_pid) |old_pid| {
-        self.allocator.free(old_pid);
-        self.podman_infra_pid = null;
-    }
-    try self.initPodmanInfraPid();
-
     self.removeSocketPath();
 
+    // Spawn DHCP daemon directly — no nsenter needed.
+    // The worker is already in the correct mount namespace.
     self.process = std.process.spawn(self.io, .{
         .argv = &[_][]const u8{
-            "nsenter",
-            "-t",
-            self.podman_infra_pid.?,
-            "--mount",
             self.dhcp_cni_path,
             "daemon",
             "-socketpath",
@@ -142,43 +122,5 @@ fn removeSocketPath(self: DhcpService) void {
         else => {
             log.warn("Failed to remove {s}: {s}", .{ self.sock_path, @errorName(err) });
         },
-    };
-}
-
-pub const InitPodmanInfraPidError = error{
-    FailedToGetPodmanInfraPid,
-};
-
-fn initPodmanInfraPid(self: *DhcpService) InitPodmanInfraPidError!void {
-    const uid = std.fmt.allocPrint(self.allocator, "{d}", .{self.caller_uid}) catch {
-        return error.FailedToGetPodmanInfraPid;
-    };
-    defer self.allocator.free(uid);
-
-    const p = std.process.run(self.allocator, self.io, .{
-        .argv = &[_][]const u8{
-            "pgrep",
-            "-u",
-            uid,
-            "-f",
-            "catatonit",
-        },
-    }) catch |err| {
-        log.warn("Failed to get podman infra pid: {s}", .{@errorName(err)});
-        return error.FailedToGetPodmanInfraPid;
-    };
-    defer self.allocator.free(p.stdout);
-    defer self.allocator.free(p.stderr);
-
-    // strip the stdout to get the pid
-    const pid = std.mem.trim(u8, p.stdout, " \t\r\n");
-    if (pid.len == 0) {
-        log.warn("Failed to get podman infra pid: {s}", .{p.stderr});
-        return error.FailedToGetPodmanInfraPid;
-    }
-
-    self.podman_infra_pid = self.allocator.dupe(u8, pid) catch |err| {
-        log.warn("Failed to get podman infra pid: {s}", .{@errorName(err)});
-        return error.FailedToGetPodmanInfraPid;
     };
 }

@@ -65,7 +65,7 @@ pub fn ensureWorker(self: *WorkerManager, uid: u32) !void {
     try self.mutex.lock(self.io);
     defer self.mutex.unlock(self.io);
 
-    const catatonit_pid = discoverCatatonitPid(uid) orelse {
+    const catatonit_pid = discoverCatatonitPid(self.io, uid) orelse {
         log.warn("No catatonit process found for uid={d}, skipping worker start", .{uid});
         return;
     };
@@ -205,17 +205,15 @@ fn killWorker(self: *WorkerManager, entry: WorkerEntry) void {
     // Send SIGTERM for graceful shutdown
     std.posix.kill(entry.pid, std.posix.SIG.TERM) catch {};
     // Wait for process to exit (with timeout)
-    _ = linux.wait4(entry.pid, null, linux.WNOHANG, null);
+    var status: u32 = 0;
+    _ = linux.wait4(entry.pid, &status, 1, null); // WNOHANG = 1
 }
 
 /// Discover the catatonit PID for a given UID using pgrep.
-fn discoverCatatonitPid(uid: u32) ?std.posix.pid_t {
+fn discoverCatatonitPid(io: std.Io, uid: u32) ?std.posix.pid_t {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-
-    // Use std.process.Init.io for process.run in non-test context
-    const io = std.process.Init.io;
 
     const uid_str = std.fmt.allocPrint(allocator, "{d}", .{uid}) catch return null;
     defer allocator.free(uid_str);

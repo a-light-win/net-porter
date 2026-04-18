@@ -46,7 +46,3 @@ fn run() !void {
 
     try worker.run();
 }
-
-test {
-    _ = @import("server/Worker.zig");
-}

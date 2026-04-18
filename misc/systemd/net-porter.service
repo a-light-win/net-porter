@@ -11,7 +11,8 @@ RestartSec=10s
 # Security hardening
 ProtectSystem=strict
 ReadWritePaths=/run
-NoNewPrivileges=true
+# NoNewPrivileges=true blocks setns() which CNI plugins require
+# RestrictNamespaces=~net limits namespace operations to net only
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictNamespaces=~net

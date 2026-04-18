@@ -11,7 +11,6 @@ const CniManager = @import("../cni/CniManager.zig");
 const StateFile = @import("../cni/StateFile.zig");
 const Responser = plugin.Responser;
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
-const SocketManager = @import("SocketManager.zig");
 const Handler = @This();
 
 const ClientInfo = extern struct {
@@ -20,7 +19,7 @@ const ClientInfo = extern struct {
     gid: std.posix.gid_t,
 };
 
-const Connection = SocketManager.Connection;
+const Connection = struct { stream: std.Io.net.Stream };
 
 arena: ArenaAllocator,
 io: std.Io,

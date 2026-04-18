@@ -3,25 +3,16 @@ const log = std.log.scoped(.server);
 const config_mod = @import("../config.zig");
 const version = @import("build_options").version;
 const AclManager = @import("AclManager.zig");
-const CniManager = @import("../cni/CniManager.zig");
-const DhcpManager = @import("../cni/DhcpManager.zig");
-const StateFile = @import("../cni/StateFile.zig");
-const Handler = @import("Handler.zig");
-const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
+const WorkerManager = @import("WorkerManager.zig");
 const SocketManager = @import("SocketManager.zig");
-const Responser = @import("../plugin/Responser.zig");
 const Server = @This();
-
-const max_concurrent_handlers: usize = 64;
 
 config: config_mod.Config,
 io: std.Io,
 acl_manager: AclManager,
-cni_manager: CniManager,
-dhcp_manager: DhcpManager,
+worker_manager: WorkerManager,
 socket_manager: SocketManager,
 managed_config: config_mod.ManagedConfig,
-active_handlers: std.atomic.Value(usize) = .init(0),
 
 pub const Opts = struct {
     config_path: ?[]const u8 = null,
@@ -50,12 +41,6 @@ pub fn new(opts: Opts) !Server {
     var logger = @import("root").logger;
     logger.log_settings = conf.log;
 
-    // Ensure state directory exists with correct permissions
-    StateFile.ensureBaseDir(io) catch |err| {
-        log.err("Failed to create state directory: {s}", .{@errorName(err)});
-        return err;
-    };
-
     // Initialize AclManager and load ACL files from directory
     var acl_manager = AclManager.init(allocator, conf.acl_dir);
     errdefer acl_manager.deinit();
@@ -78,12 +63,14 @@ pub fn new(opts: Opts) !Server {
 
     socket_manager.scanExisting(io);
 
+    // Initialize worker manager for per-UID worker processes
+    const worker_manager = WorkerManager.init(io, allocator, opts.config_path);
+
     return Server{
         .config = conf,
         .io = io,
         .acl_manager = acl_manager,
-        .cni_manager = try CniManager.init(io, allocator, conf),
-        .dhcp_manager = DhcpManager.init(io, allocator, conf.cni_plugin_dir),
+        .worker_manager = worker_manager,
         .socket_manager = socket_manager,
         .managed_config = managed_config,
     };
@@ -91,17 +78,15 @@ pub fn new(opts: Opts) !Server {
 
 pub fn deinit(self: *Server) void {
     log.info("Server shutting down...", .{});
+    self.worker_manager.deinit();
     self.socket_manager.deinit();
     self.acl_manager.deinit();
-    self.cni_manager.deinit();
-    self.dhcp_manager.deinit();
     self.managed_config.deinit();
 }
 
 pub fn run(self: *Server) !void {
     const io = self.io;
     log.info("net-porter {s} started, monitoring /run/user/ and ACL directory", .{version});
-    const log_response = self.config.log.logEnabled(.debug, .traffic);
 
     var event_buf: [4096]u8 = undefined;
 
@@ -115,7 +100,19 @@ pub fn run(self: *Server) !void {
 
         if (idx == 0) {
             // inotify event on /run/user/
-            self.socket_manager.processInotifyEvents(&event_buf);
+            const uid_events = self.socket_manager.processInotifyEvents(&event_buf);
+            // Start workers for newly appeared UIDs
+            for (uid_events.created.items) |uid| {
+                if (self.acl_manager.hasAnyPermission(io, uid, 0)) {
+                    self.worker_manager.ensureWorker(uid) catch |err| {
+                        log.warn("Failed to start worker for uid={d}: {s}", .{ uid, @errorName(err) });
+                    };
+                }
+            }
+            // Stop workers for disappeared UIDs
+            for (uid_events.removed.items) |uid| {
+                self.worker_manager.stopWorker(uid);
+            }
             continue;
         }
 
@@ -126,47 +123,28 @@ pub fn run(self: *Server) !void {
                 self.acl_manager.reload(io);
                 const new_uids = self.acl_manager.getAllowedUids(io, std.heap.page_allocator);
                 self.socket_manager.updateAllowedUids(new_uids);
+                // Restart workers for added/removed UIDs
+                self.syncWorkers();
             }
             continue;
         }
 
-        // Server socket event — accept connection
-        var conn = self.socket_manager.accept(io, idx) orelse continue;
-
-        // Limit concurrent handlers to prevent resource exhaustion
-        if (self.active_handlers.fetchAdd(1, .acquire) >= max_concurrent_handlers) {
-            _ = self.active_handlers.fetchSub(1, .release);
-            log.warn("Too many concurrent connections (max={d}), dropping", .{max_concurrent_handlers});
-            conn.stream.close(io);
-            continue;
-        }
-
-        var handler = Handler{
-            .io = io,
-            .arena = try ArenaAllocator.init(std.heap.page_allocator),
-            .acl_manager = &self.acl_manager,
-            .cni_manager = &self.cni_manager,
-            .dhcp_manager = &self.dhcp_manager,
-            .config = &self.config,
-            .connection = conn,
-            .responser = Responser{
-                .io = io,
-                .stream = &conn.stream,
-                .log_response = log_response,
-            },
-        };
-
-        _ = std.Thread.spawn(.{}, handleRequests, .{ &handler, &self.active_handlers }) catch |e| {
-            _ = self.active_handlers.fetchSub(1, .release);
-            log.warn("Failed to spawn thread: {s}", .{@errorName(e)});
-        };
+        // No server socket events in the main process — workers handle connections.
+        // Any poll event at index >= num_special_fds is unexpected.
+        log.warn("Unexpected poll event at index {d}", .{idx});
     }
 }
 
-fn handleRequests(handler: *Handler, active_handlers: *std.atomic.Value(usize)) !void {
-    defer {
-        handler.deinit();
-        _ = active_handlers.fetchSub(1, .release);
+/// Synchronize workers with current ACL and /run/user/ state.
+/// Starts workers for UIDs that are allowed and have a directory.
+/// Stops workers for UIDs that are no longer allowed.
+fn syncWorkers(self: *Server) void {
+    var active_uids = self.socket_manager.getActiveUids();
+    defer active_uids.deinit(self.socket_manager.allocator);
+
+    for (active_uids.items) |uid| {
+        self.worker_manager.ensureWorker(uid) catch |err| {
+            log.warn("Failed to sync worker for uid={d}: {s}", .{ uid, @errorName(err) });
+        };
     }
-    try handler.handle();
 }
