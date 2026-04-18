@@ -119,15 +119,6 @@ pub fn handle(self: *Handler) !void {
         return;
     };
 
-    self.checkNetns(client_info, &request) catch |err| {
-        log.err("Netns check failed for uid={d}, netns={s}: {s}", .{
-            client_info.uid,
-            request.netns orelse "none",
-            @errorName(err),
-        });
-        return;
-    };
-
     const cni = self.cni_manager.loadCni(request.resource()) catch |err| {
         log.err("Failed to load CNI for resource={s}: {s}", .{
             request.resource(),
@@ -248,22 +239,6 @@ fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Re
             },
         );
         return err;
-    }
-}
-
-fn checkNetns(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
-    _ = self;
-    _ = client_info;
-    if (request.netns) |_| {
-        // In the per-user daemon architecture, ownership verification is not needed:
-        //   1. Each worker serves exactly one UID (enforced by main process via ACL)
-        //   2. Socket ownership is set by fchownat to the target UID
-        //   3. Client UID is verified via SO_PEERCRED before reaching here
-        //   4. After setns into catatonit's mount namespace, statx returns
-        //      container-mapped UIDs (e.g., 0 instead of 1000), making
-        //      direct UID comparison incorrect.
-        //
-        // We only need to verify the netns path is accessible.
     }
 }
 
