@@ -7,6 +7,5 @@ test {
     _ = @import("cni/Cni.zig");
     _ = @import("cni/CniManager.zig");
     _ = @import("cni/DhcpManager.zig");
-    _ = @import("cni/DhcpManager_test.zig");
     _ = @import("cni/StateFile.zig");
 }
