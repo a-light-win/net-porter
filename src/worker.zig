@@ -21,6 +21,11 @@ pub fn cmd_worker(r: *cli.AppRunner) !cli.Command {
                 .value_ref = r.mkRef(&worker_opts.uid),
             },
             .{
+                .long_name = "username",
+                .help = "Username for ACL loading",
+                .value_ref = r.mkRef(&worker_opts.username),
+            },
+            .{
                 .long_name = "catatonit-pid",
                 .help = "PID of the catatonit infra container for this UID",
                 .value_ref = r.mkRef(&worker_opts.catatonit_pid),

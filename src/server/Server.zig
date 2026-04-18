@@ -41,25 +41,14 @@ pub fn new(opts: Opts) !Server {
     var logger = @import("root").logger;
     logger.log_settings = conf.log;
 
-    // Initialize AclManager and load ACL files from directory
+    // Scan ACL directory for allowed UIDs (username → UID resolution)
     var acl_manager = AclManager.init(allocator, conf.acl_dir);
     errdefer acl_manager.deinit();
-    acl_manager.startWatching(io);
 
-    // Derive allowed UIDs from ACL data
-    const allowed_uids = acl_manager.getAllowedUids(io, allocator);
+    const allowed_uids = acl_manager.scanUids(io);
+    log.info("ACL scan: {} allowed UIDs", .{allowed_uids.items.len});
 
     var socket_manager = try SocketManager.init(io, allocator, allowed_uids);
-
-    // Insert ACL inotify fd into socket_manager's poll set (at index 1)
-    if (acl_manager.acl_inotify_fd) |acl_fd| {
-        try socket_manager.poll_fds.insert(socket_manager.allocator, 1, .{
-            .fd = acl_fd,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        });
-        socket_manager.num_special_fds = 2;
-    }
 
     socket_manager.scanExisting(io);
 
@@ -85,8 +74,7 @@ pub fn deinit(self: *Server) void {
 }
 
 pub fn run(self: *Server) !void {
-    const io = self.io;
-    log.info("net-porter {s} started, monitoring /run/user/ and ACL directory", .{version});
+    log.info("net-porter {s} started, monitoring /run/user/", .{version});
 
     // Start workers for UIDs that already exist at startup
     self.syncWorkers();
@@ -103,42 +91,28 @@ pub fn run(self: *Server) !void {
 
         if (idx == 0) {
             // inotify event on /run/user/
-            const uid_events = self.socket_manager.processInotifyEvents(&event_buf);
+            var uid_events = self.socket_manager.processInotifyEvents(&event_buf);
             // Start workers for newly appeared UIDs
             for (uid_events.created.items) |uid| {
-                if (self.acl_manager.hasAnyPermission(io, uid, 0)) {
-                    self.worker_manager.ensureWorker(uid) catch |err| {
-                        log.warn("Failed to start worker for uid={d}: {s}", .{ uid, @errorName(err) });
-                    };
-                }
+                self.worker_manager.ensureWorker(uid) catch |err| {
+                    log.warn("Failed to start worker for uid={d}: {s}", .{ uid, @errorName(err) });
+                };
             }
             // Stop workers for disappeared UIDs
             for (uid_events.removed.items) |uid| {
                 self.worker_manager.stopWorker(uid);
             }
+            uid_events.created.deinit(self.socket_manager.allocator);
+            uid_events.removed.deinit(self.socket_manager.allocator);
             continue;
         }
 
-        if (idx == 1 and self.acl_manager.acl_inotify_fd != null) {
-            // inotify event on acl_dir
-            const changed = self.acl_manager.processInotifyEvents(&event_buf);
-            if (changed) {
-                self.acl_manager.reload(io);
-                const new_uids = self.acl_manager.getAllowedUids(io, std.heap.page_allocator);
-                self.socket_manager.updateAllowedUids(new_uids);
-                // Restart workers for added/removed UIDs
-                self.syncWorkers();
-            }
-            continue;
-        }
-
-        // No server socket events in the main process — workers handle connections.
-        // Any poll event at index >= num_special_fds is unexpected.
+        // No other special fds expected (ACL watching is done by workers)
         log.warn("Unexpected poll event at index {d}", .{idx});
     }
 }
 
-/// Synchronize workers with current ACL and /run/user/ state.
+/// Synchronize workers with current /run/user/ state.
 /// Starts workers for UIDs that are allowed and have a directory.
 fn syncWorkers(self: *Server) void {
     var active_uids = self.socket_manager.getActiveUids();

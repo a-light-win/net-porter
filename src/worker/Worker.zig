@@ -1,7 +1,7 @@
 //! Per-UID worker daemon — runs inside the container's mount namespace.
 //!
 //! The worker is spawned by the main server process via:
-//!   net-porter worker --uid <UID> --catatonit-pid <PID> --config <PATH>
+//!   net-porter worker --uid <UID> --username <name> --catatonit-pid <PID> --config <PATH>
 //!
 //! Lifecycle:
 //!   1. Load config, ACL, CNI configs (host namespace — paths accessible)
@@ -10,6 +10,7 @@
 //!   4. setns(catatonit mount ns) → unshare → make-rslave (enter correct namespace)
 //!   5. Bind mount host CNI plugin dir read-only (security: prevent binary replacement)
 //!   6. Event loop: accept connections, spawn handler threads
+//!   7. ACL hot-reload via inotify (separate watch thread)
 //!
 //! Security:
 //!   - CNI plugin dir is bind-mounted read-only from host (prevents binary replacement)
@@ -20,7 +21,7 @@
 const std = @import("std");
 const config_mod = @import("../config.zig");
 const version = @import("build_options").version;
-const AclManager = @import("../server/AclManager.zig");
+const AclManager = @import("AclManager.zig");
 const CniManager = @import("../cni/CniManager.zig");
 const DhcpManager = @import("../cni/DhcpManager.zig");
 const Handler = @import("Handler.zig");
@@ -36,6 +37,7 @@ const log = std.log.scoped(.worker);
 pub const Opts = struct {
     io: ?std.Io = null,
     uid: ?u32 = null,
+    username: ?[]const u8 = null,
     catatonit_pid: ?std.posix.pid_t = null,
     config_path: ?[]const u8 = null,
 };
@@ -45,6 +47,7 @@ const max_concurrent_handlers: usize = 64;
 config: config_mod.Config,
 io: std.Io,
 uid: u32,
+username: []const u8,
 catatonit_pid: std.posix.pid_t,
 acl_manager: AclManager,
 cni_manager: CniManager,
@@ -57,9 +60,10 @@ active_handlers: std.atomic.Value(usize) = .init(0),
 /// Initialize the worker. Performs all setup in the correct order:
 /// load config → create socket → namespace setup → init subsystems.
 pub fn new(opts: Opts) !Worker {
-    log.info("Worker initializing: uid={?d} catatonit_pid={?d} config={s}", .{ opts.uid, opts.catatonit_pid, opts.config_path orelse "(default)" });
+    log.info("Worker initializing: uid={?d} username={s} catatonit_pid={?d} config={s}", .{ opts.uid, opts.username orelse "(null)", opts.catatonit_pid, opts.config_path orelse "(default)" });
     const io = opts.io orelse return error.IoNotInitialized;
     const uid = opts.uid orelse return error.MissingUid;
+    const username = opts.username orelse return error.MissingUsername;
     const catatonit_pid = opts.catatonit_pid orelse return error.MissingCatatonitPid;
     const page_alloc = std.heap.page_allocator;
 
@@ -71,9 +75,9 @@ pub fn new(opts: Opts) !Worker {
     const conf = managed_config.config;
     errdefer managed_config.deinit();
 
-    // 2. Load ACL (one-time, no inotify — main process handles hot-reload)
-    var acl_manager = AclManager.init(page_alloc, conf.acl_dir);
-    acl_manager.loadFromDir(io);
+    // 2. Load ACL for this user (worker-side: loads <username>.json + groups)
+    var acl_manager = AclManager.init(page_alloc, io, conf.acl_dir, username, uid);
+    acl_manager.load();
 
     // 3. Load CNI configs (host namespace — cni_dir accessible)
     var cni_manager = CniManager.init(io, page_alloc, conf) catch |e| {
@@ -110,6 +114,7 @@ pub fn new(opts: Opts) !Worker {
         .config = conf,
         .io = io,
         .uid = uid,
+        .username = username,
         .catatonit_pid = catatonit_pid,
         .acl_manager = acl_manager,
         .cni_manager = cni_manager,
@@ -138,8 +143,15 @@ pub fn deinit(self: *Worker) void {
 
 pub fn run(self: *Worker) !void {
     const io = self.io;
-    log.info("net-porter worker {s} started for uid={d} (catatonit_pid={d})", .{ version, self.uid, self.catatonit_pid });
+    log.info("net-porter worker {s} started for uid={d} (username={s}, catatonit_pid={d})", .{ version, self.uid, self.username, self.catatonit_pid });
     const log_response = self.config.log.logEnabled(.debug, .traffic);
+
+    // Start ACL inotify watch thread (daemon thread, outlives worker)
+    if (self.acl_manager.getInotifyFd()) |_| {
+        _ = std.Thread.spawn(.{}, aclWatchLoop, .{self}) catch |err| {
+            log.warn("Failed to start ACL watch thread: {s} (ACL hot-reload disabled)", .{@errorName(err)});
+        };
+    }
 
     while (true) {
         var conn_stream = self.server.accept(io) catch |err| {
@@ -177,6 +189,31 @@ pub fn run(self: *Worker) !void {
             _ = self.active_handlers.fetchSub(1, .release);
             log.warn("Failed to spawn handler thread: {s}", .{@errorName(e)});
         };
+    }
+}
+
+/// Background thread: watches ACL directory for changes and triggers reload.
+fn aclWatchLoop(self: *Worker) void {
+    const fd = self.acl_manager.getInotifyFd() orelse return;
+    var event_buf: [4096]u8 = undefined;
+
+    var poll_fds = [1]std.posix.pollfd{
+        .{
+            .fd = fd,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        },
+    };
+
+    log.info("ACL watch thread started for uid={d}", .{self.uid});
+
+    while (true) {
+        const n = std.posix.poll(&poll_fds, -1) catch continue;
+        if (n == 0) continue;
+
+        if (self.acl_manager.processInotifyEvents(&event_buf)) {
+            self.acl_manager.reload();
+        }
     }
 }
 

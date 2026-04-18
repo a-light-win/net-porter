@@ -171,7 +171,7 @@ fn addGrantsFromEntry(self: *WorkerAclManager, arena_alloc: Allocator, entry: Ac
             try acl.ip_ranges.put(self.uid, ranges);
         }
         try acl.allow_uids.append(arena_alloc, self.uid);
-        try self.acl.append(arena_alloc, acl);
+        try self.acls.append(arena_alloc, acl);
     }
 }
 

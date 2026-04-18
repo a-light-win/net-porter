@@ -4,7 +4,7 @@ const json = std.json;
 const log = std.log.scoped(.worker);
 const traffic_log = std.log.scoped(.traffic);
 const plugin = @import("../plugin.zig");
-const AclManager = @import("../server/AclManager.zig");
+const AclManager = @import("AclManager.zig");
 const DhcpManager = @import("../cni/DhcpManager.zig");
 const Cni = @import("../cni/Cni.zig");
 const CniManager = @import("../cni/CniManager.zig");
@@ -111,9 +111,8 @@ pub fn handle(self: *Handler) !void {
     }
 
     self.authClient(client_info, &request) catch |err| {
-        log.err("Auth failed for uid={d}, gid={d}, resource={s}: {s}", .{
+        log.err("Auth failed for uid={d}, resource={s}: {s}", .{
             client_info.uid,
-            client_info.gid,
             request.resource(),
             @errorName(err),
         });
@@ -140,7 +139,7 @@ pub fn handle(self: *Handler) !void {
 
     // Static IP validation for setup action
     if (request.action == .setup) {
-        if (self.acl_manager.isStaticResource(self.io, request.resource())) {
+        if (self.acl_manager.isStaticResource(request.resource())) {
             self.validateStaticIp(client_info.uid, &request) catch |err| {
                 log.err("Static IP validation failed for uid={d}, resource={s}: {s}", .{
                     client_info.uid,
@@ -179,7 +178,7 @@ fn execAction(
     // container (catatonit) may already be gone, causing ensureStarted()
     // to fail. Teardown should still proceed to clean up whatever it can.
     if (request.action != .teardown) {
-        if (!self.acl_manager.isStaticResource(self.io, request.resource())) {
+        if (!self.acl_manager.isStaticResource(request.resource())) {
             try self.dhcp_manager.ensureStarted(caller_uid);
         }
     }
@@ -191,7 +190,7 @@ fn execAction(
 
     // After teardown, stop DHCP service if no active attachments remain
     if (request.action == .teardown) {
-        if (!self.acl_manager.isStaticResource(self.io, request.resource())) {
+        if (!self.acl_manager.isStaticResource(request.resource())) {
             if (!StateFile.hasActiveAttachments(self.io, caller_uid)) {
                 self.dhcp_manager.stop(caller_uid);
             }
@@ -223,7 +222,7 @@ fn getClientInfo(responser: *Responser) std.posix.UnexpectedError!ClientInfo {
 
 fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
     // Socket-level pre-filtering: reject if uid has no permission on any resource
-    if (!self.acl_manager.hasAnyPermission(self.io, client_info.uid, client_info.gid)) {
+    if (!self.acl_manager.hasAnyPermission(client_info.uid)) {
         const err = error.AccessDenied;
         self.responser.writeError(
             "User {} has no permission on any resource, error: {s}",
@@ -232,7 +231,7 @@ fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Re
         return err;
     }
     // Resource-level ACL check
-    if (!self.acl_manager.isAllowed(self.io, request.resource(), client_info.uid, client_info.gid)) {
+    if (!self.acl_manager.isAllowed(request.resource(), client_info.uid)) {
         const err = error.AccessDenied;
         self.responser.writeError(
             "Failed to access resource '{s}', error: {s}",
@@ -273,7 +272,7 @@ fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !v
     }
 
     const requested_ip = static_ips[0];
-    if (!self.acl_manager.isIpAllowed(self.io, request.resource(), uid, requested_ip)) {
+    if (!self.acl_manager.isIpAllowed(request.resource(), uid, requested_ip)) {
         self.responser.writeError("IP '{s}' is not allowed for uid={d} on resource '{s}'", .{
             requested_ip,
             uid,

@@ -11,11 +11,15 @@ pub const Grant = struct {
 };
 
 /// Represents a single ACL file's contents.
-/// The file specifies a user or group and the resources they can access.
+/// User ACL: grants + optional group references.
+/// Group ACL: grants only (file named @<group>.json).
 pub const Entry = struct {
     user: ?[:0]const u8 = null,
     group: ?[:0]const u8 = null,
     grants: []const Grant = &[_]Grant{},
+    /// Names of ACL groups to include (user ACL only).
+    /// Group files are named @<name>.json in the same directory.
+    groups: ?[]const []const u8 = null,
 };
 
 /// Parse an ACL entry from raw JSON bytes.

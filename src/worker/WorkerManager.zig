@@ -1,7 +1,7 @@
 //! Worker lifecycle manager — runs in the main server process.
 //!
 //! Responsible for:
-//!   - Spawning worker processes: `net-porter worker --uid <UID> --catatonit-pid <PID> ...`
+//!   - Spawning worker processes: `net-porter worker --uid <UID> --username <name> ...`
 //!   - Monitoring worker health via pidfd
 //!   - Restarting workers when catatonit PID changes
 //!   - Stopping workers when UID disappears or ACL removes access
@@ -12,6 +12,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const log = std.log.scoped(.worker);
+const user_mod = @import("../user.zig");
 const WorkerManager = @This();
 
 const WorkerEntry = struct {
@@ -154,14 +155,23 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
     const pid_str = try std.fmt.allocPrint(self.allocator, "{d}", .{catatonit_pid});
     defer self.allocator.free(pid_str);
 
-    // Build argv: /proc/self/exe worker --uid <uid> --catatonit-pid <pid> [--config <path>]
-    var argv = std.ArrayList([]const u8).initCapacity(self.allocator, 8) catch return error.OutOfMemory;
+    // Resolve UID to username for worker ACL loading
+    const username = user_mod.getUsername(self.allocator, uid) orelse {
+        log.err("Failed to resolve uid={d} to username, cannot spawn worker", .{uid});
+        return error.UserNotFound;
+    };
+    defer self.allocator.free(username);
+
+    // Build argv: /proc/self/exe worker --uid <uid> --username <name> --catatonit-pid <pid> [--config <path>]
+    var argv = std.ArrayList([]const u8).initCapacity(self.allocator, 10) catch return error.OutOfMemory;
     defer argv.deinit(self.allocator);
 
     argv.appendAssumeCapacity("/proc/self/exe");
     argv.appendAssumeCapacity("worker");
     argv.appendAssumeCapacity("--uid");
     argv.appendAssumeCapacity(uid_str);
+    argv.appendAssumeCapacity("--username");
+    argv.appendAssumeCapacity(username);
     argv.appendAssumeCapacity("--catatonit-pid");
     argv.appendAssumeCapacity(pid_str);
 
@@ -194,7 +204,7 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
     };
 
     try self.workers.put(uid, entry);
-    log.info("Spawned worker for uid={d} (pid={d}, catatonit_pid={d})", .{ uid, worker_pid, catatonit_pid });
+    log.info("Spawned worker for uid={d} (username={s}, pid={d}, catatonit_pid={d})", .{ uid, username, worker_pid, catatonit_pid });
 }
 
 fn killWorker(self: *WorkerManager, entry: WorkerEntry) void {
