@@ -164,13 +164,11 @@ fn addGrantsFromEntry(self: *WorkerAclManager, arena_alloc: Allocator, entry: Ac
         // Copy resource name into arena — parsed data will be freed by caller.
         const resource_name = try arena_alloc.dupe(u8, grant.resource);
         var acl = Acl.init(arena_alloc, resource_name);
-        // In worker context, all grants are for this UID only.
-        // IP ranges from the grant are associated with this UID.
+        // IP ranges from the grant are associated with this worker's UID.
         if (grant.ips) |ips| {
             const ranges = try Acl.parseIpRanges(arena_alloc, ips);
             try acl.ip_ranges.put(self.uid, ranges);
         }
-        try acl.allow_uids.append(arena_alloc, self.uid);
         try self.acls.append(arena_alloc, acl);
     }
 }
@@ -253,30 +251,25 @@ fn isRelevantFile(username: []const u8, group_names: []const []const u8, filenam
 // Query methods (thread-safe via mutex)
 // ============================================================
 
-/// Check if a uid has permission to access the named resource.
-pub fn isAllowed(self: *WorkerAclManager, name: []const u8, uid: u32) bool {
+/// Check if the resource is allowed (per-user daemon: if it exists in ACL, it's allowed).
+pub fn isAllowed(self: *WorkerAclManager, name: []const u8) bool {
     self.mutex.lock(self.io) catch return false;
     defer self.mutex.unlock(self.io);
 
     for (self.acls.items) |acl| {
         if (std.mem.eql(u8, name, acl.name)) {
-            return acl.isAllowed(uid, 0);
+            return true;
         }
     }
     return false;
 }
 
-/// Check if a uid has permission to access any resource.
-pub fn hasAnyPermission(self: *WorkerAclManager, uid: u32) bool {
+/// Check if the worker has permission on any resource.
+pub fn hasAnyPermission(self: *WorkerAclManager) bool {
     self.mutex.lock(self.io) catch return false;
     defer self.mutex.unlock(self.io);
 
-    for (self.acls.items) |acl| {
-        if (acl.isAllowed(uid, 0)) {
-            return true;
-        }
-    }
-    return false;
+    return self.acls.items.len > 0;
 }
 
 /// Check if a resource is a static IP resource.

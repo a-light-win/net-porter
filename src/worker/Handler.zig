@@ -222,7 +222,7 @@ fn getClientInfo(responser: *Responser) std.posix.UnexpectedError!ClientInfo {
 
 fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
     // Socket-level pre-filtering: reject if uid has no permission on any resource
-    if (!self.acl_manager.hasAnyPermission(client_info.uid)) {
+    if (!self.acl_manager.hasAnyPermission()) {
         const err = error.AccessDenied;
         self.responser.writeError(
             "User {} has no permission on any resource, error: {s}",
@@ -231,7 +231,7 @@ fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Re
         return err;
     }
     // Resource-level ACL check
-    if (!self.acl_manager.isAllowed(request.resource(), client_info.uid)) {
+    if (!self.acl_manager.isAllowed(request.resource())) {
         const err = error.AccessDenied;
         self.responser.writeError(
             "Failed to access resource '{s}', error: {s}",

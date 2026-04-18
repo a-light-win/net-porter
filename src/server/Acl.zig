@@ -1,14 +1,13 @@
 const std = @import("std");
-const user = @import("../user.zig");
 const Allocator = std.mem.Allocator;
 
 const Acl = @This();
 
 allocator: Allocator,
+/// Resource name this ACL entry controls.
 name: []const u8,
-allow_uids: std.ArrayList(u32) = .empty,
-allow_gids: std.ArrayList(u32) = .empty,
-// IP ranges per uid (parsed from grants with ips)
+/// IP ranges per uid (parsed from grants with ips).
+/// In per-user daemon mode, this is keyed by the worker's UID.
 ip_ranges: IpRangeMap,
 
 const IpRangeMap = std.AutoHashMap(u32, std.ArrayList(IpRange));
@@ -16,13 +15,6 @@ const IpRangeMap = std.AutoHashMap(u32, std.ArrayList(IpRange));
 pub const IpRange = struct {
     start: u128,
     end: u128,
-};
-
-/// Data for a single grant to be added to an Acl.
-pub const GrantData = struct {
-    user: ?[:0]const u8 = null,
-    group: ?[:0]const u8 = null,
-    ips: ?[]const [:0]const u8 = null,
 };
 
 /// Create an empty Acl for the given resource name.
@@ -34,53 +26,12 @@ pub fn init(allocator: Allocator, name: []const u8) Acl {
     };
 }
 
-/// Add a grant (user/group with optional IPs) to this Acl.
-pub fn addGrant(self: *Acl, allocator: Allocator, grant: GrantData) !void {
-    if (grant.user) |username| {
-        if (resolveUser(username)) |uid| {
-            try self.allow_uids.append(allocator, uid);
-
-            if (grant.ips) |ips| {
-                const ranges = try parseIpRanges(allocator, ips);
-                try self.ip_ranges.put(uid, ranges);
-            }
-        } else {
-            std.log.warn("Failed to resolve user '{s}', ignoring grant.", .{username});
-        }
-    }
-
-    if (grant.group) |groupname| {
-        if (resolveGroup(groupname)) |gid| {
-            try self.allow_gids.append(allocator, gid);
-        } else {
-            std.log.warn("Failed to resolve group '{s}', ignoring grant.", .{groupname});
-        }
-    }
-}
-
 pub fn deinit(self: *Acl) void {
-    self.allow_uids.deinit(self.allocator);
-    self.allow_gids.deinit(self.allocator);
-
     var it = self.ip_ranges.valueIterator();
     while (it.next()) |list| {
         list.*.deinit(self.allocator);
     }
     self.ip_ranges.deinit();
-}
-
-pub fn hasAnyAllow(self: Acl) bool {
-    return self.allow_uids.items.len > 0 or self.allow_gids.items.len > 0;
-}
-
-pub fn isAllowed(self: Acl, uid: u32, gid: u32) bool {
-    for (self.allow_uids.items) |allowed_uid| {
-        if (allowed_uid == uid) return true;
-    }
-    for (self.allow_gids.items) |allowed_gid| {
-        if (allowed_gid == gid) return true;
-    }
-    return false;
 }
 
 /// Whether this resource has IP constraints (static IP resource).
@@ -99,190 +50,6 @@ pub fn isIpAllowed(self: Acl, uid: u32, ip: []const u8) bool {
         }
     }
     return false;
-}
-
-// -- Tests --
-
-test "init creates empty acl" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try std.testing.expectEqualSlices(u8, "test", acl.name);
-    try std.testing.expectEqual(@as(usize, 0), acl.allow_uids.items.len);
-    try std.testing.expectEqual(@as(usize, 0), acl.allow_gids.items.len);
-    try std.testing.expectEqual(false, acl.hasAnyAllow());
-}
-
-test "addGrant with user" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{ .user = "root" });
-
-    try std.testing.expectEqual(@as(usize, 1), acl.allow_uids.items.len);
-    try std.testing.expectEqual(@as(u32, 0), acl.allow_uids.items[0]);
-    try std.testing.expect(acl.isAllowed(0, 0));
-    try std.testing.expect(!acl.isAllowed(333, 0));
-}
-
-test "addGrant with group" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{ .group = "root" });
-
-    try std.testing.expectEqual(@as(usize, 1), acl.allow_gids.items.len);
-    try std.testing.expect(acl.isAllowed(0, 0));
-}
-
-test "addGrant with numeric uid" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{ .user = "333" });
-    try acl.addGrant(allocator, .{ .group = "333" });
-
-    try std.testing.expect(acl.isAllowed(333, 0));
-    try std.testing.expect(acl.isAllowed(0, 333));
-    try std.testing.expect(!acl.isAllowed(100, 100));
-}
-
-test "addGrant with ips" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{
-        .user = "1000",
-        .ips = &[_][:0]const u8{ "192.168.1.10-192.168.1.20", "10.0.0.5-10.0.0.10" },
-    });
-
-    try std.testing.expect(acl.isStatic());
-    try std.testing.expect(acl.isIpAllowed(1000, "192.168.1.15"));
-    try std.testing.expect(acl.isIpAllowed(1000, "10.0.0.7"));
-    try std.testing.expect(!acl.isIpAllowed(1000, "192.168.1.30"));
-    try std.testing.expect(!acl.isIpAllowed(1001, "192.168.1.15"));
-}
-
-test "addGrant with unresolvable user is skipped" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{ .user = "nonexistent-user-xyz" });
-    try acl.addGrant(allocator, .{ .user = "1000" });
-
-    try std.testing.expectEqual(@as(usize, 1), acl.allow_uids.items.len);
-    try std.testing.expectEqual(@as(u32, 1000), acl.allow_uids.items[0]);
-}
-
-test "addGrant with unresolvable group is skipped" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{ .group = "nonexistent-group-xyz" });
-    try acl.addGrant(allocator, .{ .group = "100" });
-
-    try std.testing.expectEqual(@as(usize, 1), acl.allow_gids.items.len);
-    try std.testing.expectEqual(@as(u32, 100), acl.allow_gids.items[0]);
-}
-
-test "addGrant with mixed user and group" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{ .user = "1000" });
-    try acl.addGrant(allocator, .{ .group = "100" });
-    try acl.addGrant(allocator, .{ .user = "2000" });
-
-    try std.testing.expectEqual(@as(usize, 2), acl.allow_uids.items.len);
-    try std.testing.expectEqual(@as(usize, 1), acl.allow_gids.items.len);
-    try std.testing.expect(acl.isAllowed(1000, 0));
-    try std.testing.expect(acl.isAllowed(0, 100));
-    try std.testing.expect(acl.isAllowed(2000, 0));
-}
-
-test "isStatic returns false when no ip ranges" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{ .user = "1000" });
-    try std.testing.expect(!acl.isStatic());
-}
-
-test "isIpAllowed with single IP" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{
-        .user = "1000",
-        .ips = &[_][:0]const u8{"192.168.1.50"},
-    });
-
-    try std.testing.expect(acl.isIpAllowed(1000, "192.168.1.50"));
-    try std.testing.expect(!acl.isIpAllowed(1000, "192.168.1.51"));
-}
-
-test "isIpAllowed returns false for invalid IP string" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{
-        .user = "1000",
-        .ips = &[_][:0]const u8{"192.168.1.10-192.168.1.20"},
-    });
-
-    try std.testing.expect(!acl.isIpAllowed(1000, "not-an-ip"));
-    try std.testing.expect(!acl.isIpAllowed(1000, ""));
-    try std.testing.expect(!acl.isIpAllowed(1000, "999.999.999.999"));
-}
-
-test "isIpAllowed with multiple disjoint ranges for same user" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{
-        .user = "1000",
-        .ips = &[_][:0]const u8{
-            "10.0.0.5-10.0.0.10",
-            "10.0.1.100-10.0.1.110",
-        },
-    });
-
-    try std.testing.expect(acl.isIpAllowed(1000, "10.0.0.7"));
-    try std.testing.expect(acl.isIpAllowed(1000, "10.0.1.105"));
-    try std.testing.expect(!acl.isIpAllowed(1000, "10.0.0.15"));
-    try std.testing.expect(!acl.isIpAllowed(1000, "10.0.1.99"));
-}
-
-// -- Internal helpers --
-
-fn resolveUser(username: [:0]const u8) ?u32 {
-    if (std.fmt.parseUnsigned(u32, username, 10)) |uid| {
-        return uid;
-    } else |e| switch (e) {
-        else => {},
-    }
-    return user.getUid(username);
-}
-
-fn resolveGroup(groupname: [:0]const u8) ?u32 {
-    if (std.fmt.parseUnsigned(u32, groupname, 10)) |gid| {
-        return gid;
-    } else |e| switch (e) {
-        else => {},
-    }
-    return user.getGid(groupname);
 }
 
 pub fn parseIpRanges(allocator: Allocator, ips: []const [:0]const u8) !std.ArrayList(IpRange) {
@@ -394,6 +161,131 @@ fn parseIpv6ToInt(ip: []const u8) !u128 {
 
     if (groups != 8) return error.InvalidIp;
     return result;
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+test "init creates empty acl" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    try std.testing.expectEqualSlices(u8, "test", acl.name);
+    try std.testing.expectEqual(@as(usize, 0), acl.ip_ranges.count());
+    try std.testing.expect(!acl.isStatic());
+}
+
+test "isStatic with ip ranges" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    const ips = &[_][:0]const u8{ "192.168.1.10-192.168.1.20", "10.0.0.5-10.0.0.10" };
+    const ranges = try parseIpRanges(allocator, ips);
+    // Ownership transferred to acl.ip_ranges via put — do NOT deinit ranges separately.
+    try acl.ip_ranges.put(1000, ranges);
+
+    try std.testing.expect(acl.isStatic());
+}
+
+test "isIpAllowed with ip ranges" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    const ips = &[_][:0]const u8{ "192.168.1.10-192.168.1.20", "10.0.0.5-10.0.0.10" };
+    const ranges = try parseIpRanges(allocator, ips);
+    try acl.ip_ranges.put(1000, ranges);
+
+    try std.testing.expect(acl.isIpAllowed(1000, "192.168.1.15"));
+    try std.testing.expect(acl.isIpAllowed(1000, "10.0.0.7"));
+    try std.testing.expect(!acl.isIpAllowed(1000, "192.168.1.30"));
+    try std.testing.expect(!acl.isIpAllowed(1001, "192.168.1.15"));
+}
+
+test "isIpAllowed with single IP" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    const ips = &[_][:0]const u8{"192.168.1.50"};
+    const ranges = try parseIpRanges(allocator, ips);
+    try acl.ip_ranges.put(1000, ranges);
+
+    try std.testing.expect(acl.isIpAllowed(1000, "192.168.1.50"));
+    try std.testing.expect(!acl.isIpAllowed(1000, "192.168.1.51"));
+}
+
+test "isIpAllowed returns false for invalid IP string" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    const ips = &[_][:0]const u8{"192.168.1.10-192.168.1.20"};
+    const ranges = try parseIpRanges(allocator, ips);
+    try acl.ip_ranges.put(1000, ranges);
+
+    try std.testing.expect(!acl.isIpAllowed(1000, "not-an-ip"));
+    try std.testing.expect(!acl.isIpAllowed(1000, ""));
+    try std.testing.expect(!acl.isIpAllowed(1000, "999.999.999.999"));
+}
+
+test "isIpAllowed with multiple disjoint ranges for same user" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    const ips = &[_][:0]const u8{
+        "10.0.0.5-10.0.0.10",
+        "10.0.1.100-10.0.1.110",
+    };
+    const ranges = try parseIpRanges(allocator, ips);
+    try acl.ip_ranges.put(1000, ranges);
+
+    try std.testing.expect(acl.isIpAllowed(1000, "10.0.0.7"));
+    try std.testing.expect(acl.isIpAllowed(1000, "10.0.1.105"));
+    try std.testing.expect(!acl.isIpAllowed(1000, "10.0.0.15"));
+    try std.testing.expect(!acl.isIpAllowed(1000, "10.0.1.99"));
+}
+
+test "isIpAllowed returns false when uid has no ranges" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    try std.testing.expect(!acl.isIpAllowed(9999, "192.168.1.1"));
+}
+
+test "isIpAllowed with IPv6 range" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    const ips = &[_][:0]const u8{"2001:db8::1-2001:db8::ff"};
+    const ranges = try parseIpRanges(allocator, ips);
+    try acl.ip_ranges.put(1000, ranges);
+
+    try std.testing.expect(acl.isIpAllowed(1000, "2001:db8::1"));
+    try std.testing.expect(acl.isIpAllowed(1000, "2001:db8::80"));
+    try std.testing.expect(acl.isIpAllowed(1000, "2001:db8::ff"));
+    try std.testing.expect(!acl.isIpAllowed(1000, "2001:db8::100"));
+    try std.testing.expect(!acl.isIpAllowed(1000, "2001:db8::0"));
+    try std.testing.expect(!acl.isIpAllowed(1001, "2001:db8::1"));
+}
+
+test "isIpAllowed with single IPv6" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    const ips = &[_][:0]const u8{"::1"};
+    const ranges = try parseIpRanges(allocator, ips);
+    try acl.ip_ranges.put(1000, ranges);
+
+    try std.testing.expect(acl.isIpAllowed(1000, "::1"));
+    try std.testing.expect(!acl.isIpAllowed(1000, "::2"));
 }
 
 test "parseIpToInt" {
@@ -509,36 +401,4 @@ test "parseIpRange with single IPv6" {
     const range = try parseIpRange("::1");
     try std.testing.expectEqual(@as(u128, 0x00000000000000000000000000000001), range.start);
     try std.testing.expectEqual(@as(u128, 0x00000000000000000000000000000001), range.end);
-}
-
-test "isIpAllowed with IPv6 range" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{
-        .user = "1000",
-        .ips = &[_][:0]const u8{"2001:db8::1-2001:db8::ff"},
-    });
-
-    try std.testing.expect(acl.isIpAllowed(1000, "2001:db8::1"));
-    try std.testing.expect(acl.isIpAllowed(1000, "2001:db8::80"));
-    try std.testing.expect(acl.isIpAllowed(1000, "2001:db8::ff"));
-    try std.testing.expect(!acl.isIpAllowed(1000, "2001:db8::100"));
-    try std.testing.expect(!acl.isIpAllowed(1000, "2001:db8::0"));
-    try std.testing.expect(!acl.isIpAllowed(1001, "2001:db8::1"));
-}
-
-test "isIpAllowed with single IPv6" {
-    const allocator = std.testing.allocator;
-    var acl = init(allocator, "test");
-    defer acl.deinit();
-
-    try acl.addGrant(allocator, .{
-        .user = "1000",
-        .ips = &[_][:0]const u8{"::1"},
-    });
-
-    try std.testing.expect(acl.isIpAllowed(1000, "::1"));
-    try std.testing.expect(!acl.isIpAllowed(1000, "::2"));
 }
