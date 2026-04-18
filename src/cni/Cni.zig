@@ -555,7 +555,6 @@ const PluginConf = struct {
     }
 
     fn setDhcpSocketPath(self: *PluginConf, uid: u32) !void {
-        _ = uid;
         const allocator = self.arena.?.allocator();
 
         const ipam = self.conf.get("ipam") orelse return;
@@ -574,9 +573,12 @@ const PluginConf = struct {
             else => return,
         };
 
-        // Use /run/net-porter-dhcp.sock — accessible in the worker's namespace.
-        // Each worker is per-UID and runs in its own namespace, so no conflict.
-        const path = "/run/net-porter-dhcp.sock";
+        // /run/user/<uid>/ is visible in the worker's namespace via rslave propagation.
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "/run/user/{d}/net-porter-dhcp.sock",
+            .{uid},
+        );
 
         // Build a fresh ipam ObjectMap to avoid mutating the shared original
         var new_ipam = try json.ObjectMap.init(allocator, &.{}, &.{});

@@ -12,9 +12,14 @@ process: ?std.process.Child = null,
 mutex: std.Io.Mutex = .init,
 
 pub fn init(io: std.Io, allocator: Allocator, caller_uid: std.posix.uid_t, cni_path: []const u8) !DhcpService {
-    // In the worker's namespace, /run/ is the container's /run/.
-    // Each worker is per-UID in its own namespace — no path conflict.
-    const dhcp_sock_path = "/run/net-porter-dhcp.sock";
+    // /run/user/<uid>/ is visible in the worker's namespace via rslave propagation.
+    // Each worker is per-UID — no path conflict.
+    const dhcp_sock_path = try std.fmt.allocPrint(
+        allocator,
+        "/run/user/{d}/net-porter-dhcp.sock",
+        .{caller_uid},
+    );
+    errdefer allocator.free(dhcp_sock_path);
 
     const dhcp_cni_path = try std.fmt.allocPrint(
         allocator,
@@ -41,6 +46,7 @@ pub fn deinit(self: *DhcpService) void {
     }
 
     self.removeSocketPath();
+    self.allocator.free(self.sock_path);
     self.allocator.free(self.dhcp_cni_path);
 }
 
