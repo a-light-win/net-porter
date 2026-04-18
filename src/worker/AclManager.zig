@@ -233,15 +233,17 @@ pub fn getInotifyFd(self: WorkerAclManager) ?std.posix.fd_t {
 
 fn isRelevantFile(username: []const u8, group_names: []const []const u8, filename: []const u8) bool {
     // Check if it's the user's own file: <username>.json
-    const user_file = std.fmt.allocPrint(std.heap.page_allocator, "{s}.json", .{username}) catch return false;
-    defer std.heap.page_allocator.free(user_file);
-    if (std.mem.eql(u8, filename, user_file)) return true;
+    if (std.mem.endsWith(u8, filename, ".json") and
+        std.mem.eql(u8, filename[0 .. filename.len - ".json".len], username))
+        return true;
 
     // Check if it's a referenced group file: @<groupname>.json
     for (group_names) |group_name| {
-        const group_file = std.fmt.allocPrint(std.heap.page_allocator, "@{s}.json", .{group_name}) catch continue;
-        defer std.heap.page_allocator.free(group_file);
-        if (std.mem.eql(u8, filename, group_file)) return true;
+        if (filename.len > 0 and filename[0] == '@' and
+            std.mem.endsWith(u8, filename, ".json") and
+            filename.len == 1 + group_name.len + ".json".len and
+            std.mem.eql(u8, filename[1 .. filename.len - ".json".len], group_name))
+            return true;
     }
 
     return false;
@@ -296,4 +298,25 @@ pub fn isIpAllowed(self: *WorkerAclManager, name: []const u8, uid: u32, ip: []co
         }
     }
     return false;
+}
+
+test "isRelevantFile matches user file" {
+    const groups = &[_][]const u8{"devops"};
+    try std.testing.expect(isRelevantFile("alice", groups, "alice.json"));
+    try std.testing.expect(!isRelevantFile("alice", groups, "bob.json"));
+}
+
+test "isRelevantFile matches group file" {
+    const groups = &[_][]const u8{ "devops", "engineering" };
+    try std.testing.expect(isRelevantFile("alice", groups, "@devops.json"));
+    try std.testing.expect(isRelevantFile("alice", groups, "@engineering.json"));
+    try std.testing.expect(!isRelevantFile("alice", groups, "@finance.json"));
+}
+
+test "isRelevantFile rejects non-matching patterns" {
+    const groups = &[_][]const u8{"devops"};
+    try std.testing.expect(!isRelevantFile("alice", groups, "alice.json.bak"));
+    try std.testing.expect(!isRelevantFile("alice", groups, "README.md"));
+    try std.testing.expect(!isRelevantFile("alice", groups, "alice"));
+    try std.testing.expect(!isRelevantFile("alice", groups, ""));
 }
