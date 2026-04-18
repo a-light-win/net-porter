@@ -203,18 +203,3 @@ pub fn processInotifyEvents(self: *SocketManager, event_buf: []u8) UidEvents {
         }
     }
 }
-
-/// Poll for events. Returns the index into poll_fds that has activity,
-/// or null if timed out.
-pub fn poll(self: *SocketManager, timeout_ms: i32) !?usize {
-    const n = try std.posix.poll(self.poll_fds.items, timeout_ms);
-    if (n == 0) return null;
-
-    for (self.poll_fds.items, 0..) |*pfd, i| {
-        if (pfd.revents & std.posix.POLL.IN != 0) {
-            return i;
-        }
-    }
-
-    return null;
-}
