@@ -506,6 +506,19 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
     var run_status: u32 = 0;
     _ = linux.wait4(systemd_run_pid, &run_status, 0, null);
 
+    // Check if systemd-run itself succeeded — if it failed there is no scope
+    // and no worker process to monitor.
+    if (linux.W.IFEXITED(run_status)) {
+        const exit_code = linux.W.EXITSTATUS(run_status);
+        if (exit_code != 0) {
+            log.err("systemd-run failed for uid={d} with exit code {d}", .{ uid, exit_code });
+            return error.SpawnFailed;
+        }
+    } else if (linux.W.IFSIGNALED(run_status)) {
+        log.err("systemd-run killed by signal for uid={d}", .{uid});
+        return error.SpawnFailed;
+    }
+
     // Find the actual worker PID inside the scope.
     const worker_pid = self.findScopeWorkerPid(uid) catch |err| blk: {
         log.warn("Failed to find worker PID for uid={d}: {s}, falling back to systemd-run pid", .{ uid, @errorName(err) });
