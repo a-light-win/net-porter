@@ -847,6 +847,14 @@ const PluginConf = struct {
             .stderr = .pipe,
             .environ_map = &env_map,
         });
+        // Ensure child process is cleaned up on any error between spawn and wait.
+        // Without this, pipe fds leak and the child becomes a zombie process.
+        errdefer {
+            if (process.stdin) |f| f.close(io);
+            if (process.stdout) |f| f.close(io);
+            if (process.stderr) |f| f.close(io);
+            _ = process.wait(io); // reap zombie
+        }
 
         var stdout = std.ArrayListUnmanaged(u8).empty;
         defer stdout.deinit(allocator);
