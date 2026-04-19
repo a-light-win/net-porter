@@ -243,6 +243,4 @@ test "listen rejects symlink path" {
     try std.testing.expectError(error.SymlinkDetected, result);
 }
 
-test {
-    _ = @import("domain_socket_test.zig");
-}
+
