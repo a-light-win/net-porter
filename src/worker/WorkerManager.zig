@@ -57,6 +57,9 @@ const max_backoff_ms: u32 = 60000;
 allocator: Allocator,
 io: std.Io,
 config_path: ?[]const u8,
+/// Resolved absolute path to the net-porter binary (readlink /proc/self/exe).
+/// Populated lazily on first spawn; must be freed in deinit.
+self_exe_path: ?[]const u8 = null,
 workers: WorkerMap,
 /// Metadata for monitored pidfds — kept in sync with monitored_pollfds.
 monitored_metas: std.ArrayList(FdMeta),
@@ -85,6 +88,9 @@ pub fn init(io: std.Io, allocator: Allocator, config_path: ?[]const u8) WorkerMa
 pub fn deinit(self: *WorkerManager) void {
     // Release monitoring resources — do NOT kill workers.
     // Workers run in independent systemd scopes and survive server shutdown.
+    if (self.self_exe_path) |p| {
+        self.allocator.free(p);
+    }
     var it = self.workers.iterator();
     while (it.next()) |entry| {
         if (entry.value_ptr.pidfd >= 0) {
@@ -436,6 +442,7 @@ fn buildWorkerArgv(
     catatonit_pid: std.posix.pid_t,
     username: []const u8,
     config_path: ?[]const u8,
+    exe_path: []const u8,
 ) !WorkerArgv {
     const uid_str = try std.fmt.allocPrint(allocator, "{d}", .{uid});
     errdefer allocator.free(uid_str);
@@ -443,7 +450,7 @@ fn buildWorkerArgv(
     const pid_str = try std.fmt.allocPrint(allocator, "{d}", .{catatonit_pid});
     errdefer allocator.free(pid_str);
 
-    const scope_name = try std.fmt.allocPrint(allocator, "net-porter-worker@{d}.scope", .{uid});
+    const scope_name = try std.fmt.allocPrint(allocator, "net-porter-worker-{d}.scope", .{uid});
     errdefer allocator.free(scope_name);
 
     // 15 fixed args + 2 optional (--config + path) = 17 max
@@ -458,7 +465,7 @@ fn buildWorkerArgv(
     argv.appendAssumeCapacity("CollectMode=inactive-or-failed");
     argv.appendAssumeCapacity("--");
 
-    argv.appendAssumeCapacity("/proc/self/exe");
+    argv.appendAssumeCapacity(exe_path);
     argv.appendAssumeCapacity("worker");
     argv.appendAssumeCapacity("--uid");
     argv.appendAssumeCapacity(uid_str);
@@ -488,7 +495,23 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
     };
     defer self.allocator.free(username);
 
-    var worker_argv = try buildWorkerArgv(self.allocator, uid, catatonit_pid, username, self.config_path);
+    // Lazily resolve and cache the net-porter binary path.
+    // We cannot use /proc/self/exe in the systemd-run command line because
+    // systemd-run forks before exec'ing the child — at that point
+    // /proc/self/exe resolves to the systemd-run binary, not net-porter.
+    const exe_path = exe_path: {
+        if (self.self_exe_path) |p| break :exe_path p;
+        var buf: [std.posix.PATH_MAX]u8 = undefined;
+        const n = std.Io.Dir.readLinkAbsolute(self.io, "/proc/self/exe", &buf) catch |err| {
+            log.err("Failed to resolve /proc/self/exe: {s}", .{@errorName(err)});
+            return err;
+        };
+        const owned = try self.allocator.dupe(u8, buf[0..n]);
+        self.self_exe_path = owned;
+        break :exe_path owned;
+    };
+
+    var worker_argv = try buildWorkerArgv(self.allocator, uid, catatonit_pid, username, self.config_path, exe_path);
     defer worker_argv.deinit(self.allocator);
 
     const process = std.process.spawn(self.io, .{
@@ -575,7 +598,7 @@ fn stopAndCleanup(self: *WorkerManager, uid: u32) void {
 
 /// Stop a worker scope via systemctl.
 fn stopScope(self: *WorkerManager, uid: u32) void {
-    const scope_name = std.fmt.allocPrint(self.allocator, "net-porter-worker@{d}.scope", .{uid}) catch return;
+    const scope_name = std.fmt.allocPrint(self.allocator, "net-porter-worker-{d}.scope", .{uid}) catch return;
     defer self.allocator.free(scope_name);
 
     const result = std.process.run(self.allocator, self.io, .{
@@ -594,7 +617,7 @@ fn stopScope(self: *WorkerManager, uid: u32) void {
 
 /// Try to adopt a worker that was spawned by a previous server instance.
 fn tryAdoptExistingScope(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) bool {
-    const scope_name = std.fmt.allocPrint(self.allocator, "net-porter-worker@{d}.scope", .{uid}) catch return false;
+    const scope_name = std.fmt.allocPrint(self.allocator, "net-porter-worker-{d}.scope", .{uid}) catch return false;
     defer self.allocator.free(scope_name);
 
     const worker_pid = self.findScopeWorkerPid(uid) catch return false;
@@ -640,7 +663,7 @@ fn tryAdoptExistingScope(self: *WorkerManager, uid: u32, catatonit_pid: std.posi
 
 /// Find the worker PID by reading the scope's cgroup.procs file.
 fn findScopeWorkerPid(self: *WorkerManager, uid: u32) !std.posix.pid_t {
-    const path = try std.fmt.allocPrint(self.allocator, "/sys/fs/cgroup/system.slice/net-porter-worker@{d}.scope/cgroup.procs", .{uid});
+    const path = try std.fmt.allocPrint(self.allocator, "/sys/fs/cgroup/system.slice/net-porter-worker-{d}.scope/cgroup.procs", .{uid});
     defer self.allocator.free(path);
 
     var attempts: u8 = 0;
@@ -862,22 +885,23 @@ test "nextRetryTimeoutMs returns null when no retry scheduled" {
 
 test "buildWorkerArgv builds correct argv without config_path" {
     const allocator = std.testing.allocator;
+    const test_exe = "/usr/bin/net-porter";
 
-    var wa = try buildWorkerArgv(allocator, 1000, 12345, "testuser", null);
+    var wa = try buildWorkerArgv(allocator, 1000, 12345, "testuser", null, test_exe);
     defer wa.deinit(allocator);
 
     // 15 fixed args, no --config
     try std.testing.expectEqual(@as(usize, 15), wa.argv.items.len);
 
-    // Verify structure: systemd-run --scope --unit <scope> --property ... -- /proc/self/exe worker ...
+    // Verify structure: systemd-run --scope --unit <scope> --property ... -- <exe> worker ...
     try std.testing.expectEqualStrings("systemd-run", wa.argv.items[0]);
     try std.testing.expectEqualStrings("--scope", wa.argv.items[1]);
     try std.testing.expectEqualStrings("--unit", wa.argv.items[2]);
-    try std.testing.expectEqualStrings("net-porter-worker@1000.scope", wa.argv.items[3]);
+    try std.testing.expectEqualStrings("net-porter-worker-1000.scope", wa.argv.items[3]);
     try std.testing.expectEqualStrings("--property", wa.argv.items[4]);
     try std.testing.expectEqualStrings("CollectMode=inactive-or-failed", wa.argv.items[5]);
     try std.testing.expectEqualStrings("--", wa.argv.items[6]);
-    try std.testing.expectEqualStrings("/proc/self/exe", wa.argv.items[7]);
+    try std.testing.expectEqualStrings(test_exe, wa.argv.items[7]);
     try std.testing.expectEqualStrings("worker", wa.argv.items[8]);
     try std.testing.expectEqualStrings("--uid", wa.argv.items[9]);
     try std.testing.expectEqualStrings("1000", wa.argv.items[10]);
@@ -889,14 +913,15 @@ test "buildWorkerArgv builds correct argv without config_path" {
     // Verify temporary strings match argv references
     try std.testing.expectEqualStrings("1000", wa.uid_str);
     try std.testing.expectEqualStrings("12345", wa.pid_str);
-    try std.testing.expectEqualStrings("net-porter-worker@1000.scope", wa.scope_name);
+    try std.testing.expectEqualStrings("net-porter-worker-1000.scope", wa.scope_name);
 }
 
 test "buildWorkerArgv builds correct argv with config_path (full parameters)" {
     const allocator = std.testing.allocator;
     const config = "/etc/net-porter/config.toml";
+    const test_exe = "/usr/bin/net-porter";
 
-    var wa = try buildWorkerArgv(allocator, 1000, 12345, "testuser", config);
+    var wa = try buildWorkerArgv(allocator, 1000, 12345, "testuser", config, test_exe);
     defer wa.deinit(allocator);
 
     // 15 fixed args + 2 optional (--config + path) = 17
@@ -906,11 +931,11 @@ test "buildWorkerArgv builds correct argv with config_path (full parameters)" {
     try std.testing.expectEqualStrings("systemd-run", wa.argv.items[0]);
     try std.testing.expectEqualStrings("--scope", wa.argv.items[1]);
     try std.testing.expectEqualStrings("--unit", wa.argv.items[2]);
-    try std.testing.expectEqualStrings("net-porter-worker@1000.scope", wa.argv.items[3]);
+    try std.testing.expectEqualStrings("net-porter-worker-1000.scope", wa.argv.items[3]);
     try std.testing.expectEqualStrings("--property", wa.argv.items[4]);
     try std.testing.expectEqualStrings("CollectMode=inactive-or-failed", wa.argv.items[5]);
     try std.testing.expectEqualStrings("--", wa.argv.items[6]);
-    try std.testing.expectEqualStrings("/proc/self/exe", wa.argv.items[7]);
+    try std.testing.expectEqualStrings(test_exe, wa.argv.items[7]);
     try std.testing.expectEqualStrings("worker", wa.argv.items[8]);
     try std.testing.expectEqualStrings("--uid", wa.argv.items[9]);
     try std.testing.expectEqualStrings("1000", wa.argv.items[10]);
@@ -927,13 +952,13 @@ test "buildWorkerArgv builds correct argv with config_path (full parameters)" {
 test "buildWorkerArgv with large UID and PID values" {
     const allocator = std.testing.allocator;
 
-    var wa = try buildWorkerArgv(allocator, 4294967294, 2147483647, "root", "/opt/config.yaml");
+    var wa = try buildWorkerArgv(allocator, 4294967294, 2147483647, "root", "/opt/config.yaml", "/usr/bin/net-porter");
     defer wa.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 17), wa.argv.items.len);
     try std.testing.expectEqualStrings("4294967294", wa.argv.items[10]); // uid_str
     try std.testing.expectEqualStrings("2147483647", wa.argv.items[14]); // pid_str
-    try std.testing.expectEqualStrings("net-porter-worker@4294967294.scope", wa.argv.items[3]); // scope_name
+    try std.testing.expectEqualStrings("net-porter-worker-4294967294.scope", wa.argv.items[3]); // scope_name
 }
 
 // ── Tests: addPendingLocked / scheduleRetry ──────────────────────────
@@ -1085,7 +1110,7 @@ test "stopWorker removes UID from pending list" {
 test "WorkerArgv.deinit frees all allocated memory" {
     const allocator = std.testing.allocator;
 
-    var wa = try buildWorkerArgv(allocator, 1000, 54321, "testuser", "/path/to/config.toml");
+    var wa = try buildWorkerArgv(allocator, 1000, 54321, "testuser", "/path/to/config.toml", "/usr/bin/net-porter");
     // Verify it built correctly before cleanup
     try std.testing.expectEqual(@as(usize, 17), wa.argv.items.len);
     // deinit should not leak — verified by std.testing.allocator (detects leaks)
