@@ -81,7 +81,7 @@ fn start(self: *DhcpService) !void {
 
     fn isAlive(self: DhcpService) bool {
         if (self.process) |process| {
-            const pid = process.id.? orelse return false;
+            const pid = process.id orelse return false;
 
             // Use waitpid(WNOHANG) instead of kill(pid, 0).
             //
