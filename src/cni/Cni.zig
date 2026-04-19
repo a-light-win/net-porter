@@ -4,7 +4,7 @@ const log = std.log.scoped(.cni);
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const plugin = @import("../plugin.zig");
-const Responser = plugin.Responser;
+const Responser = @import("../worker/Responser.zig");
 const managed_type = @import("managed_type.zig");
 const StateFile = @import("StateFile.zig");
 
