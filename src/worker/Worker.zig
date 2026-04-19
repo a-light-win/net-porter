@@ -331,6 +331,23 @@ fn openDirFd(arena_alloc: std.mem.Allocator, path: []const u8) !std.posix.fd_t {
     return @intCast(rc);
 }
 
+/// Check if a file descriptor and a filesystem path refer to the same file
+/// (same device and inode number). Uses statx for the comparison.
+/// Returns false if either stat call fails (fail-open: assume different files).
+fn isSameFile(fd: std.posix.fd_t, path: [*:0]const u8) bool {
+    var fd_stat: linux.Statx = undefined;
+    const fd_rc = linux.statx(fd, "", @intFromEnum(linux.AT.EMPTY_PATH), linux.STATX{ .INO = true }, &fd_stat);
+    if (std.posix.errno(fd_rc) != .SUCCESS) return false;
+
+    var path_stat: linux.Statx = undefined;
+    const path_rc = linux.statx(linux.AT.FDCWD, path, 0, linux.STATX{ .INO = true }, &path_stat);
+    if (std.posix.errno(path_rc) != .SUCCESS) return false;
+
+    return fd_stat.ino == path_stat.ino and
+        fd_stat.dev_major == path_stat.dev_major and
+        fd_stat.dev_minor == path_stat.dev_minor;
+}
+
 /// Bind mount a host directory read-only into the current namespace.
 /// `host_dir_fd` must have been opened before the namespace change.
 /// `mount_point` is the path where the directory will appear (same as host path).
@@ -351,12 +368,22 @@ fn bindMountReadOnly(arena_alloc: std.mem.Allocator, host_dir_fd: std.posix.fd_t
     }
     _ = linux.mkdir(mnt_z, 0o755); // ignore error — may already exist
 
-    // Source: /proc/self/fd/<host_dir_fd> — resolves to the host directory
-    // regardless of current mount namespace.
+    // Choose bind mount source.
+    //
+    // When the host directory (referenced by fd) and the target path in the
+    // current namespace refer to the same file (same device + inode), using
+    // /proc/self/fd/<fd> as source can silently succeed without creating a
+    // mount entry. In that case, use the target path directly (mount --bind
+    // /path /path), which works correctly.
+    //
+    // When they are different files (e.g., container with overlay rootfs where
+    // the host path doesn't exist), /proc/self/fd/<fd> is the only way to
+    // reference the host directory across namespace boundaries.
     const fd_path = try std.fmt.allocPrintSentinel(arena_alloc, "/proc/self/fd/{d}", .{host_dir_fd}, 0);
+    const source = if (isSameFile(host_dir_fd, mnt_z)) mnt_z else fd_path;
 
     // Bind mount
-    const bind_rc = linux.mount(fd_path, mnt_z, "", linux.MS.BIND, 0);
+    const bind_rc = linux.mount(source, mnt_z, "", linux.MS.BIND, 0);
     if (std.posix.errno(bind_rc) != .SUCCESS) {
         log.warn("{s} dir bind mount failed: {s}", .{ label, @tagName(std.posix.errno(bind_rc)) });
         return error.BindMountFailed;
