@@ -40,7 +40,6 @@ const DriverOptions = struct {
 const NetworkOptions = struct {
     interface_name: []const u8, // CNI_IFNAME
     static_ips: ?[]const []const u8 = null,
-    static_mac: ?[]const u8 = null,
 };
 
 pub const NetworkPluginExec = struct {

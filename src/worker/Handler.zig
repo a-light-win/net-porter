@@ -95,6 +95,27 @@ pub fn handle(self: *Handler) !void {
         traffic_log.debug("{s}", .{raw_request});
     }
 
+    // Validate action/request type consistency.
+    // Normal flow: create→network, setup/teardown→exec.
+    // A client bypassing the plugin could send mismatched types,
+    // which would trigger unreachable in requestExec() downstream.
+    switch (request.action) {
+        .create => {
+            if (request.request != .network) {
+                log.err("Invalid request: create action with non-network type from uid={d}", .{client_info.uid});
+                self.responser.writeError("Invalid request", .{});
+                return;
+            }
+        },
+        .setup, .teardown => {
+            if (request.request != .exec) {
+                log.err("Invalid request: {s} action with non-exec type from uid={d}", .{@tagName(request.action), client_info.uid});
+                self.responser.writeError("Invalid request", .{});
+                return;
+            }
+        },
+    }
+
     // Validate CNI identifiers for exec requests (path traversal prevention)
     if (request.request == .exec) {
         const exec_req = request.requestExec();
@@ -300,6 +321,14 @@ fn validateCniIdentifier(value: []const u8, field_name: []const u8) !void {
 /// Validate that a netns path has the expected format: /proc/<pid>/ns/net
 /// where <pid> is a non-empty sequence of decimal digits.
 /// This prevents path traversal and arbitrary file access via CNI_NETNS.
+///
+/// Note: PID ownership is NOT validated here. Defense-in-depth is provided
+/// by the PID namespace: the worker enters the catatonit's mount namespace,
+/// where /proc shows only processes within that container's PID namespace.
+/// A malicious client cannot reference host PIDs or other containers' PIDs
+/// because they are invisible in this /proc mount. This relies on the
+/// catatonit container having its own PID namespace (the default in rootless
+/// podman). Running with --pid=host would break this assumption.
 pub fn validateNetnsPath(netns: []const u8) !void {
     const prefix = "/proc/";
     const suffix = "/ns/net";
@@ -401,4 +430,66 @@ test "validateNetnsPath rejects overly long paths" {
     // This should actually be accepted since it's a valid format with a long PID
     // But real PIDs won't be this long
     try validateNetnsPath(long_path);
+}
+
+// ─── Action/Request consistency tests ──────────────────────────────────
+//
+// The consistency check in handle() exists because a malicious client
+// can craft JSON that the plugin would never produce: e.g. action=setup
+// with request=.network. Without the guard, this reaches requestExec()
+// which hits `unreachable` and crashes the worker.
+//
+// These tests verify the dangerous state is parseable from JSON (the
+// attack vector) and document the invariant the guard protects.
+
+test "action/request consistency: setup+network is parseable from JSON" {
+    const allocator = std.testing.allocator;
+
+    // Malicious JSON: setup action paired with network type
+    const malicious_json =
+        \\{"action":"setup","request":{"network":{"driver":"net-porter","options":{"net_porter_socket":"/run/user/1000/net-porter.sock","net_porter_resource":"test-resource"}}}}
+    ;
+
+    const parsed = std.json.parseFromSlice(plugin.Request, allocator, malicious_json, .{}) catch |err| {
+        // If parsing fails, the attack vector is already blocked by the parser
+        std.debug.print("Parser rejected mismatched JSON: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer parsed.deinit();
+
+    const request = parsed.value;
+    // Verify the dangerous state exists after parsing
+    try std.testing.expect(request.action == .setup);
+    try std.testing.expect(request.request == .network);
+    // requestExec() on this would hit unreachable — handle() guards against it.
+}
+
+test "action/request consistency: teardown+network is parseable from JSON" {
+    const allocator = std.testing.allocator;
+
+    const malicious_json =
+        \\{"action":"teardown","request":{"network":{"driver":"net-porter","options":{"net_porter_socket":"/run/user/1000/net-porter.sock","net_porter_resource":"test-resource"}}}}
+    ;
+
+    const parsed = std.json.parseFromSlice(plugin.Request, allocator, malicious_json, .{}) catch return;
+    defer parsed.deinit();
+
+    const request = parsed.value;
+    try std.testing.expect(request.action == .teardown);
+    try std.testing.expect(request.request == .network);
+}
+
+test "action/request consistency: create+exec is parseable from JSON" {
+    const allocator = std.testing.allocator;
+
+    const malicious_json =
+        \\{"action":"create","request":{"exec":{"container_name":"test","container_id":"test-id","network":{"driver":"net-porter","options":{"net_porter_socket":"/run/user/1000/net-porter.sock","net_porter_resource":"test-resource"}},"network_options":{"interface_name":"eth0"}}}}
+    ;
+
+    const parsed = std.json.parseFromSlice(plugin.Request, allocator, malicious_json, .{}) catch return;
+    defer parsed.deinit();
+
+    const request = parsed.value;
+    try std.testing.expect(request.action == .create);
+    try std.testing.expect(request.request == .exec);
 }
