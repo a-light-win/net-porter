@@ -239,18 +239,6 @@ pub fn nextRetryTimeoutMs(self: *WorkerManager) ?i32 {
     return @intCast(remaining_ms);
 }
 
-/// Get the list of UIDs with active workers.
-pub fn activeUids(self: *WorkerManager, allocator: Allocator) ![]u32 {
-    var uids = try std.ArrayList(u32).initCapacity(allocator, self.workers.count());
-    errdefer uids.deinit(allocator);
-
-    var it = self.workers.keyIterator();
-    while (it.next()) |uid| {
-        uids.appendAssumeCapacity(uid.*);
-    }
-    return uids.toOwnedSlice(allocator);
-}
-
 // ── Internal — mutex held by caller ──────────────────────────────────
 
 /// Batch ensure: scan /proc once, handle all requested + pending UIDs.
