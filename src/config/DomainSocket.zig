@@ -1,9 +1,6 @@
 const std = @import("std");
 const log = std.log.scoped(.domain_socket);
 const linux = std.os.linux;
-const c = @cImport({
-    @cInclude("unistd.h");
-});
 const DomainSocket = @This();
 
 /// Socket file name used under /run/user/<uid>/
@@ -23,8 +20,9 @@ pub fn connect(io: std.Io, path: [:0]const u8) !std.Io.net.Stream {
 
 /// Listen on a filesystem unix socket.
 /// Creates the socket file, sets ownership to `uid`, and mode to 0600.
-/// Security: uses fd-based fchown (immune to symlink races), rejects
-/// pre-existing symlinks at the path, and verifies socket integrity after bind.
+/// Security: rejects pre-existing symlinks at the path, verifies socket
+/// integrity after bind, and uses path-based fchownat/fchmodat (not fd-based,
+/// which operates on the sockfs inode invisible from the filesystem).
 pub fn listen(io: std.Io, path: [:0]const u8, uid: std.posix.uid_t) !std.Io.net.Server {
     const address = try std.Io.net.UnixAddress.init(path);
 
@@ -60,16 +58,16 @@ pub fn listen(io: std.Io, path: [:0]const u8, uid: std.posix.uid_t) !std.Io.net.
         return err;
     };
 
-    // Then set ownership via fd — immune to symlink TOCTOU (no path resolution)
-    const fd = server.socket.handle;
-    setOwnerFd(fd, uid) catch |err| {
-        server.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, path) catch {};
-        return err;
-    };
-
-    // Set mode via path (fd-based fchmod does not affect socket file mode)
-    setModePath(path, 0o600) catch |err| {
+    // Set ownership via path (after verifying not a symlink above).
+    //
+    // IMPORTANT: Do NOT use fd-based fchown on socket fds!
+    // Unix domain sockets have two separate inodes:
+    //   1. sockfs inode (kernel-internal, pointed to by socket fd)
+    //   2. filesystem inode (visible via ls/stat, pointed to by path)
+    // fchown(fd) operates on the sockfs inode — invisible from ls -l.
+    // fchownat(path) operates on the filesystem inode — the one that matters.
+    // This is the same reason setModePath uses path-based fchmodat.
+    setOwnerPath(path, uid) catch |err| {
         server.deinit(io);
         std.Io.Dir.cwd().deleteFile(io, path) catch {};
         return err;
@@ -87,12 +85,27 @@ fn isSymlink(path: [:0]const u8) bool {
     return (statx_buf.mode & 0o170000) == 0o120000; // S_IFLNK
 }
 
-/// Set socket ownership via fd — no path resolution, no symlink following.
-fn setOwnerFd(fd: std.posix.fd_t, uid: std.posix.uid_t) !void {
-    const ret = c.fchown(fd, uid, @as(std.posix.gid_t, @bitCast(@as(i32, -1))));
-    if (ret != 0) {
-        const err = std.posix.errno(ret);
-        log.warn("Failed to set socket owner: {s}", .{@tagName(err)});
+/// Set socket ownership via path (after verifying it is not a symlink).
+///
+/// IMPORTANT: Must use path-based fchownat, NOT fd-based fchown.
+/// On Linux, a Unix domain socket bound to a path has TWO inodes:
+///   - sockfs inode (kernel-internal, associated with the socket fd)
+///   - filesystem inode (associated with the dentry, visible via ls/stat)
+/// fchown(fd) changes the sockfs inode's ownership — invisible from the
+/// filesystem perspective, so the socket file remains owned by root.
+/// fchownat(path) changes the filesystem inode's ownership — the one that
+/// actually controls access permissions and is visible via ls -l.
+/// Symlink TOCTOU is prevented by isSymlink() checks before and after bind.
+fn setOwnerPath(path: [:0]const u8, uid: std.posix.uid_t) !void {
+    const rc = linux.fchownat(
+        std.posix.AT.FDCWD,
+        path,
+        uid,
+        @as(std.posix.gid_t, @bitCast(@as(i32, -1))), // gid unchanged (-1)
+        0,
+    );
+    if (std.posix.errno(rc) != .SUCCESS) {
+        log.warn("Failed to set socket owner for {s}", .{path});
         return error.PermissionFailed;
     }
 }
@@ -129,10 +142,13 @@ test "listen creates socket and sets permissions" {
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
     var statx_buf: std.os.linux.Statx = undefined;
-    const rc = std.os.linux.statx(std.os.linux.AT.FDCWD, path, 0, .{ .MODE = true }, &statx_buf);
+    const rc = std.os.linux.statx(std.os.linux.AT.FDCWD, path, 0, .{ .MODE = true, .UID = true }, &statx_buf);
     if (rc != 0) return error.Unexpected;
     const mode = statx_buf.mode & 0o777;
     try std.testing.expectEqual(@as(u16, 0o600), mode);
+    // Verify ownership: fchown(fd) on socket fd would leave uid as 0 (root).
+    // fchownat(path) correctly changes the filesystem inode's uid.
+    try std.testing.expectEqual(uid, statx_buf.uid);
 }
 
 test "listen and connect round-trip" {
