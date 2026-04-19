@@ -8,18 +8,35 @@ ExecStart=/usr/lib/netavark/net-porter server -c /etc/net-porter/config.json
 Restart=on-failure
 RestartSec=10s
 
-# Security hardening
+# ── Filesystem ────────────────────────────────────────────────────────
 ProtectSystem=strict
-ReadWritePaths=/run /tmp
-# NoNewPrivileges=true blocks setns() which CNI plugins require
-NoNewPrivileges=false
+ReadWritePaths=/run/net-porter
 ProtectKernelTunables=true
 ProtectControlGroups=true
-# Allow-list: only net and mnt namespace operations are permitted.
-# Worker needs: setns(CLONE_NEWNS), unshare(CLONE_NEWNS), and
-# CNI plugins need setns(CLONE_NEWNET).
-# Using allow-list (no ~ prefix) for explicit control.
-RestrictNamespaces=net mnt
+
+# ── Capabilities ─────────────────────────────────────────────────────
+# Server needs only CAP_SYS_PTRACE for pidfd_open() on catatonit
+# processes (owned by non-root UIDs). All other file I/O works
+# without capabilities since the server accesses world-readable files
+# (/proc/<pid>/comm mode 444, /proc/<pid> mode 555, etc.)
+CapabilityBoundingSet=CAP_SYS_PTRACE
+AmbientCapabilities=
+NoNewPrivileges=true
+
+# ── Namespaces ───────────────────────────────────────────────────────
+# Server creates no namespaces; worker runs in a separate service.
+RestrictNamespaces=yes
+
+# ── Other protections ────────────────────────────────────────────────
+ProtectHostname=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+# ── Syscall filtering ────────────────────────────────────────────────
+SystemCallFilter=@system-service pidfd_open inotify_init1 inotify_add_watch
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target
