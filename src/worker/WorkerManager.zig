@@ -105,12 +105,6 @@ pub fn deinit(self: *WorkerManager) void {
 
 // ── Public API ───────────────────────────────────────────────────────
 
-/// Ensure a worker is running for the given UID (single-uid convenience).
-/// Errors are logged internally; this is a no-op on failure.
-pub fn ensureWorker(self: *WorkerManager, uid: u32) void {
-    self.ensureWorkers(&.{uid});
-}
-
 /// Batch version — scans /proc once for all requested UIDs plus any pending UIDs.
 /// Errors are logged internally; individual failures do not affect other UIDs.
 pub fn ensureWorkers(self: *WorkerManager, uids: []const u32) void {
