@@ -27,7 +27,7 @@ const config_mod = @import("../config.zig");
 const version = @import("build_options").version;
 const AclManager = @import("AclManager.zig");
 const CniManager = @import("../cni/CniManager.zig");
-const DhcpManager = @import("../cni/DhcpManager.zig");
+const DhcpService = @import("../cni/DhcpService.zig");
 const Handler = @import("Handler.zig");
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const Responser = @import("../plugin/Responser.zig");
@@ -53,7 +53,7 @@ username: []const u8,
 catatonit_pid: std.posix.pid_t,
 acl_manager: AclManager,
 cni_manager: CniManager,
-dhcp_manager: DhcpManager,
+dhcp_service: DhcpService,
 server: std.Io.net.Server,
 socket_path: [:0]const u8,
 managed_config: config_mod.ManagedConfig,
@@ -100,8 +100,12 @@ pub fn new(opts: Opts) !Worker {
         return e;
     };
 
-    // 5. Init DHCP manager
-    const dhcp_manager = DhcpManager.init(io, page_alloc, conf.cni_plugin_dir);
+    // 5. Init DHCP service
+    const dhcp_service = DhcpService.init(io, page_alloc, uid, conf.cni_plugin_dir) catch |e| {
+        log.err("Failed to initialize DHCP service: {s}", .{@errorName(e)});
+        return e;
+    };
+    errdefer dhcp_service.deinit();
 
     return .{
         .config = conf,
@@ -111,7 +115,7 @@ pub fn new(opts: Opts) !Worker {
         .catatonit_pid = catatonit_pid,
         .acl_manager = acl_manager,
         .cni_manager = cni_manager,
-        .dhcp_manager = dhcp_manager,
+        .dhcp_service = dhcp_service,
         .server = server,
         .socket_path = socket_path,
         .managed_config = managed_config,
@@ -121,8 +125,8 @@ pub fn new(opts: Opts) !Worker {
 pub fn deinit(self: *Worker) void {
     log.info("Worker shutting down for uid={d}", .{self.uid});
 
-    // Stop DHCP services first
-    self.dhcp_manager.deinit();
+    // Stop DHCP service first
+    self.dhcp_service.deinit();
 
     // Close server socket and remove socket file
     self.server.deinit(self.io);
@@ -168,7 +172,7 @@ pub fn run(self: *Worker) !void {
             .arena = try ArenaAllocator.init(self.pageAllocator()),
             .acl_manager = &self.acl_manager,
             .cni_manager = &self.cni_manager,
-            .dhcp_manager = &self.dhcp_manager,
+            .dhcp_service = &self.dhcp_service,
             .config = &self.config,
             .catatonit_pid = self.catatonit_pid,
             .connection = .{ .stream = conn.stream },

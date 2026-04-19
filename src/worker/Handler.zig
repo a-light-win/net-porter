@@ -6,7 +6,7 @@ const log = std.log.scoped(.worker);
 const traffic_log = std.log.scoped(.traffic);
 const plugin = @import("../plugin.zig");
 const AclManager = @import("AclManager.zig");
-const DhcpManager = @import("../cni/DhcpManager.zig");
+const DhcpService = @import("../cni/DhcpService.zig");
 const Cni = @import("../cni/Cni.zig");
 const CniManager = @import("../cni/CniManager.zig");
 const StateFile = @import("../cni/StateFile.zig");
@@ -27,7 +27,7 @@ io: std.Io,
 config: *config_mod.Config,
 acl_manager: *AclManager,
 cni_manager: *CniManager,
-dhcp_manager: *DhcpManager,
+dhcp_service: *DhcpService,
 catatonit_pid: std.posix.pid_t,
 connection: Connection,
 responser: Responser,
@@ -250,7 +250,7 @@ fn execAction(
     // to fail. Teardown should still proceed to clean up whatever it can.
     if (request.action != .teardown) {
         if (!self.acl_manager.isStaticResource(request.resource())) {
-            try self.dhcp_manager.ensureStarted(caller_uid);
+            try self.dhcp_service.ensureStarted();
         }
     }
     switch (request.action) {
@@ -263,7 +263,7 @@ fn execAction(
     if (request.action == .teardown) {
         if (!self.acl_manager.isStaticResource(request.resource())) {
             if (!StateFile.hasActiveAttachments(self.io, caller_uid)) {
-                self.dhcp_manager.stop(caller_uid);
+                self.dhcp_service.stop();
             }
         }
     }

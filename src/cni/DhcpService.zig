@@ -102,7 +102,7 @@ fn start(self: *DhcpService) !void {
         return false;
     }
 
-fn stop(self: *DhcpService) void {
+pub fn stop(self: *DhcpService) void {
     if (self.process) |*process| {
         // kill() sends SIGTERM, waits for exit, reaps the child, and
         // sets child.id = null. In Zig 0.16.0, calling wait() after kill()
@@ -110,6 +110,7 @@ fn stop(self: *DhcpService) void {
         process.kill(self.io);
         self.process = null;
     }
+    self.removeSocketPath();
 }
 
 fn waitSocketPathCreated(self: DhcpService, comptime max_wait: comptime_int) void {
