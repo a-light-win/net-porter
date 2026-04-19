@@ -295,11 +295,11 @@ fn setupNamespace(catatonit_pid: std.posix.pid_t, cni_plugin_dir: []const u8) !v
     // 6. Bind mount host CNI plugin dir read-only (anti-privilege-escalation)
     //    Uses /proc/self/fd/<cni_dir_fd> as the mount source — this magic symlink
     //    resolves to the host directory regardless of current namespace.
-    bindMountCniDir(arena_alloc, cni_dir_fd, cni_plugin_dir) catch |err| {
-        log.warn("Failed to bind mount CNI plugin dir (proceeding without ro protection): {s}", .{@errorName(err)});
-        // Non-fatal: CNI plugins may still work if the path happens to exist in
-        // the container rootfs. The bind mount is a security hardening measure.
-    };
+    //
+    //    SECURITY: This is a mandatory hardening measure. Without the read-only
+    //    bind mount, the container user could replace CNI plugin binaries that
+    //    the worker executes as root. Failure to mount is fatal.
+    try bindMountCniDir(arena_alloc, cni_dir_fd, cni_plugin_dir);
 
     log.info("Namespace setup complete for catatonit_pid={d}", .{catatonit_pid});
 }
