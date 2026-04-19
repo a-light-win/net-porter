@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const linux = std.os.linux;
 const DhcpService = @This();
 const log = std.log.scoped(.dhcp_service);
 
@@ -78,19 +79,28 @@ fn start(self: *DhcpService) !void {
     self.waitSocketPathCreated(max_wait);
 }
 
-fn isAlive(self: DhcpService) bool {
-    if (self.process) |process| {
-        std.posix.kill(process.id.?, @enumFromInt(0)) catch |err| switch (err) {
-            error.ProcessNotFound => return false,
-            else => {
-                log.warn("Failed to check if DHCP service is alive: {s}", .{@errorName(err)});
-                return false;
-            },
-        };
-        return true;
+    fn isAlive(self: DhcpService) bool {
+        if (self.process) |process| {
+            const pid = process.id.? orelse return false;
+
+            // Use waitpid(WNOHANG) instead of kill(pid, 0).
+            //
+            // kill(pid, 0) returns 0 for zombie processes, causing isAlive()
+            // to incorrectly report a crashed daemon as alive. This prevents
+            // automatic restart after a crash.
+            //
+            // waitpid(WNOHANG) is non-blocking:
+            //   - returns 0     → process is still running
+            //   - returns pid   → process exited (zombie reaped)
+            //   - returns -ECHILD → already reaped or not our child
+            var status: i32 = 0;
+            const rc = linux.wait4(pid, &status, linux.W.NOHANG, null);
+            if (rc == 0) return true; // Still running
+            // Process exited or error — no longer alive
+            return false;
+        }
+        return false;
     }
-    return false;
-}
 
 fn stop(self: *DhcpService) void {
     if (self.process) |*process| {
