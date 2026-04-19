@@ -28,7 +28,6 @@ const Handler = @import("Handler.zig");
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const Responser = @import("../plugin/Responser.zig");
 const DomainSocket = config_mod.DomainSocket;
-const StateFile = @import("../cni/StateFile.zig");
 const linux = std.os.linux;
 const Worker = @This();
 
@@ -98,16 +97,10 @@ pub fn new(opts: Opts) !Worker {
         return e;
     };
 
-    // 5. Ensure state directory exists
-    StateFile.ensureBaseDir(io) catch |err| {
-        log.err("Failed to create state directory: {s}", .{@errorName(err)});
-        return err;
-    };
-
-    // 6. Setup namespace (setns → unshare → rslave → bind mount)
+    // 5. Setup namespace (setns → unshare → rslave → bind mount)
     try setupNamespace(catatonit_pid, conf.cni_plugin_dir);
 
-    // 7. Init DHCP manager (after namespace setup — CNI dir is bind-mounted)
+    // 6. Init DHCP manager (after namespace setup — CNI dir is bind-mounted)
     const dhcp_manager = DhcpManager.init(io, page_alloc, conf.cni_plugin_dir);
 
     return .{

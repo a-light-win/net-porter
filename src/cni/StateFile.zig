@@ -3,22 +3,21 @@ const log = std.log.scoped(.state_file);
 const Allocator = std.mem.Allocator;
 const StateFile = @This();
 
-pub const default_base_dir = "/run/net-porter";
-
 const max_state_file_size: usize = 1024 * 1024; // 1MB
 const mode_dir = 0o700;
 const mode_file = 0o600;
 
-/// Ensure the base directory exists with correct permissions (0700, root-only).
-/// Idempotent — no error if the directory already exists.
-pub fn ensureBaseDir(io: std.Io) !void {
-    try ensureDir(io, default_base_dir);
+/// Return the per-UID state directory: /run/user/{uid}/net-porter
+/// /run/user/{uid}/ is a per-user tmpfs created by systemd-logind and
+/// bind-mounted into the user namespace — accessible from both host and
+/// container mount namespaces.
+fn stateDir(allocator: Allocator, uid: u32) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "/run/user/{d}/net-porter", .{uid});
 }
 
-/// Generate the state file path: /run/net-porter/{uid}/{container_id}_{ifname}.json
+/// Generate the state file path: /run/user/{uid}/net-porter/{container_id}_{ifname}.json
 pub fn filePath(allocator: Allocator, uid: u32, container_id: []const u8, ifname: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/{d}/{s}_{s}.json", .{
-        default_base_dir,
+    return std.fmt.allocPrint(allocator, "/run/user/{d}/net-porter/{s}_{s}.json", .{
         uid,
         container_id,
         ifname,
@@ -36,7 +35,7 @@ pub fn exists(allocator: Allocator, uid: u32, container_id: []const u8, ifname: 
 /// Returns true if at least one state file exists for the given uid.
 pub fn hasActiveAttachments(io: std.Io, uid: u32) bool {
     var buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrint(&buf, "{s}/{d}", .{ default_base_dir, uid }) catch return false;
+    const dir_path = std.fmt.bufPrint(&buf, "/run/user/{d}/net-porter", .{uid}) catch return false;
     var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return false;
     defer dir.close(io);
     var iter = dir.iterate();
@@ -54,12 +53,12 @@ pub fn read(io: std.Io, allocator: Allocator, uid: u32, container_id: []const u8
 }
 
 /// Write state file atomically: write to temp file then rename.
-/// Creates the per-uid directory if needed.
+/// Creates the state directory (/run/user/{uid}/net-porter) if needed.
 pub fn write(io: std.Io, allocator: Allocator, uid: u32, container_id: []const u8, ifname: []const u8, data: []const u8) !void {
-    const dir_path = try std.fmt.allocPrint(allocator, "{s}/{d}", .{ default_base_dir, uid });
+    const dir_path = try stateDir(allocator, uid);
     defer allocator.free(dir_path);
 
-    // Ensure per-uid directory exists
+    // Ensure state directory exists
     try ensureDir(io, dir_path);
 
     const final_path = try filePath(allocator, uid, container_id, ifname);
@@ -102,7 +101,7 @@ pub fn write(io: std.Io, allocator: Allocator, uid: u32, container_id: []const u
 }
 
 /// Remove the state file for a given attachment.
-/// Cleans up the per-uid directory if it becomes empty.
+/// Cleans up the state directory if it becomes empty.
 pub fn remove(io: std.Io, allocator: Allocator, uid: u32, container_id: []const u8, ifname: []const u8) !void {
     const path = try filePath(allocator, uid, container_id, ifname);
     defer allocator.free(path);
@@ -117,8 +116,8 @@ pub fn remove(io: std.Io, allocator: Allocator, uid: u32, container_id: []const 
         return error.Unexpected;
     }
 
-    // Try to clean up empty uid directory (ignore errors — may not be empty)
-    const dir_path = try std.fmt.allocPrint(allocator, "{s}/{d}", .{ default_base_dir, uid });
+    // Try to clean up empty state directory (ignore errors — may not be empty)
+    const dir_path = try stateDir(allocator, uid);
     defer allocator.free(dir_path);
     std.Io.Dir.cwd().deleteDir(io, dir_path) catch {};
 }
@@ -196,18 +195,19 @@ fn writeFileContent(io: std.Io, allocator: Allocator, path: []const u8, data: []
 
 // ─── Tests ───────────────────────────────────────────────────────────
 
-const test_base_dir = "/tmp/net-porter-statefile-test";
+/// Simulates /run/user for tests.
+const test_run_user_dir = "/tmp/net-porter-statefile-test";
 
 fn testFilePath(allocator: Allocator, container_id: []const u8, ifname: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/1000/{s}_{s}.json", .{
-        test_base_dir,
+    return std.fmt.allocPrint(allocator, "{s}/1000/net-porter/{s}_{s}.json", .{
+        test_run_user_dir,
         container_id,
         ifname,
     });
 }
 
 fn testDirPath(allocator: Allocator) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/1000", .{test_base_dir});
+    return std.fmt.allocPrint(allocator, "{s}/1000/net-porter", .{test_run_user_dir});
 }
 
 fn testEnsureDir(io: std.Io, dir_path: []const u8) !void {
@@ -215,12 +215,12 @@ fn testEnsureDir(io: std.Io, dir_path: []const u8) !void {
 }
 
 fn testWriteFile(io: std.Io, allocator: Allocator, uid: u32, container_id: []const u8, ifname: []const u8, data: []const u8) !void {
-    const dir_path = try std.fmt.allocPrint(allocator, "{s}/{d}", .{ test_base_dir, uid });
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/{d}/net-porter", .{ test_run_user_dir, uid });
     defer allocator.free(dir_path);
     try ensureDir(io, dir_path);
 
-    const final_path = try std.fmt.allocPrint(allocator, "{s}/{d}/{s}_{s}.json", .{
-        test_base_dir,
+    const final_path = try std.fmt.allocPrint(allocator, "{s}/{d}/net-porter/{s}_{s}.json", .{
+        test_run_user_dir,
         uid,
         container_id,
         ifname,
@@ -276,8 +276,9 @@ fn testRemoveFile(io: std.Io, allocator: Allocator, container_id: []const u8, if
 fn testCleanup(io: std.Io) void {
     // Best-effort cleanup of test directories
     const paths = [_][]const u8{
-        test_base_dir ++ "/1000",
-        test_base_dir,
+        test_run_user_dir ++ "/1000/net-porter",
+        test_run_user_dir ++ "/1000",
+        test_run_user_dir,
     };
     for (paths) |p| {
         std.Io.Dir.cwd().deleteDir(io, p) catch {};
@@ -289,7 +290,7 @@ test "ensureDir creates directory with correct permissions" {
     const io = std.testing.io;
     defer testCleanup(io);
 
-    const test_dir = test_base_dir ++ "/ensureDir-test";
+    const test_dir = test_run_user_dir ++ "/ensureDir-test";
     const z = try allocator.allocSentinel(u8, test_dir.len, 0);
     defer allocator.free(z);
     @memcpy(z[0..test_dir.len], test_dir);
@@ -317,7 +318,7 @@ test "ensureDir is idempotent — calling twice succeeds" {
     const io = std.testing.io;
     defer testCleanup(io);
 
-    const test_dir = test_base_dir ++ "/idempotent-test";
+    const test_dir = test_run_user_dir ++ "/idempotent-test";
     const z = try allocator.allocSentinel(u8, test_dir.len, 0);
     defer allocator.free(z);
     @memcpy(z[0..test_dir.len], test_dir);
@@ -354,7 +355,7 @@ test "read returns error for non-existent file" {
     defer testCleanup(io);
 
     // Ensure dir exists so we test FileNotFound on the file, not the dir
-    try testEnsureDir(io, test_base_dir ++ "/1000");
+    try testEnsureDir(io, test_run_user_dir ++ "/1000/net-porter");
 
     const result = testReadFile(io, allocator, "nonexistent", "eth0");
     try std.testing.expectError(error.FileNotFound, result);
