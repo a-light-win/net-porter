@@ -414,16 +414,20 @@ fn rebuildMonitoredFds(self: *WorkerManager) void {
 
 // ── Internal — spawning / stopping ───────────────────────────────────
 
-/// Root directory for per-worker data: /run/net-porter/workers
-/// Created by tmpfiles.d at boot. Per-UID subdirectories are created at runtime.
-const workers_dir = "/run/net-porter/workers";
+/// Root directory for per-worker data.
+/// In production: /run/net-porter/workers (created by tmpfiles.d at boot).
+/// In tests: /tmp/net-porter-test-workers (writable without root).
+const workers_dir = if (@import("builtin").is_test)
+    "/tmp/net-porter-test-workers"
+else
+    "/run/net-porter/workers";
 
-/// Build the per-UID worker directory: /run/net-porter/workers/<uid>
+/// Build the per-UID worker directory: <workers_dir>/<uid>
 fn workerDir(allocator: Allocator, uid: u32) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/{d}", .{ workers_dir, uid });
 }
 
-/// Build the environment file path: /run/net-porter/workers/<uid>/worker.env
+/// Build the environment file path: <workers_dir>/<uid>/worker.env
 fn envFilePath(allocator: Allocator, uid: u32) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/{d}/worker.env", .{ workers_dir, uid });
 }
@@ -457,7 +461,7 @@ fn writeEnvFile(io: std.Io, allocator: Allocator, uid: u32, username: []const u8
     buf.appendSliceAssumeCapacity(config);
     buf.appendSliceAssumeCapacity("\n");
 
-    // Ensure /run/net-porter/workers/<uid> directory exists
+    // Ensure <workers_dir>/<uid> directory exists
     const uid_dir = try workerDir(allocator, uid);
     defer allocator.free(uid_dir);
     std.Io.Dir.cwd().createDirPath(io, uid_dir) catch |err| switch (err) {
@@ -941,7 +945,7 @@ test "envFilePath builds correct path" {
     const allocator = std.testing.allocator;
     const path = try envFilePath(allocator, 1000);
     defer allocator.free(path);
-    try std.testing.expectEqualStrings("/run/net-porter/workers/1000/worker.env", path);
+    try std.testing.expectEqualStrings("/tmp/net-porter-test-workers/1000/worker.env", path);
 }
 
 test "serviceInstanceName builds correct name" {
@@ -955,9 +959,6 @@ test "writeEnvFile writes correct content" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const uid = 1000;
-
-    // Ensure /run/net-porter/workers exists
-    std.Io.Dir.cwd().createDirPath(io, "/run/net-porter/workers") catch {};
 
     writeEnvFile(io, allocator, uid, "testuser", 12345, "/etc/net-porter/config.json") catch return error.Unexpected;
     defer removeEnvFile(io, allocator, uid);
@@ -983,8 +984,6 @@ test "writeEnvFile uses default config when null" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const uid = 9999;
-
-    std.Io.Dir.cwd().createDirPath(io, "/run/net-porter/workers") catch {};
 
     writeEnvFile(io, allocator, uid, "testuser", 12345, null) catch return error.Unexpected;
     defer removeEnvFile(io, allocator, uid);
