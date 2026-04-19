@@ -5,7 +5,7 @@ CollectMode=inactive-or-failed
 
 [Service]
 Type=simple
-EnvironmentFile=/run/net-porter/worker-%i.env
+EnvironmentFile=/run/net-porter/workers/%i/worker.env
 ExecStart=/usr/lib/netavark/net-porter worker \
   --uid %i \
   --username ${NET_PORTER_USERNAME} \
@@ -16,7 +16,7 @@ ExecStart=/usr/lib/netavark/net-porter worker \
 
 # Filesystem protection: /usr, /etc, /boot read-only
 ProtectSystem=strict
-ReadWritePaths=/run/user/%i
+ReadWritePaths=/run/user/%i /run/net-porter/workers/%i
 ProtectKernelTunables=true
 ProtectControlGroups=true
 
@@ -29,9 +29,9 @@ RestrictNamespaces=net
 # CAP_SYS_ADMIN:    CNI plugins — setns() for namespace operations
 # CAP_SYS_PTRACE:   /proc/<catatonit_pid>/root/ for netns resolution
 #                   and /proc/<pid>/comm for catatonit process verification
-# CAP_DAC_OVERRIDE: Create sockets/files in /run/user/<uid>/ (owned by uid)
-# CAP_CHOWN:        fchownat() to set socket/file ownership to uid
-# CAP_FOWNER:       fchmodat() after chown to set socket/file permissions
+# CAP_DAC_OVERRIDE: Create sockets in /run/user/<uid>/ (owned by uid)
+# CAP_CHOWN:        fchownat() to set socket ownership to uid
+# CAP_FOWNER:       fchmodat() after chown to set socket permissions
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
 AmbientCapabilities=
 NoNewPrivileges=false

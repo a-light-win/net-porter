@@ -13,11 +13,11 @@ process: ?std.process.Child = null,
 mutex: std.Io.Mutex = .init,
 
 pub fn init(io: std.Io, allocator: Allocator, caller_uid: std.posix.uid_t, cni_path: []const u8) !DhcpService {
-    // /run/user/<uid>/ is visible in the worker's namespace via rslave propagation.
-    // Each worker is per-UID — no path conflict.
+    // /run/net-porter/workers/<uid>/ is root-owned (mode 0700).
+    // Both DHCP daemon and CNI dhcp plugin run as root children of the worker.
     const dhcp_sock_path = try std.fmt.allocPrint(
         allocator,
-        "/run/user/{d}/net-porter-dhcp.sock",
+        "/run/net-porter/workers/{d}/dhcp.sock",
         .{caller_uid},
     );
     errdefer allocator.free(dhcp_sock_path);

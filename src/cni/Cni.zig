@@ -559,10 +559,11 @@ const PluginConf = struct {
             else => return,
         };
 
-        // /run/user/<uid>/ is visible in the worker's namespace via rslave propagation.
+        // /run/net-porter/workers/<uid>/ is root-owned.
+        // Both DHCP daemon and CNI dhcp plugin run as root children of the worker.
         const path = try std.fmt.allocPrint(
             allocator,
-            "/run/user/{d}/net-porter-dhcp.sock",
+            "/run/net-porter/workers/{d}/dhcp.sock",
             .{uid},
         );
 

@@ -414,12 +414,18 @@ fn rebuildMonitoredFds(self: *WorkerManager) void {
 
 // ── Internal — spawning / stopping ───────────────────────────────────
 
-/// Directory for worker environment files (/run/net-porter).
-const env_dir = "/run/net-porter";
+/// Root directory for per-worker data: /run/net-porter/workers
+/// Created by tmpfiles.d at boot. Per-UID subdirectories are created at runtime.
+const workers_dir = "/run/net-porter/workers";
 
-/// Build the environment file path: /run/net-porter/worker-<uid>.env
+/// Build the per-UID worker directory: /run/net-porter/workers/<uid>
+fn workerDir(allocator: Allocator, uid: u32) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/{d}", .{ workers_dir, uid });
+}
+
+/// Build the environment file path: /run/net-porter/workers/<uid>/worker.env
 fn envFilePath(allocator: Allocator, uid: u32) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/worker-{d}.env", .{ env_dir, uid });
+    return std.fmt.allocPrint(allocator, "{s}/{d}/worker.env", .{ workers_dir, uid });
 }
 
 /// Build the systemd service instance name: net-porter-worker@<uid>.service
@@ -451,17 +457,19 @@ fn writeEnvFile(io: std.Io, allocator: Allocator, uid: u32, username: []const u8
     buf.appendSliceAssumeCapacity(config);
     buf.appendSliceAssumeCapacity("\n");
 
-    // Ensure /run/net-porter directory exists
-    std.Io.Dir.cwd().createDirPath(io, env_dir) catch |err| switch (err) {
+    // Ensure /run/net-porter/workers/<uid> directory exists
+    const uid_dir = try workerDir(allocator, uid);
+    defer allocator.free(uid_dir);
+    std.Io.Dir.cwd().createDirPath(io, uid_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => {
-            log.warn("Failed to create env directory {s}: {s}", .{ env_dir, @errorName(err) });
+            log.warn("Failed to create worker directory {s}: {s}", .{ uid_dir, @errorName(err) });
             return err;
         },
     };
 
     // Write env file atomically: write to temp then rename
-    const tmp_path = std.fmt.allocPrint(allocator, "{s}/.tmp-{d}", .{ env_dir, uid }) catch return;
+    const tmp_path = std.fmt.allocPrint(allocator, "{s}/.tmp-worker.env", .{uid_dir}) catch return;
     defer allocator.free(tmp_path);
 
     // Write temp file
@@ -499,7 +507,8 @@ fn writeEnvFile(io: std.Io, allocator: Allocator, uid: u32, username: []const u8
 }
 
 /// Remove the environment file for a worker instance.
-fn removeEnvFile(allocator: Allocator, uid: u32) void {
+/// Also removes the per-UID directory if empty.
+fn removeEnvFile(io: std.Io, allocator: Allocator, uid: u32) void {
     const path = envFilePath(allocator, uid) catch return;
     defer allocator.free(path);
 
@@ -507,6 +516,11 @@ fn removeEnvFile(allocator: Allocator, uid: u32) void {
     defer allocator.free(path_z);
     @memcpy(path_z[0..path.len], path);
     _ = linux.unlink(path_z);
+
+    // Try to clean up empty per-UID directory
+    const uid_dir = workerDir(allocator, uid) catch return;
+    defer allocator.free(uid_dir);
+    std.Io.Dir.cwd().deleteDir(io, uid_dir) catch {};
 }
 
 fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !void {
@@ -618,7 +632,7 @@ fn stopService(self: *WorkerManager, uid: u32) void {
     }
 
     // Clean up env file
-    removeEnvFile(self.allocator, uid);
+    removeEnvFile(self.io, self.allocator, uid);
 }
 
 /// Check if a running worker's binary differs from the current server binary.
@@ -927,7 +941,7 @@ test "envFilePath builds correct path" {
     const allocator = std.testing.allocator;
     const path = try envFilePath(allocator, 1000);
     defer allocator.free(path);
-    try std.testing.expectEqualStrings("/run/net-porter/worker-1000.env", path);
+    try std.testing.expectEqualStrings("/run/net-porter/workers/1000/worker.env", path);
 }
 
 test "serviceInstanceName builds correct name" {
@@ -942,11 +956,11 @@ test "writeEnvFile writes correct content" {
     const io = std.testing.io;
     const uid = 1000;
 
-    // Ensure /run/net-porter exists
-    std.Io.Dir.cwd().createDirPath(io, "/run/net-porter") catch {};
+    // Ensure /run/net-porter/workers exists
+    std.Io.Dir.cwd().createDirPath(io, "/run/net-porter/workers") catch {};
 
     writeEnvFile(io, allocator, uid, "testuser", 12345, "/etc/net-porter/config.json") catch return error.Unexpected;
-    defer removeEnvFile(allocator, uid);
+    defer removeEnvFile(io, allocator, uid);
 
     // Read back and verify
     const path = try envFilePath(allocator, uid);
@@ -970,10 +984,10 @@ test "writeEnvFile uses default config when null" {
     const io = std.testing.io;
     const uid = 9999;
 
-    std.Io.Dir.cwd().createDirPath(io, "/run/net-porter") catch {};
+    std.Io.Dir.cwd().createDirPath(io, "/run/net-porter/workers") catch {};
 
     writeEnvFile(io, allocator, uid, "testuser", 12345, null) catch return error.Unexpected;
-    defer removeEnvFile(allocator, uid);
+    defer removeEnvFile(io, allocator, uid);
 
     const path = try envFilePath(allocator, uid);
     defer allocator.free(path);
