@@ -9,7 +9,7 @@
 > - Handler 从 `server/` 移至 `worker/` 模块
 > - ACL 身份识别改为基于文件名（`<用户名>.json` / `@<组名>.json`）
 > - 新增 `groups` 字段用于 ACL 组引用
-> - Worker 运行在容器挂载命名空间中，CNI 插件目录只读 bind-mount
+> - Worker 运行在宿主命名空间中，通过 `/proc/<catatonit_pid>/root/` 解析 netns 路径
 >
 > 本文档仅作历史参考，请以 README.md 中的最新架构说明为准。
 

@@ -5,24 +5,28 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [1.0.0] - 2025-04-18
+## [1.0.0] - 2025-04-19
 
 ### 安全
 
-- **消除了 `nsenter` 提权风险**：先前版本使用 `nsenter` 命令进入容器命名空间执行 CNI 插件。root 进程执行 `nsenter` 是一个已知的提权攻击向量 —— 被入侵或恶意的命名空间可能利用 root 上下文进行提权。现在 Worker 直接运行在正确的命名空间中，CNI 插件的执行不再需要 `nsenter`。
-- **加固了 CNI 插件执行环境**：CNI 插件目录在 Worker 命名空间中以只读方式 bind-mount，防止二进制文件被替换。
+- **消除了 `nsenter` 提权风险**：先前版本使用 `nsenter` 命令进入容器命名空间执行 CNI 插件。root 进程执行 `nsenter` 是一个已知的提权攻击向量 —— 被入侵或恶意的命名空间可能利用 root 上下文进行提权。现在 Worker 通过 `/proc/<catatonit_pid>/root/` 从宿主命名空间解析 netns 路径，CNI 插件的执行不再需要 `nsenter`。
+- **每次请求验证 catatonit 进程**：每个 setup/teardown 请求验证 catatonit 进程仍然存活、进程名仍为 "catatonit"、且仍属于调用者 UID。这防止了 PID 回收攻击。
+- **每次请求验证 nsfs 设备**：解析后的 netns 路径通过 `statx(AT_SYMLINK_NOFOLLOW)` 验证为 nsfs 文件（设备 0:4）。这防止了 catatonit 挂载命名空间内的符号链接/挂载点替换攻击。
 - **修复了安全审计中发现的 7 个攻击面**，包括通过 CNI_NETNS 的路径穿越、容器名注入、域 socket 创建的 TOCTOU 竞态条件，以及错误信息中的信息泄露。
+- 完整安全分析见 `.opencode/context/security/netns-resolution-security.md`。
 
 ### 变更
 
 - **每 UID Worker 架构**：服务端现在为每个用户派生独立的 Worker 进程。Worker 运行在独立的 systemd scope 中 —— 即使服务端崩溃也能存活，且独立管理。此架构消除了 root 进程在用户控制的命名空间中执行命令的需求。
+- **通过 /proc 解析 netns**：Worker 不再通过 `setns + unshare` 进入 catatonit 的挂载命名空间。CNI_NETNS 路径通过 `/proc/<catatonit_pid>/root/<path>` 从宿主侧穿透解析。这简化了 Worker 生命周期，不再需要只读 bind mount。
 - **ACL 文件格式简化**：`user` 和 `group` 字段不再用于身份识别 —— 它们会被静默忽略以保持向后兼容。身份现在由文件名决定：`<用户名>.json` 用于用户，`@<名称>.json` 用于共享规则集合。
 - **ACL 新增 `groups` 字段**：用户 ACL 文件可通过 `groups` 字段引用共享的规则集合。例如，`"groups": ["dhcp-users"]` 会引入 `@dhcp-users.json` 中的所有授权。这些**不是** Linux 用户组 —— 它们只是可复用的授权集合。
 - **规则集合文件重命名**：共享规则集合文件现在使用 `@<名称>.json` 前缀（如 `devops.json` → `@devops.json`），以与用户 ACL 文件区分。
 
 ### 移除
 
-- **`nsenter` 命令执行**：不再在任何地方使用。Worker 已经位于正确的命名空间中。
+- **`nsenter` 命令执行**：不再在任何地方使用。Worker 通过 `/proc/<pid>/root/` 从宿主命名空间解析 netns。
+- **`setns + unshare` 挂载命名空间进入**：Worker 不再进入 catatonit 的挂载命名空间。`setupNamespace` 函数及相关的 bind mount 逻辑已移除。
 - **ACL 文件中的 `user` 和 `group` 字段**：被基于文件名的身份识别取代。包含这些字段的现有文件继续正常工作 —— 这些字段会被静默忽略。
 
 ---

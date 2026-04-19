@@ -31,11 +31,11 @@ When a container starts, netavark will call the `net-porter plugin`. The plugin 
 │                                                              │
 │  ┌──────────────── Worker (per-UID, independent scope) ────┐ │
 │  │  1. Create socket at /run/user/<uid>/net-porter.sock    │ │
-│  │  2. Enter container mount namespace (setns + unshare)    │ │
-│  │  3. Bind-mount CNI plugin dir read-only (security)       │ │
-│  │  4. Accept connections → spawn handler threads           │ │
-│  │  5. Load ACL grants + hot-reload via inotify             │ │
-│  │  6. Execute CNI plugins in the correct namespace         │ │
+│  │  2. Load ACL grants + hot-reload via inotify             │ │
+│  │  3. Accept connections → spawn handler threads           │ │
+│  │  4. Resolve netns via /proc/<catatonit_pid>/root/        │ │
+│  │  5. Verify catatonit liveness + nsfs per request         │ │
+│  │  6. Execute CNI plugins in host namespace                │ │
 │  └──────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -46,7 +46,7 @@ Workers run in independent systemd scopes and survive server crashes. The server
 
 - **Dynamic Socket Management**: Automatically creates/removes per-user sockets via inotify when users log in/out
 - **Single Service Architecture**: One global root service for all users, no need to manage per-user services
-- **Per-UID Worker Processes**: Each user gets an independent worker process (crash isolation, independent namespace)
+- **Per-UID Worker Processes**: Each user gets an independent worker process (crash isolation, runs in host namespace)
 - **Grant-based ACL Control**: Per-resource grants with optional static IP range restrictions
 - **ACL Rule Collections**: User ACLs can reference shared rule collections (`@<name>.json`), grants are merged automatically
 - **Static IP Support**: Validate user-requested static IPs against allowed ranges — no separate CNI config files needed
@@ -171,7 +171,7 @@ net-porter/
 │   │   └── Acl.zig               # ACL validation & IP range matching
 │   ├── worker.zig                # Worker module (CLI: `net-porter worker`)
 │   ├── worker/
-│   │   ├── Worker.zig            # Per-UID worker daemon (runs in container mount ns)
+│   │   ├── Worker.zig            # Per-UID worker daemon (host namespace, netns via /proc)
 │   │   ├── WorkerManager.zig     # Worker lifecycle manager (spawn/stop/restart via pidfd)
 │   │   ├── Handler.zig           # Request handler (per-connection, threaded)
 │   │   └── AclManager.zig        # Worker-side ACL loader + hot-reload (inotify)
@@ -700,7 +700,7 @@ Restart service: `systemctl restart net-porter`
 1. **Server-Worker Isolation**: Workers run in independent systemd scopes — they survive server crashes. The server only manages worker lifecycle, not their runtime
 2. **Per-User Socket Isolation**: Each worker creates its own socket under `/run/user/<uid>/` with 0600 permissions, ensuring only the owner can connect
 3. **Identity Authentication**: Caller UID/GID is obtained via `SO_PEERCRED` from kernel, cannot be forged
-4. **Worker Namespace Isolation**: Workers enter the container's mount namespace via `setns + unshare`. CNI plugin dir is bind-mounted read-only to prevent binary replacement
+4. **Netns Path Resolution**: CNI_NETNS is resolved via `/proc/<catatonit_pid>/root/<path>`, traversing into catatonit's mount namespace. Each request verifies catatonit is still alive (UID + comm check) and the resolved path is an nsfs file (device 0:4)
 5. **Grant-based ACL Check**: Each request is validated against the user's grants + grants from referenced rule collections — supports optional IP range restrictions
 6. **Static IP Validation**: For static IPAM resources, the requested IP is validated against the user's allowed IP ranges — requests outside the range are rejected
 7. **Default Deny**: Any request that doesn't explicitly match a policy is rejected

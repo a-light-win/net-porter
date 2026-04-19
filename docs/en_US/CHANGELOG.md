@@ -5,24 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2025-04-18
+## [1.0.0] - 2025-04-19
 
 ### Security
 
-- **Eliminated `nsenter` privilege escalation risk**: Previous versions used the `nsenter` command to enter container namespaces for CNI plugin execution. A root process executing `nsenter` is a well-known privilege escalation vector — a compromised or malicious namespace could exploit the root context. Workers now run directly in the correct namespace, so CNI plugins execute without `nsenter`.
-- **Hardened CNI plugin execution**: CNI plugin directory is bind-mounted read-only inside the worker namespace, preventing binary replacement attacks.
+- **Eliminated `nsenter` privilege escalation risk**: Previous versions used the `nsenter` command to enter container namespaces for CNI plugin execution. A root process executing `nsenter` is a well-known privilege escalation vector — a compromised or malicious namespace could exploit the root context. Workers now resolve netns paths via `/proc/<catatonit_pid>/root/` from the host namespace, so CNI plugins execute without `nsenter`.
+- **Per-request catatonit verification**: Each setup/teardown request verifies that the catatonit process is still alive, still named "catatonit", and still owned by the caller's UID. This prevents PID recycling attacks.
+- **Per-request nsfs verification**: The resolved netns path is validated via `statx(AT_SYMLINK_NOFOLLOW)` to confirm it points to an nsfs file (device 0:4). This prevents symlink/mount replacement attacks inside catatonit's mount namespace.
 - **Fixed 7 attack surfaces** found in security audit, including path traversal via CNI_NETNS, container name injection, TOCTOU race on domain socket creation, and information leakage in error messages.
+- See `.opencode/context/security/netns-resolution-security.md` for the full security analysis.
 
 ### Changed
 
 - **Per-UID worker architecture**: The server now spawns an independent worker process for each user. Workers run in isolated systemd scopes — they survive server crashes and are independently managed. This architecture eliminates the need for the root process to execute commands inside user-controlled namespaces.
+- **Netns resolution via /proc**: Workers no longer enter catatonit's mount namespace via `setns + unshare`. Instead, CNI_NETNS paths are resolved through `/proc/<catatonit_pid>/root/<path>`, which traverses into catatonit's mount namespace from the host. This simplifies the worker lifecycle and removes the need for read-only bind mounts.
 - **ACL file format simplified**: The `user` and `group` fields are no longer used for identity — they are silently ignored for backward compatibility. Identity is now determined by the filename: `<username>.json` for users, `@<name>.json` for shared rule collections.
 - **New `groups` field in ACL**: User ACL files can reference shared rule collections via the `groups` field. For example, `"groups": ["dhcp-users"]` includes all grants from `@dhcp-users.json`. These are NOT Linux user groups — they are simply reusable grant sets.
 - **Group ACL files renamed**: Shared rule collection files now use the `@<name>.json` prefix (e.g., `devops.json` → `@devops.json`) to distinguish them from user ACL files.
 
 ### Removed
 
-- **`nsenter` command execution**: No longer used anywhere. Workers are already in the correct namespace.
+- **`nsenter` command execution**: No longer used anywhere. Workers resolve netns via `/proc/<pid>/root/` from the host namespace.
+- **`setns + unshare` mount namespace entry**: Workers no longer enter catatonit's mount namespace. The `setupNamespace` function and related bind mount logic have been removed.
 - **`user` and `group` fields from ACL files**: Replaced by filename-based identity. Existing files with these fields continue to work — the fields are silently ignored.
 
 ---
