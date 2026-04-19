@@ -258,10 +258,14 @@ fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !v
         return error.StaticIpRequired;
     }
 
-    const requested_ip = static_ips[0];
-    if (!self.acl_manager.isIpAllowed(request.resource(), uid, requested_ip)) {
-        self.responser.writeError("IP address not allowed", .{});
-        return error.IpNotAllowed;
+    // Validate ALL requested IPs against ACL (not just the first one).
+    // In dual-stack configurations (IPv4 + IPv6), patchAddresses() injects
+    // every IP that matches a template subnet, so each must be authorized.
+    for (static_ips) |requested_ip| {
+        if (!self.acl_manager.isIpAllowed(request.resource(), uid, requested_ip)) {
+            self.responser.writeError("IP address not allowed", .{});
+            return error.IpNotAllowed;
+        }
     }
 }
 
