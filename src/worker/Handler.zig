@@ -136,10 +136,12 @@ pub fn handle(self: *Handler) !void {
         };
     }
 
-    // Validate netns path format to prevent arbitrary path access via CNI_NETNS
+    // Validate netns path: must be under /run/user/<uid>/netns/ with safe filename.
+    // CNI plugins verify the file is a network namespace; this is a pre-filter
+    // to reject obviously invalid paths before reaching the plugin.
     if (request.netns) |netns| {
-        validateNetnsPath(netns) catch {
-            log.err("Invalid netns path from uid={d}: {s}", .{ client_info.uid, netns });
+        validateNetnsPath(netns, client_info.uid) catch |err| {
+            log.err("Invalid netns path from uid={d}: {s} ({s})", .{ client_info.uid, netns, @errorName(err) });
             self.responser.writeError("Invalid network namespace path", .{});
             return;
         };
@@ -318,32 +320,30 @@ fn validateCniIdentifier(value: []const u8, field_name: []const u8) !void {
     if (std.mem.indexOf(u8, value, "..") != null) return error.InvalidParameter;
 }
 
-/// Validate that a netns path has the expected format: /proc/<pid>/ns/net
-/// where <pid> is a non-empty sequence of decimal digits.
-/// This prevents path traversal and arbitrary file access via CNI_NETNS.
+/// Validate netns path: must reside under /run/user/<uid>/netns/ with a safe filename.
 ///
-/// Note: PID ownership is NOT validated here. Defense-in-depth is provided
-/// by the PID namespace: the worker enters the catatonit's mount namespace,
-/// where /proc shows only processes within that container's PID namespace.
-/// A malicious client cannot reference host PIDs or other containers' PIDs
-/// because they are invisible in this /proc mount. This relies on the
-/// catatonit container having its own PID namespace (the default in rootless
-/// podman). Running with --pid=host would break this assumption.
-pub fn validateNetnsPath(netns: []const u8) !void {
-    const prefix = "/proc/";
-    const suffix = "/ns/net";
+/// `uid` is the authenticated caller's uid (known from socket credentials).
+/// The prefix `/run/user/<uid>/netns/` is constructed from this uid — we do not
+/// parse or trust the uid embedded in the path.
+///
+/// The filename must be non-empty, contain only [a-zA-Z0-9\-_.], and have no
+/// ".." sequences. This prevents path traversal and arbitrary file pointing.
+///
+/// File type verification (is this actually a network namespace?) is handled
+/// by the CNI plugin itself via setns() — our job is just a pre-filter.
+fn validateNetnsPath(netns: []const u8, uid: u32) !void {
+    var prefix_buf: [32]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "/run/user/{d}/netns/", .{uid}) catch unreachable;
 
-    if (netns.len < prefix.len + 1 + suffix.len) return error.InvalidNetns;
-    if (!std.mem.startsWith(u8, netns, prefix)) return error.InvalidNetns;
-    if (!std.mem.endsWith(u8, netns, suffix)) return error.InvalidNetns;
+    if (!std.mem.startsWith(u8, netns, prefix)) return error.NetnsPathInvalidFormat;
 
-    const pid_str = netns[prefix.len .. netns.len - suffix.len];
-    if (pid_str.len == 0) return error.InvalidNetns;
-
-    for (pid_str) |c| {
+    const name = netns[prefix.len..];
+    if (name.len == 0) return error.NetnsPathInvalidFormat;
+    if (std.mem.indexOf(u8, name, "..") != null) return error.NetnsPathInvalidFormat;
+    for (name) |c| {
         switch (c) {
-            '0'...'9' => {},
-            else => return error.InvalidNetns,
+            'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.' => {},
+            else => return error.NetnsPathInvalidFormat,
         }
     }
 }
@@ -387,49 +387,28 @@ test "validateCniIdentifier rejects special characters" {
     try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("abc$def", "test_field"));
 }
 
-test "validateNetnsPath accepts valid /proc/<pid>/ns/net paths" {
-    try validateNetnsPath("/proc/1/ns/net");
-    try validateNetnsPath("/proc/1234/ns/net");
-    try validateNetnsPath("/proc/999999/ns/net");
+test "validateNetnsPath accepts valid paths" {
+    try validateNetnsPath("/run/user/1000/netns/netns-df0ba9a2-dde1-ca4f-6efe-c96c4f9a353d", 1000);
+    try validateNetnsPath("/run/user/0/netns/test", 0);
+    try validateNetnsPath("/run/user/1000/netns/my-ns_name.1", 1000);
 }
 
-test "validateNetnsPath rejects empty string" {
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath(""));
+test "validateNetnsPath rejects wrong prefix or uid mismatch" {
+    try std.testing.expectError(error.NetnsPathInvalidFormat, validateNetnsPath("/proc/1/ns/net", 1000));
+    try std.testing.expectError(error.NetnsPathInvalidFormat, validateNetnsPath("/run/user/999/netns/test", 1000));
+    try std.testing.expectError(error.NetnsPathInvalidFormat, validateNetnsPath("relative/path", 1000));
+    try std.testing.expectError(error.NetnsPathInvalidFormat, validateNetnsPath("", 1000));
 }
 
-test "validateNetnsPath rejects paths without /proc/ prefix" {
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/etc/passwd"));
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/run/user/1000/ns/net"));
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("proc/1/ns/net"));
+test "validateNetnsPath rejects empty filename" {
+    try std.testing.expectError(error.NetnsPathInvalidFormat, validateNetnsPath("/run/user/1000/netns/", 1000));
 }
 
-test "validateNetnsPath rejects paths without /ns/net suffix" {
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/1/ns/mnt"));
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/1/net"));
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/1/ns"));
-}
-
-test "validateNetnsPath rejects non-numeric PID" {
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/abc/ns/net"));
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/12a34/ns/net"));
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/-1/ns/net"));
-}
-
-test "validateNetnsPath rejects empty PID" {
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc//ns/net"));
-}
-
-test "validateNetnsPath rejects path traversal attempts" {
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("../../etc/passwd"));
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/../etc/shadow"));
-    try std.testing.expectError(error.InvalidNetns, validateNetnsPath("/proc/1/../../etc/passwd"));
-}
-
-test "validateNetnsPath rejects overly long paths" {
-    const long_path = "/proc/" ++ ("0" ** 1000) ++ "/ns/net";
-    // This should actually be accepted since it's a valid format with a long PID
-    // But real PIDs won't be this long
-    try validateNetnsPath(long_path);
+test "validateNetnsPath rejects unsafe filename" {
+    try std.testing.expectError(error.NetnsPathInvalidFormat, validateNetnsPath("/run/user/1000/netns/bad name", 1000));
+    try std.testing.expectError(error.NetnsPathInvalidFormat, validateNetnsPath("/run/user/1000/netns/bad/name", 1000));
+    try std.testing.expectError(error.NetnsPathInvalidFormat, validateNetnsPath("/run/user/1000/netns/..", 1000));
+    try std.testing.expectError(error.NetnsPathInvalidFormat, validateNetnsPath("/run/user/1000/netns/../etc/passwd", 1000));
 }
 
 // ─── Action/Request consistency tests ──────────────────────────────────
