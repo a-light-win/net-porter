@@ -168,7 +168,7 @@ net-porter/
 │   │   └── Acl.zig               # ACL 校验 & IP 范围匹配
 │   ├── worker.zig                # Worker 模块（CLI: `net-porter worker`）
 │   ├── worker/
-│   │   ├── Worker.zig            # 每 UID worker 守护进程（运行在容器挂载命名空间中）
+│   │   ├── Worker.zig            # 每 UID worker 守护进程（运行在宿主命名空间中，通过 /proc 解析 netns）
 │   │   ├── WorkerManager.zig     # Worker 生命周期管理（通过 pidfd 派生/停止/重启）
 │   │   ├── Handler.zig           # 请求处理器（每连接，多线程）
 │   │   └── AclManager.zig        # Worker 端 ACL 加载器 + 热重载（inotify）
@@ -620,11 +620,14 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 
 ## 从 v0.6 升级
 
-1.0.0 版本引入了每 UID worker 架构。服务端现在为每个允许的用户派生独立的 worker 进程，而非直接处理连接。ACL 文件格式也发生了变更 —— `user`/`group` 字段被基于文件名的身份识别取代（`<用户名>.json` 用于用户），新增 `groups` 字段用于引用共享规则集合（`@<名称>.json`）。
+1.0.0 版本引入了每 UID Worker 架构。服务端现在为每个允许的用户派生独立的 Worker 进程，而非直接处理连接。ACL 文件格式也发生了变更 —— `user`/`group` 字段被基于文件名的身份识别取代（`<用户名>.json` 用于用户），新增 `groups` 字段用于引用共享规则集合（`@<名称>.json`）。
+
+详见 [迁移指南（0.6 → 1.0）](migration-guide-0.6-to-1.0.md)。
 
 快速步骤：
 
-1. 更新 ACL 文件格式 —— 删除 `user`/`group` 字段（它们会被静默忽略以保持向后兼容）：
+1. 将规则集合文件重命名为 `@<名称>.json`（如 `devops.json` → `@devops.json`）
+2. 更新 ACL 文件格式 —— 删除 `user`/`group` 字段（它们会被静默忽略以保持向后兼容）：
    ```json
    {
      "grants": [
@@ -633,8 +636,7 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
      "groups": ["dhcp-users"]
    }
    ```
-2. 将规则集合文件重命名为 `@<名称>.json`（如 `devops.json` → `@devops.json`）
-3. 重启服务：
+3. 安装新版本并重启服务：
    ```bash
    systemctl restart net-porter
    ```

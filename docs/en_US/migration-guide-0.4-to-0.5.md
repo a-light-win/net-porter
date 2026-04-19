@@ -1,5 +1,9 @@
 # Migration Guide: 0.4 → 0.5
 
+> **Note**: The ACL file format described in this guide (`user`/`group` fields) was further changed in v1.0.0.
+> In v1.0.0, identity is determined by the filename instead of `user`/`group` fields.
+> See the [Migration Guide (0.6 → 1.0)](migration-guide-0.6-to-1.0.md) for the latest changes.
+
 Version 0.5.0 moves access control from inline `acl` fields in `config.json` to a separate `acl.d/` directory. This makes it easier to manage user/group permissions without modifying the main configuration file, and enables hot-reloading of ACL rules without restarting the service.
 
 ## Summary of Changes

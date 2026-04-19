@@ -1,6 +1,6 @@
 # CNI 配置指南
 
-> 版本：v0.6.0+
+> 版本：v1.0.0+
 
 net-porter 通过 `/etc/net-porter/cni.d/` 目录管理 CNI 网络配置，支持标准 CNI 1.0 格式（包括链式插件）。
 

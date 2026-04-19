@@ -1,6 +1,6 @@
 # CNI Configuration Guide
 
-> Version: v0.6.0+
+> Version: v1.0.0+
 
 net-porter manages CNI network configuration through the `/etc/net-porter/cni.d/` directory, supporting standard CNI 1.0 format (including chained plugins).
 

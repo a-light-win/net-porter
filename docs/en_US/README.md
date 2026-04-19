@@ -274,7 +274,7 @@ podman network create \
   macvlan-net
 ```
 
-### 4. Test it out
+### 5. Test it out
 Run this command as the rootless user (e.g., `alice`):
 ```bash
 podman run -it --rm --network macvlan-net alpine ip addr
@@ -599,9 +599,12 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 
 Version 1.0.0 introduces a per-UID worker architecture. The server now spawns independent worker processes for each allowed user instead of handling connections directly. The ACL file format has also changed — the `user`/`group` fields are replaced by filename-based identity (`<username>.json` for users), and a new `groups` field enables referencing shared rule collections (`@<name>.json`).
 
+See the [Migration Guide (0.6 → 1.0)](migration-guide-0.6-to-1.0.md) for detailed instructions.
+
 Quick steps:
 
-1. Update ACL file format — remove `user`/`group` fields (they are silently ignored for backward compatibility):
+1. Rename rule collection files to `@<name>.json` (e.g., `devops.json` → `@devops.json`)
+2. Update ACL file format — remove `user`/`group` fields (they are silently ignored for backward compatibility):
    ```json
    {
      "grants": [
@@ -610,8 +613,11 @@ Quick steps:
      "groups": ["dhcp-users"]
    }
    ```
-2. Rename rule collection files to `@<name>.json` (e.g., `devops.json` → `@devops.json`)
-3. Restart the service:
+3. Install the new version and restart the service:
+   ```bash
+   systemctl restart net-porter
+   ```
+3. Install the new version and restart the service:
    ```bash
    systemctl restart net-porter
    ```

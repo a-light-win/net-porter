@@ -9,25 +9,33 @@
 
 ### 安全
 
-- **消除了 `nsenter` 提权风险**：先前版本使用 `nsenter` 命令进入容器命名空间执行 CNI 插件。root 进程执行 `nsenter` 是一个已知的提权攻击向量 —— 被入侵或恶意的命名空间可能利用 root 上下文进行提权。现在 Worker 通过 `/proc/<catatonit_pid>/root/` 从宿主命名空间解析 netns 路径，CNI 插件的执行不再需要 `nsenter`。
-- **每次请求验证 catatonit 进程**：每个 setup/teardown 请求验证 catatonit 进程仍然存活、进程名仍为 "catatonit"、且仍属于调用者 UID。这防止了 PID 回收攻击。
-- **每次请求验证 nsfs 设备**：解析后的 netns 路径通过 `statx(AT_SYMLINK_NOFOLLOW)` 验证为 nsfs 文件（设备 0:4）。这防止了 catatonit 挂载命名空间内的符号链接/挂载点替换攻击。
-- **修复了安全审计中发现的 7 个攻击面**，包括通过 CNI_NETNS 的路径穿越、容器名注入、域 socket 创建的 TOCTOU 竞态条件，以及错误信息中的信息泄露。
-- 完整安全分析见 `.opencode/context/security/netns-resolution-security.md`。
+- **消除了进入容器命名空间的提权风险**：先前版本以 root 身份在容器命名空间内执行 CNI 插件 —— 这是一个已知的提权攻击途径。现在 root 进程不再进入任何用户控制的命名空间。
+- **加固了进程隔离**：服务端和每用户 Worker 现在运行在严格的 systemd 安全限制下 —— 每个 Worker 拥有独立的隔离服务单元，文件系统只读、Linux 能力最小化、系统调用受过滤。即使 Worker 被攻破，影响范围也被严格限制。
+- **修复了安全审计中发现的 7 个安全漏洞**，包括路径穿越、容器名注入、Socket 创建的竞态条件，以及错误信息中的信息泄露。
+- **多 IP 静态地址校验**：当容器请求多个静态 IP 时，所有 IP 现在都会根据用户允许的 IP 范围进行校验（此前仅校验第一个 IP）。
+- **Worker 内部数据保护**：Worker 状态文件现在存储在仅 root 可访问的目录中，防止普通用户访问或篡改。
+
+### 新增
+
+- **独立的每用户 Worker 进程**：服务端现在为每个用户派生一个独立的 Worker 进程。Worker 完全独立 —— 即使服务端崩溃，所有 Worker 也会继续运行并为用户服务。服务端重启后会自动重新连接到已有的 Worker，不会中断服务。
+- **包升级后 Worker 自动重启**：升级 net-porter 包后，服务端会检测到 Worker 仍在运行旧版二进制文件，并自动用新版本重启它们。
+- **Worker 自动恢复**：当 Worker 关联的 podman 基础设施容器重启时，服务端会检测到这一变化并自动重启 Worker 以重新连接。
 
 ### 变更
 
-- **每 UID Worker 架构**：服务端现在为每个用户派生独立的 Worker 进程。Worker 运行在独立的 systemd scope 中 —— 即使服务端崩溃也能存活，且独立管理。此架构消除了 root 进程在用户控制的命名空间中执行命令的需求。
-- **通过 /proc 解析 netns**：Worker 不再通过 `setns + unshare` 进入 catatonit 的挂载命名空间。CNI_NETNS 路径通过 `/proc/<catatonit_pid>/root/<path>` 从宿主侧穿透解析。这简化了 Worker 生命周期，不再需要只读 bind mount。
-- **ACL 文件格式简化**：`user` 和 `group` 字段不再用于身份识别 —— 它们会被静默忽略以保持向后兼容。身份现在由文件名决定：`<用户名>.json` 用于用户，`@<名称>.json` 用于共享规则集合。
+- **ACL 身份识别改为基于文件名**：ACL 文件内的 `user` 和 `group` 字段不再使用 —— 它们会被静默忽略以保持向后兼容。身份现在完全由文件名决定：`<用户名>.json` 用于用户，`@<名称>.json` 用于共享规则集合。
 - **ACL 新增 `groups` 字段**：用户 ACL 文件可通过 `groups` 字段引用共享的规则集合。例如，`"groups": ["dhcp-users"]` 会引入 `@dhcp-users.json` 中的所有授权。这些**不是** Linux 用户组 —— 它们只是可复用的授权集合。
 - **规则集合文件重命名**：共享规则集合文件现在使用 `@<名称>.json` 前缀（如 `devops.json` → `@devops.json`），以与用户 ACL 文件区分。
 
 ### 移除
 
-- **`nsenter` 命令执行**：不再在任何地方使用。Worker 通过 `/proc/<pid>/root/` 从宿主命名空间解析 netns。
-- **`setns + unshare` 挂载命名空间进入**：Worker 不再进入 catatonit 的挂载命名空间。`setupNamespace` 函数及相关的 bind mount 逻辑已移除。
 - **ACL 文件中的 `user` 和 `group` 字段**：被基于文件名的身份识别取代。包含这些字段的现有文件继续正常工作 —— 这些字段会被静默忽略。
+- **`nsenter` 依赖**：不再使用或需要 `nsenter` 命令。
+- **`dumpEnv` 配置选项**：移除以减少攻击面。
+
+### 迁移
+
+详见 [迁移指南（0.6 → 1.0）](migration-guide-0.6-to-1.0.md)。
 
 ---
 
