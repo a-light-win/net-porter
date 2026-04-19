@@ -499,16 +499,9 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
     // We cannot use /proc/self/exe in the systemd-run command line because
     // systemd-run forks before exec'ing the child — at that point
     // /proc/self/exe resolves to the systemd-run binary, not net-porter.
-    const exe_path = exe_path: {
-        if (self.self_exe_path) |p| break :exe_path p;
-        var buf: [std.posix.PATH_MAX]u8 = undefined;
-        const n = std.Io.Dir.readLinkAbsolute(self.io, "/proc/self/exe", &buf) catch |err| {
-            log.err("Failed to resolve /proc/self/exe: {s}", .{@errorName(err)});
-            return err;
-        };
-        const owned = try self.allocator.dupe(u8, buf[0..n]);
-        self.self_exe_path = owned;
-        break :exe_path owned;
+    const exe_path = self.resolveSelfExe() catch |err| {
+        log.err("Failed to resolve /proc/self/exe: {s}", .{@errorName(err)});
+        return err;
     };
 
     var worker_argv = try buildWorkerArgv(self.allocator, uid, catatonit_pid, username, self.config_path, exe_path);
@@ -615,12 +608,53 @@ fn stopScope(self: *WorkerManager, uid: u32) void {
     }
 }
 
+/// Lazily resolve and cache the net-porter binary path via /proc/self/exe.
+/// Returns the cached path on subsequent calls.
+/// Caller does NOT own the returned slice — it lives as long as the WorkerManager.
+fn resolveSelfExe(self: *WorkerManager) ![]const u8 {
+    if (self.self_exe_path) |p| return p;
+    var buf: [std.posix.PATH_MAX]u8 = undefined;
+    const n = std.Io.Dir.readLinkAbsolute(self.io, "/proc/self/exe", &buf) catch |err| {
+        log.err("Failed to resolve /proc/self/exe: {s}", .{@errorName(err)});
+        return err;
+    };
+    const owned = try self.allocator.dupe(u8, buf[0..n]);
+    self.self_exe_path = owned;
+    return owned;
+}
+
+/// Check if a running worker's binary differs from the current server binary.
+/// Compares /proc/<pid>/exe with /proc/self/exe (the cached self_exe_path).
+/// Returns true if the worker binary is outdated (different path or deleted).
+/// Returns false if same or if detection fails (fail-open: don't restart on error).
+fn isBinaryOutdated(self: *WorkerManager, worker_pid: std.posix.pid_t) bool {
+    const self_exe = self.resolveSelfExe() catch return false;
+
+    var path_buf: [64]u8 = undefined;
+    const exe_link = std.fmt.bufPrint(&path_buf, "/proc/{d}/exe", .{worker_pid}) catch return false;
+
+    var buf: [std.posix.PATH_MAX]u8 = undefined;
+    const n = std.Io.Dir.readLinkAbsolute(self.io, exe_link, &buf) catch return false;
+
+    return !std.mem.eql(u8, self_exe, buf[0..n]);
+}
+
 /// Try to adopt a worker that was spawned by a previous server instance.
 fn tryAdoptExistingScope(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) bool {
     const scope_name = std.fmt.allocPrint(self.allocator, "net-porter-worker-{d}.scope", .{uid}) catch return false;
     defer self.allocator.free(scope_name);
 
     const worker_pid = self.findScopeWorkerPid(uid) catch return false;
+
+    // Check if the running worker's binary is outdated (e.g., after upgrade).
+    // If so, stop the old worker and return false to trigger a fresh spawn
+    // with the new binary. This ensures security fixes and bug fixes take
+    // effect after a package upgrade + service restart.
+    if (self.isBinaryOutdated(worker_pid)) {
+        log.info("Worker binary outdated for uid={d} (pid={d}), stopping for respawn", .{ uid, worker_pid });
+        self.stopScope(uid);
+        return false;
+    }
 
     const worker_pidfd = blk: {
         const rc = linux.pidfd_open(worker_pid, 0);
@@ -1115,4 +1149,37 @@ test "WorkerArgv.deinit frees all allocated memory" {
     try std.testing.expectEqual(@as(usize, 17), wa.argv.items.len);
     // deinit should not leak — verified by std.testing.allocator (detects leaks)
     wa.deinit(allocator);
+}
+
+// ── Tests: resolveSelfExe / isBinaryOutdated ────────────────────────
+
+test "resolveSelfExe resolves and caches /proc/self/exe" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    try std.testing.expect(wm.self_exe_path == null);
+    const exe = try wm.resolveSelfExe();
+    try std.testing.expect(exe.len > 0);
+    // Should be cached now
+    try std.testing.expect(wm.self_exe_path != null);
+    // Second call returns same pointer
+    const exe2 = try wm.resolveSelfExe();
+    try std.testing.expect(exe.ptr == exe2.ptr);
+}
+
+test "isBinaryOutdated returns false for current process" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    // Current process is never outdated compared to itself
+    const own_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
+    try std.testing.expect(!wm.isBinaryOutdated(own_pid));
+}
+
+test "isBinaryOutdated returns false for non-existent PID" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    // Non-existent PID → readlink fails → fail-open (returns false)
+    try std.testing.expect(!wm.isBinaryOutdated(99999999));
 }
