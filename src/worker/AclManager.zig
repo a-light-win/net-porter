@@ -89,9 +89,11 @@ fn deinitAcls(self: *WorkerAclManager) void {
 }
 
 /// Load user ACL + referenced rule collections. Should be called once at startup.
+/// Sets up inotify watch BEFORE loading to avoid missing changes in the gap
+/// between disk read and watch registration (standard load-after-watch pattern).
 pub fn load(self: *WorkerAclManager) void {
-    self.doLoad();
     self.setupInotify();
+    self.doLoad();
 }
 
 /// Reload from disk (e.g. after inotify event).
