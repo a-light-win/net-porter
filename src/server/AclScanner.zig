@@ -14,26 +14,26 @@ const std = @import("std");
 const log = std.log.scoped(.acl_manager);
 const Allocator = std.mem.Allocator;
 const user_mod = @import("../user.zig");
-const AclManager = @This();
+const AclScanner = @This();
 
 allocator: Allocator,
 acl_dir: []const u8,
 
-pub fn init(allocator: Allocator, acl_dir: []const u8) AclManager {
+pub fn init(allocator: Allocator, acl_dir: []const u8) AclScanner {
     return .{
         .allocator = allocator,
         .acl_dir = acl_dir,
     };
 }
 
-pub fn deinit(self: *AclManager) void {
+pub fn deinit(self: *AclScanner) void {
     _ = self;
 }
 
 /// Scan acl.d/ for <username>.json files and resolve to UIDs.
 /// Skips files starting with '@' (rule collection files, not users).
 /// Returns a list of deduplicated UIDs.
-pub fn scanUids(self: AclManager, io: std.Io) std.ArrayList(u32) {
+pub fn scanUids(self: AclScanner, io: std.Io) std.ArrayList(u32) {
     var uid_set = std.AutoHashMap(u32, void).init(self.allocator);
     defer uid_set.deinit();
 
@@ -76,7 +76,7 @@ pub fn scanUids(self: AclManager, io: std.Io) std.ArrayList(u32) {
 // Tests
 // ============================================================
 
-test "AclManager: scanUids with no directory returns empty" {
+test "AclScanner: scanUids with no directory returns empty" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var manager = init(allocator, "/nonexistent/acl/directory");
@@ -124,7 +124,7 @@ const TestAclDir = struct {
     }
 };
 
-test "AclManager: scanUids skips group files and non-json files" {
+test "AclScanner: scanUids skips group files and non-json files" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
@@ -147,7 +147,7 @@ test "AclManager: scanUids skips group files and non-json files" {
     try std.testing.expect(uids.items[0] == 0);
 }
 
-test "AclManager: scanUids with empty directory returns empty" {
+test "AclScanner: scanUids with empty directory returns empty" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 

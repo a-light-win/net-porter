@@ -2,14 +2,14 @@ const std = @import("std");
 const log = std.log.scoped(.server);
 const config_mod = @import("../config.zig");
 const version = @import("build_options").version;
-const AclManager = @import("AclManager.zig");
+const AclScanner = @import("AclScanner.zig");
 const WorkerManager = @import("../worker/WorkerManager.zig");
 const UidTracker = @import("UidTracker.zig");
 const Server = @This();
 
 config: config_mod.Config,
 io: std.Io,
-acl_manager: AclManager,
+    acl_manager: AclScanner,
 worker_manager: WorkerManager,
 uid_tracker: UidTracker,
 managed_config: config_mod.ManagedConfig,
@@ -42,7 +42,7 @@ pub fn new(opts: Opts) !Server {
     logger.log_settings = conf.log;
 
     // Scan ACL directory for allowed UIDs (username → UID resolution)
-    var acl_manager = AclManager.init(allocator, conf.acl_dir);
+    var acl_manager = AclScanner.init(allocator, conf.acl_dir);
     errdefer acl_manager.deinit();
 
     const allowed_uids = acl_manager.scanUids(io);
