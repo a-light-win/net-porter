@@ -1,0 +1,49 @@
+[Unit]
+Description=net-porter worker for UID %i
+Documentation=https://github.com/a-light-win/net-porter
+CollectMode=inactive-or-failed
+
+[Service]
+Type=simple
+EnvironmentFile=/run/net-porter/worker-%i.env
+ExecStart=/usr/lib/netavark/net-porter worker \
+  --uid %i \
+  --username ${NET_PORTER_USERNAME} \
+  --catatonit-pid ${NET_PORTER_CATATONIT_PID} \
+  --config ${NET_PORTER_CONFIG}
+
+# ── Security hardening ────────────────────────────────────────────────
+
+# Filesystem protection: /usr, /etc, /boot read-only
+ProtectSystem=strict
+ReadWritePaths=/run/user/%i
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+# Namespace restriction (CNI plugins need setns(CLONE_NEWNET))
+RestrictNamespaces=net
+
+# Capability restriction
+# CAP_NET_ADMIN:    CNI plugins — network interface management
+# CAP_NET_RAW:     DHCP plugin — AF_PACKET socket for DHCP broadcast
+# CAP_SYS_ADMIN:    CNI plugins — setns() for namespace operations
+# CAP_SYS_PTRACE:   /proc/<catatonit_pid>/root/ for netns resolution
+#                   and /proc/<pid>/comm for catatonit process verification
+# CAP_DAC_OVERRIDE: Create sockets/files in /run/user/<uid>/ (owned by uid)
+# CAP_CHOWN:        fchownat() to set socket/file ownership to uid
+# CAP_FOWNER:       fchmodat() after chown to set socket/file permissions
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
+AmbientCapabilities=
+NoNewPrivileges=false
+
+# Other protections
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# Syscall filtering
+SystemCallFilter=@system-service @network-io setns unshare inotify_init1 inotify_add_watch
+SystemCallErrorNumber=EPERM
+
+# Lifecycle — server manages restart via pidfd monitoring
+Restart=no

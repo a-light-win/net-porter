@@ -1,16 +1,19 @@
 //! Worker lifecycle manager — runs in the main server process.
 //!
 //! Responsible for:
-//!   - Spawning worker processes via `systemd-run --scope` for crash isolation
+//!   - Spawning worker processes via systemd template service for crash isolation
 //!   - Monitoring worker health via pidfd (c)
 //!   - Monitoring catatonit process via pidfd (a)
 //!   - Restarting workers when catatonit PID changes or dies
 //!   - Stopping workers when UID disappears or ACL removes access
 //!   - Retrying worker startup with exponential backoff when catatonit is not yet running
 //!
-//! Workers run in independent systemd scopes, so they survive a server crash.
-//! The server only manages their lifecycle (spawn/stop/restart) but does NOT
-//! kill workers on its own shutdown — workers are independent daemons.
+//! Workers run as instantiated systemd services (net-porter-worker@<uid>.service),
+//! so they survive a server crash. The server only manages their lifecycle
+//! (spawn/stop/restart) but does NOT kill workers on its own shutdown.
+//!
+//! Security hardening (filesystem, capabilities, syscall filtering) is configured
+//! in the template service file: /usr/lib/systemd/system/net-porter-worker@.service
 //!
 //! Uses pidfd for efficient process monitoring (no polling).
 
@@ -57,9 +60,6 @@ const max_backoff_ms: u32 = 60000;
 allocator: Allocator,
 io: std.Io,
 config_path: ?[]const u8,
-/// Resolved absolute path to the net-porter binary (readlink /proc/self/exe).
-/// Populated lazily on first spawn; must be freed in deinit.
-self_exe_path: ?[]const u8 = null,
 workers: WorkerMap,
 /// Metadata for monitored pidfds — kept in sync with monitored_pollfds.
 monitored_metas: std.ArrayList(FdMeta),
@@ -87,10 +87,7 @@ pub fn init(io: std.Io, allocator: Allocator, config_path: ?[]const u8) WorkerMa
 
 pub fn deinit(self: *WorkerManager) void {
     // Release monitoring resources — do NOT kill workers.
-    // Workers run in independent systemd scopes and survive server shutdown.
-    if (self.self_exe_path) |p| {
-        self.allocator.free(p);
-    }
+    // Workers run as independent systemd services and survive server shutdown.
     var it = self.workers.iterator();
     while (it.next()) |entry| {
         if (entry.value_ptr.pidfd >= 0) {
@@ -144,7 +141,7 @@ pub fn stopWorker(self: *WorkerManager, uid: u32) void {
         if (removed.value.catatonit_pidfd >= 0) {
             _ = linux.close(removed.value.catatonit_pidfd);
         }
-        self.stopScope(uid);
+        self.stopService(uid);
         self.rebuildMonitoredFds();
         log.info("Stopped worker for uid={d}", .{uid});
     }
@@ -344,7 +341,7 @@ fn ensureWorkerWithPidLocked(self: *WorkerManager, uid: u32, catatonit_pid: std.
     }
 
     // Check if a scope already exists from a previous server instance
-    if (self.tryAdoptExistingScope(uid, catatonit_pid)) {
+    if (self.tryAdoptExistingService(uid, catatonit_pid)) {
         return;
     }
 
@@ -417,74 +414,99 @@ fn rebuildMonitoredFds(self: *WorkerManager) void {
 
 // ── Internal — spawning / stopping ───────────────────────────────────
 
-/// Holds the argv list and its temporary allocated strings for worker spawning.
-/// Caller owns all memory and must call `deinit`.
-const WorkerArgv = struct {
-    argv: std.ArrayList([]const u8),
-    uid_str: []const u8,
-    pid_str: []const u8,
-    scope_name: []const u8,
+/// Directory for worker environment files (/run/net-porter).
+const env_dir = "/run/net-porter";
 
-    fn deinit(self: *WorkerArgv, allocator: Allocator) void {
-        self.argv.deinit(allocator);
-        allocator.free(self.scope_name);
-        allocator.free(self.pid_str);
-        allocator.free(self.uid_str);
-    }
-};
+/// Build the environment file path: /run/net-porter/worker-<uid>.env
+fn envFilePath(allocator: Allocator, uid: u32) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/worker-{d}.env", .{ env_dir, uid });
+}
 
-/// Build the argv list for spawning a worker process via `systemd-run --scope`.
-/// Returns a `WorkerArgv` containing the built argv and all temporary strings.
-/// The caller must call `deinit` to free all memory.
-fn buildWorkerArgv(
-    allocator: Allocator,
-    uid: u32,
-    catatonit_pid: std.posix.pid_t,
-    username: []const u8,
-    config_path: ?[]const u8,
-    exe_path: []const u8,
-) !WorkerArgv {
-    const uid_str = try std.fmt.allocPrint(allocator, "{d}", .{uid});
-    errdefer allocator.free(uid_str);
+/// Build the systemd service instance name: net-porter-worker@<uid>.service
+fn serviceInstanceName(allocator: Allocator, uid: u32) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "net-porter-worker@{d}.service", .{uid});
+}
 
-    const pid_str = try std.fmt.allocPrint(allocator, "{d}", .{catatonit_pid});
-    errdefer allocator.free(pid_str);
+/// Write the environment file for a worker instance.
+/// The template service file (net-porter-worker@.service) reads this via EnvironmentFile=.
+fn writeEnvFile(io: std.Io, allocator: Allocator, uid: u32, username: []const u8, catatonit_pid: std.posix.pid_t, config_path: ?[]const u8) !void {
+    const path = try envFilePath(allocator, uid);
+    defer allocator.free(path);
 
-    const scope_name = try std.fmt.allocPrint(allocator, "net-porter-worker-{d}.scope", .{uid});
-    errdefer allocator.free(scope_name);
+    const pid_str = std.fmt.allocPrint(allocator, "{d}", .{catatonit_pid}) catch return;
+    defer allocator.free(pid_str);
 
-    // 15 fixed args + 2 optional (--config + path) = 17 max
-    var argv = std.ArrayList([]const u8).initCapacity(allocator, 18) catch return error.OutOfMemory;
-    errdefer argv.deinit(allocator);
+    // Use config_path if provided, otherwise default
+    const config = config_path orelse "/etc/net-porter/config.json";
 
-    argv.appendAssumeCapacity("systemd-run");
-    argv.appendAssumeCapacity("--scope");
-    argv.appendAssumeCapacity("--unit");
-    argv.appendAssumeCapacity(scope_name);
-    argv.appendAssumeCapacity("--property");
-    argv.appendAssumeCapacity("CollectMode=inactive-or-failed");
-    argv.appendAssumeCapacity("--");
+    // Build env file content
+    var buf = std.ArrayList(u8).initCapacity(allocator, 256) catch return;
+    defer buf.deinit(allocator);
 
-    argv.appendAssumeCapacity(exe_path);
-    argv.appendAssumeCapacity("worker");
-    argv.appendAssumeCapacity("--uid");
-    argv.appendAssumeCapacity(uid_str);
-    argv.appendAssumeCapacity("--username");
-    argv.appendAssumeCapacity(username);
-    argv.appendAssumeCapacity("--catatonit-pid");
-    argv.appendAssumeCapacity(pid_str);
+    buf.appendSliceAssumeCapacity("NET_PORTER_USERNAME=");
+    buf.appendSliceAssumeCapacity(username);
+    buf.appendSliceAssumeCapacity("\nNET_PORTER_CATATONIT_PID=");
+    buf.appendSliceAssumeCapacity(pid_str);
+    buf.appendSliceAssumeCapacity("\nNET_PORTER_CONFIG=");
+    buf.appendSliceAssumeCapacity(config);
+    buf.appendSliceAssumeCapacity("\n");
 
-    if (config_path) |cp| {
-        argv.appendAssumeCapacity("--config");
-        argv.appendAssumeCapacity(cp);
-    }
-
-    return .{
-        .argv = argv,
-        .uid_str = uid_str,
-        .pid_str = pid_str,
-        .scope_name = scope_name,
+    // Ensure /run/net-porter directory exists
+    std.Io.Dir.cwd().createDirPath(io, env_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => {
+            log.warn("Failed to create env directory {s}: {s}", .{ env_dir, @errorName(err) });
+            return err;
+        },
     };
+
+    // Write env file atomically: write to temp then rename
+    const tmp_path = std.fmt.allocPrint(allocator, "{s}/.tmp-{d}", .{ env_dir, uid }) catch return;
+    defer allocator.free(tmp_path);
+
+    // Write temp file
+    const tmp_path_z = try allocator.allocSentinel(u8, tmp_path.len, 0);
+    defer allocator.free(tmp_path_z);
+    @memcpy(tmp_path_z[0..tmp_path.len], tmp_path);
+
+    const fd_rc = linux.open(tmp_path_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o600);
+    if (fd_rc < 0) {
+        log.warn("Failed to create temp env file {s}", .{tmp_path});
+        return error.Unexpected;
+    }
+    var tmp_file = std.Io.File{ .handle = @intCast(fd_rc), .flags = .{ .nonblocking = false } };
+    defer tmp_file.close(io);
+
+    var write_buffer: [4096]u8 = undefined;
+    var file_writer = tmp_file.writer(io, &write_buffer);
+    file_writer.interface.writeAll(buf.items) catch return error.Unexpected;
+    file_writer.end() catch return error.Unexpected;
+
+    // Atomic rename: temp → final
+    const final_path = try envFilePath(allocator, uid);
+    defer allocator.free(final_path);
+
+    const final_path_z = try allocator.allocSentinel(u8, final_path.len, 0);
+    defer allocator.free(final_path_z);
+    @memcpy(final_path_z[0..final_path.len], final_path);
+
+    const rename_rc = linux.rename(tmp_path_z, final_path_z);
+    if (rename_rc != 0) {
+        log.warn("Failed to rename env file for uid={d}", .{uid});
+        _ = linux.unlink(tmp_path_z);
+        return error.Unexpected;
+    }
+}
+
+/// Remove the environment file for a worker instance.
+fn removeEnvFile(allocator: Allocator, uid: u32) void {
+    const path = envFilePath(allocator, uid) catch return;
+    defer allocator.free(path);
+
+    const path_z = allocator.allocSentinel(u8, path.len, 0) catch return;
+    defer allocator.free(path_z);
+    @memcpy(path_z[0..path.len], path);
+    _ = linux.unlink(path_z);
 }
 
 fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !void {
@@ -495,51 +517,39 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
     };
     defer self.allocator.free(username);
 
-    // Lazily resolve and cache the net-porter binary path.
-    // We cannot use /proc/self/exe in the systemd-run command line because
-    // systemd-run forks before exec'ing the child — at that point
-    // /proc/self/exe resolves to the systemd-run binary, not net-porter.
-    const exe_path = self.resolveSelfExe() catch |err| {
-        log.err("Failed to resolve /proc/self/exe: {s}", .{@errorName(err)});
+    // Write environment file for the template service to consume
+    writeEnvFile(self.io, self.allocator, uid, username, catatonit_pid, self.config_path) catch |err| {
+        log.err("Failed to write env file for uid={d}: {s}", .{ uid, @errorName(err) });
         return err;
     };
 
-    var worker_argv = try buildWorkerArgv(self.allocator, uid, catatonit_pid, username, self.config_path, exe_path);
-    defer worker_argv.deinit(self.allocator);
+    // Start the worker via the systemd template service
+    const svc_name = serviceInstanceName(self.allocator, uid) catch return error.OutOfMemory;
+    defer self.allocator.free(svc_name);
 
-    const process = std.process.spawn(self.io, .{
-        .argv = worker_argv.argv.items,
+    const result = std.process.run(self.allocator, self.io, .{
+        .argv = &[_][]const u8{ "systemctl", "start", svc_name },
     }) catch |err| {
-        log.err("Failed to spawn worker via systemd-run for uid={d}: {s}", .{ uid, @errorName(err) });
+        log.err("Failed to start {s}: {s}", .{ svc_name, @errorName(err) });
         return err;
     };
+    defer self.allocator.free(result.stdout);
+    defer self.allocator.free(result.stderr);
 
-    // systemd-run in --scope mode: it creates the scope, forks the child,
-    // and exits once the child is running. The returned PID is systemd-run's
-    // PID, not the worker's. We need to find the actual worker PID.
-    const systemd_run_pid: std.posix.pid_t = @intCast(process.id.?);
-    // reap systemd-run zombie
-    var run_status: u32 = 0;
-    _ = linux.wait4(systemd_run_pid, &run_status, 0, null);
-
-    // Check if systemd-run itself succeeded — if it failed there is no scope
-    // and no worker process to monitor.
-    if (linux.W.IFEXITED(run_status)) {
-        const exit_code = linux.W.EXITSTATUS(run_status);
-        if (exit_code != 0) {
-            log.err("systemd-run failed for uid={d} with exit code {d}", .{ uid, exit_code });
-            return error.SpawnFailed;
-        }
-    } else if (linux.W.IFSIGNALED(run_status)) {
-        log.err("systemd-run killed by signal for uid={d}", .{uid});
+    if (result.term != .exited or result.term.exited != 0) {
+        log.err("systemctl start {s} failed (term={any})", .{ svc_name, result.term });
         return error.SpawnFailed;
     }
 
-    // Find the actual worker PID inside the scope.
-    const worker_pid = self.findScopeWorkerPid(uid) catch |err| blk: {
-        log.warn("Failed to find worker PID for uid={d}: {s}, falling back to systemd-run pid", .{ uid, @errorName(err) });
-        break :blk systemd_run_pid;
+    // Find the actual worker PID inside the service's cgroup.
+    const worker_pid = self.findServiceWorkerPid(uid) catch |err| blk: {
+        log.warn("Failed to find worker PID for uid={d}: {s}", .{ uid, @errorName(err) });
+        break :blk @as(std.posix.pid_t, -1);
     };
+    if (worker_pid < 0) {
+        log.err("Could not locate worker PID for uid={d} after start", .{uid});
+        return error.SpawnFailed;
+    }
 
     // Create pidfd for worker monitoring
     const worker_pidfd = blk: {
@@ -573,7 +583,7 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
 
     try self.workers.put(uid, entry);
     self.rebuildMonitoredFds();
-    log.info("Spawned worker for uid={d} (username={s}, pid={d}, scope={s}, catatonit_pid={d})", .{ uid, username, worker_pid, worker_argv.scope_name, catatonit_pid });
+    log.info("Spawned worker for uid={d} (username={s}, pid={d}, service={s}, catatonit_pid={d})", .{ uid, username, worker_pid, svc_name, catatonit_pid });
 }
 
 /// Stop an existing worker and clean up tracking entry + both pidfds.
@@ -586,49 +596,40 @@ fn stopAndCleanup(self: *WorkerManager, uid: u32) void {
             _ = linux.close(removed.value.catatonit_pidfd);
         }
     }
-    self.stopScope(uid);
+    self.stopService(uid);
 }
 
-/// Stop a worker scope via systemctl.
-fn stopScope(self: *WorkerManager, uid: u32) void {
-    const scope_name = std.fmt.allocPrint(self.allocator, "net-porter-worker-{d}.scope", .{uid}) catch return;
-    defer self.allocator.free(scope_name);
+/// Stop a worker service via systemctl and clean up its env file.
+fn stopService(self: *WorkerManager, uid: u32) void {
+    const svc_name = std.fmt.allocPrint(self.allocator, "net-porter-worker@{d}.service", .{uid}) catch return;
+    defer self.allocator.free(svc_name);
 
     const result = std.process.run(self.allocator, self.io, .{
-        .argv = &[_][]const u8{ "systemctl", "stop", scope_name },
+        .argv = &[_][]const u8{ "systemctl", "stop", svc_name },
     }) catch |err| {
-        log.warn("Failed to stop scope {s}: {s}", .{ scope_name, @errorName(err) });
+        log.warn("Failed to stop service {s}: {s}", .{ svc_name, @errorName(err) });
         return;
     };
     defer self.allocator.free(result.stdout);
     defer self.allocator.free(result.stderr);
 
     if (result.term != .exited or result.term.exited != 0) {
-        log.warn("systemctl stop {s} failed (term={any})", .{ scope_name, result.term });
+        log.warn("systemctl stop {s} failed (term={any})", .{ svc_name, result.term });
     }
-}
 
-/// Lazily resolve and cache the net-porter binary path via /proc/self/exe.
-/// Returns the cached path on subsequent calls.
-/// Caller does NOT own the returned slice — it lives as long as the WorkerManager.
-fn resolveSelfExe(self: *WorkerManager) ![]const u8 {
-    if (self.self_exe_path) |p| return p;
-    var buf: [std.posix.PATH_MAX]u8 = undefined;
-    const n = std.Io.Dir.readLinkAbsolute(self.io, "/proc/self/exe", &buf) catch |err| {
-        log.err("Failed to resolve /proc/self/exe: {s}", .{@errorName(err)});
-        return err;
-    };
-    const owned = try self.allocator.dupe(u8, buf[0..n]);
-    self.self_exe_path = owned;
-    return owned;
+    // Clean up env file
+    removeEnvFile(self.allocator, uid);
 }
 
 /// Check if a running worker's binary differs from the current server binary.
-/// Compares /proc/<pid>/exe with /proc/self/exe (the cached self_exe_path).
+/// Compares /proc/<pid>/exe with /proc/self/exe.
 /// Returns true if the worker binary is outdated (different path or deleted).
 /// Returns false if same or if detection fails (fail-open: don't restart on error).
 fn isBinaryOutdated(self: *WorkerManager, worker_pid: std.posix.pid_t) bool {
-    const self_exe = self.resolveSelfExe() catch return false;
+    // Read current process exe path
+    var self_buf: [std.posix.PATH_MAX]u8 = undefined;
+    const self_n = std.Io.Dir.readLinkAbsolute(self.io, "/proc/self/exe", &self_buf) catch return false;
+    const self_exe = self_buf[0..self_n];
 
     var path_buf: [64]u8 = undefined;
     const exe_link = std.fmt.bufPrint(&path_buf, "/proc/{d}/exe", .{worker_pid}) catch return false;
@@ -640,11 +641,11 @@ fn isBinaryOutdated(self: *WorkerManager, worker_pid: std.posix.pid_t) bool {
 }
 
 /// Try to adopt a worker that was spawned by a previous server instance.
-fn tryAdoptExistingScope(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) bool {
-    const scope_name = std.fmt.allocPrint(self.allocator, "net-porter-worker-{d}.scope", .{uid}) catch return false;
-    defer self.allocator.free(scope_name);
+fn tryAdoptExistingService(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) bool {
+    const svc_name = std.fmt.allocPrint(self.allocator, "net-porter-worker@{d}.service", .{uid}) catch return false;
+    defer self.allocator.free(svc_name);
 
-    const worker_pid = self.findScopeWorkerPid(uid) catch return false;
+    const worker_pid = self.findServiceWorkerPid(uid) catch return false;
 
     // Check if the running worker's binary is outdated (e.g., after upgrade).
     // If so, stop the old worker and return false to trigger a fresh spawn
@@ -652,7 +653,7 @@ fn tryAdoptExistingScope(self: *WorkerManager, uid: u32, catatonit_pid: std.posi
     // effect after a package upgrade + service restart.
     if (self.isBinaryOutdated(worker_pid)) {
         log.info("Worker binary outdated for uid={d} (pid={d}), stopping for respawn", .{ uid, worker_pid });
-        self.stopScope(uid);
+        self.stopService(uid);
         return false;
     }
 
@@ -691,13 +692,13 @@ fn tryAdoptExistingScope(self: *WorkerManager, uid: u32, catatonit_pid: std.posi
     };
     self.rebuildMonitoredFds();
 
-    log.info("Adopted existing worker for uid={d} (pid={d}, scope={s})", .{ uid, worker_pid, scope_name });
+    log.info("Adopted existing worker for uid={d} (pid={d}, service={s})", .{ uid, worker_pid, svc_name });
     return true;
 }
 
-/// Find the worker PID by reading the scope's cgroup.procs file.
-fn findScopeWorkerPid(self: *WorkerManager, uid: u32) !std.posix.pid_t {
-    const path = try std.fmt.allocPrint(self.allocator, "/sys/fs/cgroup/system.slice/net-porter-worker-{d}.scope/cgroup.procs", .{uid});
+/// Find the worker PID by reading the service's cgroup.procs file.
+fn findServiceWorkerPid(self: *WorkerManager, uid: u32) !std.posix.pid_t {
+    const path = try std.fmt.allocPrint(self.allocator, "/sys/fs/cgroup/system.slice/net-porter-worker@{d}.service/cgroup.procs", .{uid});
     defer self.allocator.free(path);
 
     var attempts: u8 = 0;
@@ -915,84 +916,72 @@ test "nextRetryTimeoutMs returns null when no retry scheduled" {
     try std.testing.expect(wm.nextRetryTimeoutMs() == null);
 }
 
-// ── Tests: buildWorkerArgv ───────────────────────────────────────────
+// ── Tests: env file & service helpers ────────────────────────────────
 
-test "buildWorkerArgv builds correct argv without config_path" {
+test "envFilePath builds correct path" {
     const allocator = std.testing.allocator;
-    const test_exe = "/usr/bin/net-porter";
-
-    var wa = try buildWorkerArgv(allocator, 1000, 12345, "testuser", null, test_exe);
-    defer wa.deinit(allocator);
-
-    // 15 fixed args, no --config
-    try std.testing.expectEqual(@as(usize, 15), wa.argv.items.len);
-
-    // Verify structure: systemd-run --scope --unit <scope> --property ... -- <exe> worker ...
-    try std.testing.expectEqualStrings("systemd-run", wa.argv.items[0]);
-    try std.testing.expectEqualStrings("--scope", wa.argv.items[1]);
-    try std.testing.expectEqualStrings("--unit", wa.argv.items[2]);
-    try std.testing.expectEqualStrings("net-porter-worker-1000.scope", wa.argv.items[3]);
-    try std.testing.expectEqualStrings("--property", wa.argv.items[4]);
-    try std.testing.expectEqualStrings("CollectMode=inactive-or-failed", wa.argv.items[5]);
-    try std.testing.expectEqualStrings("--", wa.argv.items[6]);
-    try std.testing.expectEqualStrings(test_exe, wa.argv.items[7]);
-    try std.testing.expectEqualStrings("worker", wa.argv.items[8]);
-    try std.testing.expectEqualStrings("--uid", wa.argv.items[9]);
-    try std.testing.expectEqualStrings("1000", wa.argv.items[10]);
-    try std.testing.expectEqualStrings("--username", wa.argv.items[11]);
-    try std.testing.expectEqualStrings("testuser", wa.argv.items[12]);
-    try std.testing.expectEqualStrings("--catatonit-pid", wa.argv.items[13]);
-    try std.testing.expectEqualStrings("12345", wa.argv.items[14]);
-
-    // Verify temporary strings match argv references
-    try std.testing.expectEqualStrings("1000", wa.uid_str);
-    try std.testing.expectEqualStrings("12345", wa.pid_str);
-    try std.testing.expectEqualStrings("net-porter-worker-1000.scope", wa.scope_name);
+    const path = try envFilePath(allocator, 1000);
+    defer allocator.free(path);
+    try std.testing.expectEqualStrings("/run/net-porter/worker-1000.env", path);
 }
 
-test "buildWorkerArgv builds correct argv with config_path (full parameters)" {
+test "serviceInstanceName builds correct name" {
     const allocator = std.testing.allocator;
-    const config = "/etc/net-porter/config.toml";
-    const test_exe = "/usr/bin/net-porter";
-
-    var wa = try buildWorkerArgv(allocator, 1000, 12345, "testuser", config, test_exe);
-    defer wa.deinit(allocator);
-
-    // 15 fixed args + 2 optional (--config + path) = 17
-    try std.testing.expectEqual(@as(usize, 17), wa.argv.items.len);
-
-    // Verify all 15 fixed args are identical to the no-config case
-    try std.testing.expectEqualStrings("systemd-run", wa.argv.items[0]);
-    try std.testing.expectEqualStrings("--scope", wa.argv.items[1]);
-    try std.testing.expectEqualStrings("--unit", wa.argv.items[2]);
-    try std.testing.expectEqualStrings("net-porter-worker-1000.scope", wa.argv.items[3]);
-    try std.testing.expectEqualStrings("--property", wa.argv.items[4]);
-    try std.testing.expectEqualStrings("CollectMode=inactive-or-failed", wa.argv.items[5]);
-    try std.testing.expectEqualStrings("--", wa.argv.items[6]);
-    try std.testing.expectEqualStrings(test_exe, wa.argv.items[7]);
-    try std.testing.expectEqualStrings("worker", wa.argv.items[8]);
-    try std.testing.expectEqualStrings("--uid", wa.argv.items[9]);
-    try std.testing.expectEqualStrings("1000", wa.argv.items[10]);
-    try std.testing.expectEqualStrings("--username", wa.argv.items[11]);
-    try std.testing.expectEqualStrings("testuser", wa.argv.items[12]);
-    try std.testing.expectEqualStrings("--catatonit-pid", wa.argv.items[13]);
-    try std.testing.expectEqualStrings("12345", wa.argv.items[14]);
-
-    // Verify the 2 config_path args at the end
-    try std.testing.expectEqualStrings("--config", wa.argv.items[15]);
-    try std.testing.expectEqualStrings(config, wa.argv.items[16]);
+    const name = try serviceInstanceName(allocator, 1000);
+    defer allocator.free(name);
+    try std.testing.expectEqualStrings("net-porter-worker@1000.service", name);
 }
 
-test "buildWorkerArgv with large UID and PID values" {
+test "writeEnvFile writes correct content" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const uid = 1000;
 
-    var wa = try buildWorkerArgv(allocator, 4294967294, 2147483647, "root", "/opt/config.yaml", "/usr/bin/net-porter");
-    defer wa.deinit(allocator);
+    // Ensure /run/net-porter exists
+    std.Io.Dir.cwd().createDirPath(io, "/run/net-porter") catch {};
 
-    try std.testing.expectEqual(@as(usize, 17), wa.argv.items.len);
-    try std.testing.expectEqualStrings("4294967294", wa.argv.items[10]); // uid_str
-    try std.testing.expectEqualStrings("2147483647", wa.argv.items[14]); // pid_str
-    try std.testing.expectEqualStrings("net-porter-worker-4294967294.scope", wa.argv.items[3]); // scope_name
+    writeEnvFile(io, allocator, uid, "testuser", 12345, "/etc/net-porter/config.json") catch return error.Unexpected;
+    defer removeEnvFile(allocator, uid);
+
+    // Read back and verify
+    const path = try envFilePath(allocator, uid);
+    defer allocator.free(path);
+
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return error.Unexpected;
+    defer file.close(io);
+
+    var read_buffer: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buffer);
+    const content = file_reader.interface.allocRemaining(allocator, .limited(512)) catch return error.Unexpected;
+    defer allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "NET_PORTER_USERNAME=testuser") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "NET_PORTER_CATATONIT_PID=12345") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "NET_PORTER_CONFIG=/etc/net-porter/config.json") != null);
+}
+
+test "writeEnvFile uses default config when null" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const uid = 9999;
+
+    std.Io.Dir.cwd().createDirPath(io, "/run/net-porter") catch {};
+
+    writeEnvFile(io, allocator, uid, "testuser", 12345, null) catch return error.Unexpected;
+    defer removeEnvFile(allocator, uid);
+
+    const path = try envFilePath(allocator, uid);
+    defer allocator.free(path);
+
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return error.Unexpected;
+    defer file.close(io);
+
+    var read_buffer: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buffer);
+    const content = file_reader.interface.allocRemaining(allocator, .limited(512)) catch return error.Unexpected;
+    defer allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "NET_PORTER_CONFIG=/etc/net-porter/config.json") != null);
 }
 
 // ── Tests: addPendingLocked / scheduleRetry ──────────────────────────
@@ -1139,33 +1128,7 @@ test "stopWorker removes UID from pending list" {
     try std.testing.expectEqual(@as(u32, 2000), wm.pending_uids.items[0]);
 }
 
-// ── Tests: WorkerArgv.deinit ─────────────────────────────────────────
-
-test "WorkerArgv.deinit frees all allocated memory" {
-    const allocator = std.testing.allocator;
-
-    var wa = try buildWorkerArgv(allocator, 1000, 54321, "testuser", "/path/to/config.toml", "/usr/bin/net-porter");
-    // Verify it built correctly before cleanup
-    try std.testing.expectEqual(@as(usize, 17), wa.argv.items.len);
-    // deinit should not leak — verified by std.testing.allocator (detects leaks)
-    wa.deinit(allocator);
-}
-
-// ── Tests: resolveSelfExe / isBinaryOutdated ────────────────────────
-
-test "resolveSelfExe resolves and caches /proc/self/exe" {
-    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
-    defer wm.deinit();
-
-    try std.testing.expect(wm.self_exe_path == null);
-    const exe = try wm.resolveSelfExe();
-    try std.testing.expect(exe.len > 0);
-    // Should be cached now
-    try std.testing.expect(wm.self_exe_path != null);
-    // Second call returns same pointer
-    const exe2 = try wm.resolveSelfExe();
-    try std.testing.expect(exe.ptr == exe2.ptr);
-}
+// ── Tests: isBinaryOutdated ────────────────────────────────────────
 
 test "isBinaryOutdated returns false for current process" {
     var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
