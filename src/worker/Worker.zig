@@ -6,14 +6,16 @@
 //! Lifecycle:
 //!   1. Load config, ACL, CNI configs (host namespace — paths accessible)
 //!   2. Create listening socket at /run/user/<uid>/net-porter.sock (host namespace)
-//!   3. Open mount namespace fd + CNI plugin dir fd (host namespace)
+//!   3. Open mount namespace fd + config dir fds (host namespace)
 //!   4. setns(catatonit mount ns) → unshare → make-rslave (enter correct namespace)
-//!   5. Bind mount host CNI plugin dir read-only (security: prevent binary replacement)
+//!   5. Bind mount config dirs read-only (security: prevent tampering)
 //!   6. Event loop: accept connections, spawn handler threads
 //!   7. ACL hot-reload via inotify (separate watch thread)
 //!
 //! Security:
 //!   - CNI plugin dir is bind-mounted read-only from host (prevents binary replacement)
+//!   - ACL dir is bind-mounted read-only from host (prevents rule tampering)
+//!   - CNI config dir is bind-mounted read-only from host (prevents config tampering)
 //!   - Worker runs in an independent mount namespace (rslave — no reverse pollution)
 //!   - Socket ownership verified via fchownat to target UID
 //!   - No nsenter executed — the worker IS in the correct namespace
@@ -97,8 +99,12 @@ pub fn new(opts: Opts) !Worker {
         return e;
     };
 
-    // 5. Setup namespace (setns → unshare → rslave → bind mount)
-    try setupNamespace(catatonit_pid, conf.cni_plugin_dir);
+    // 5. Setup namespace (setns → unshare → rslave → bind mount config dirs read-only)
+    try setupNamespace(catatonit_pid, .{
+        .cni_plugin_dir = conf.cni_plugin_dir,
+        .acl_dir = conf.acl_dir,
+        .cni_dir = conf.cni_dir,
+    });
 
     // 6. Init DHCP manager (after namespace setup — CNI dir is bind-mounted)
     const dhcp_manager = DhcpManager.init(io, page_alloc, conf.cni_plugin_dir);
@@ -228,16 +234,23 @@ fn pageAllocator(self: *Worker) std.mem.Allocator {
 
 // ─── Namespace Setup ──────────────────────────────────────────────────
 
+/// Directories to bind-mount into the worker's namespace.
+const NamespaceDirs = struct {
+    cni_plugin_dir: []const u8,
+    acl_dir: []const u8,
+    cni_dir: []const u8,
+};
+
 /// Enter the container's mount namespace and set up a safe working environment.
 ///
 /// Steps:
 ///   1. Open catatonit's mount namespace fd (before setns)
-///   2. Open host CNI plugin dir fd (before setns — need host path)
+///   2. Open host directory fds for bind-mount targets (before setns)
 ///   3. setns into catatonit's mount namespace
 ///   4. unshare(CLONE_NEWNS) to create an independent copy
 ///   5. mount --make-rslave / for one-way propagation
-///   6. Bind mount host CNI plugin dir read-only (anti-privilege-escalation)
-fn setupNamespace(catatonit_pid: std.posix.pid_t, cni_plugin_dir: []const u8) !void {
+///   6. Bind mount host config dirs read-only (anti-privilege-escalation)
+fn setupNamespace(catatonit_pid: std.posix.pid_t, dirs: NamespaceDirs) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
@@ -252,16 +265,35 @@ fn setupNamespace(catatonit_pid: std.posix.pid_t, cni_plugin_dir: []const u8) !v
     const mnt_ns_fd: std.posix.fd_t = @intCast(mnt_ns_fd_rc);
     defer _ = linux.close(mnt_ns_fd);
 
-    // 2. Open host CNI plugin directory fd (before namespace change)
-    const cni_dir_z = try arena_alloc.allocSentinel(u8, cni_plugin_dir.len, 0);
-    @memcpy(cni_dir_z[0..cni_plugin_dir.len], cni_plugin_dir);
-    const cni_dir_fd_rc = linux.open(cni_dir_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
-    if (std.posix.errno(cni_dir_fd_rc) != .SUCCESS) {
-        log.err("Failed to open CNI plugin dir '{s}': {s}", .{ cni_plugin_dir, @tagName(std.posix.errno(cni_dir_fd_rc)) });
+    // 2. Open host directory fds before namespace change.
+    //    /proc/self/fd/<fd> magic symlinks resolve to the host inode
+    //    regardless of current namespace — this is how we carry host
+    //    directories across the namespace boundary.
+
+    // CNI plugin dir — mandatory (worker executes binaries from here)
+    const cni_plugin_fd = openDirFd(arena_alloc, dirs.cni_plugin_dir) catch |err| {
+        log.err("Failed to open CNI plugin dir '{s}': {s}", .{ dirs.cni_plugin_dir, @errorName(err) });
         return error.NamespaceSetupFailed;
+    };
+    defer _ = linux.close(cni_plugin_fd);
+
+    // ACL dir — optional (only needed for hot-reload; initial load already done)
+    const acl_fd: ?std.posix.fd_t = openDirFd(arena_alloc, dirs.acl_dir) catch |err| blk: {
+        log.warn("ACL dir '{s}' not available for bind mount ({s}), hot-reload will not work", .{ dirs.acl_dir, @errorName(err) });
+        break :blk null;
+    };
+    defer {
+        if (acl_fd) |fd| _ = linux.close(fd);
     }
-    const cni_dir_fd: std.posix.fd_t = @intCast(cni_dir_fd_rc);
-    defer _ = linux.close(cni_dir_fd);
+
+    // CNI config dir — optional (configs already loaded into memory)
+    const cni_fd: ?std.posix.fd_t = openDirFd(arena_alloc, dirs.cni_dir) catch |err| blk: {
+        log.warn("CNI config dir '{s}' not available for bind mount ({s})", .{ dirs.cni_dir, @errorName(err) });
+        break :blk null;
+    };
+    defer {
+        if (cni_fd) |fd| _ = linux.close(fd);
+    }
 
     // 3. setns — enter catatonit's mount namespace
     const setns_rc = linux.setns(mnt_ns_fd, linux.CLONE.NEWNS);
@@ -285,54 +317,82 @@ fn setupNamespace(catatonit_pid: std.posix.pid_t, cni_plugin_dir: []const u8) !v
         return error.NamespaceSetupFailed;
     }
 
-    // 6. Bind mount host CNI plugin dir read-only (anti-privilege-escalation)
-    //    Uses /proc/self/fd/<cni_dir_fd> as the mount source — this magic symlink
-    //    resolves to the host directory regardless of current namespace.
+    // 6. Bind mount host directories read-only into this namespace.
     //
-    //    SECURITY: This is a mandatory hardening measure. Without the read-only
-    //    bind mount, the container user could replace CNI plugin binaries that
-    //    the worker executes as root. Failure to mount is fatal.
-    try bindMountCniDir(arena_alloc, cni_dir_fd, cni_plugin_dir);
+    //    SECURITY: All config directories are mounted read-only to prevent
+    //    the container user from:
+    //      - Replacing CNI plugin binaries (executed as root by worker)
+    //      - Modifying ACL rules to grant themselves unauthorized access
+    //      - Tampering with CNI network configurations
+    //
+    //    CNI plugin dir failure is fatal — worker cannot function without it.
+    //    ACL/CNI config dir failures are non-fatal — data is already in memory.
+
+    try bindMountReadOnly(arena_alloc, cni_plugin_fd, dirs.cni_plugin_dir, "CNI plugin");
+
+    if (acl_fd) |fd| {
+        bindMountReadOnly(arena_alloc, fd, dirs.acl_dir, "ACL") catch |err| {
+            log.warn("ACL dir bind mount failed ({s}), hot-reload will not work", .{@errorName(err)});
+        };
+    }
+
+    if (cni_fd) |fd| {
+        bindMountReadOnly(arena_alloc, fd, dirs.cni_dir, "CNI config") catch |err| {
+            log.warn("CNI config dir bind mount failed ({s})", .{@errorName(err)});
+        };
+    }
 
     log.info("Namespace setup complete for catatonit_pid={d}", .{catatonit_pid});
 }
 
-/// Bind mount the host CNI plugin directory read-only into the current namespace.
-/// This prevents the container user from replacing CNI binaries.
-fn bindMountCniDir(arena_alloc: std.mem.Allocator, cni_dir_fd: std.posix.fd_t, cni_plugin_dir: []const u8) !void {
+/// Open a directory fd by path. Returns the raw fd or an error.
+fn openDirFd(arena_alloc: std.mem.Allocator, path: []const u8) !std.posix.fd_t {
+    const path_z = try arena_alloc.allocSentinel(u8, path.len, 0);
+    @memcpy(path_z[0..path.len], path);
+    const rc = linux.open(path_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
+    if (std.posix.errno(rc) != .SUCCESS) return error.DirOpenFailed;
+    return @intCast(rc);
+}
+
+/// Bind mount a host directory read-only into the current namespace.
+/// `host_dir_fd` must have been opened before the namespace change.
+/// `mount_point` is the path where the directory will appear (same as host path).
+/// `label` is used for log messages.
+fn bindMountReadOnly(arena_alloc: std.mem.Allocator, host_dir_fd: std.posix.fd_t, mount_point: []const u8, label: []const u8) !void {
     // Create mount point directory (ignore errors — may already exist)
-    const mnt_point_z = try arena_alloc.allocSentinel(u8, cni_plugin_dir.len, 0);
-    @memcpy(mnt_point_z[0..cni_plugin_dir.len], cni_plugin_dir);
+    const mnt_z = try arena_alloc.allocSentinel(u8, mount_point.len, 0);
+    @memcpy(mnt_z[0..mount_point.len], mount_point);
 
     // Ensure parent directory exists
-    if (std.mem.lastIndexOf(u8, cni_plugin_dir, "/")) |last_slash| {
+    if (std.mem.lastIndexOf(u8, mount_point, "/")) |last_slash| {
         if (last_slash > 0) {
-            const parent = cni_plugin_dir[0..last_slash];
+            const parent = mount_point[0..last_slash];
             const parent_z = try arena_alloc.allocSentinel(u8, parent.len, 0);
             @memcpy(parent_z[0..parent.len], parent);
             _ = linux.mkdir(parent_z, 0o755); // ignore error
         }
     }
-    _ = linux.mkdir(mnt_point_z, 0o755); // ignore error — may already exist
+    _ = linux.mkdir(mnt_z, 0o755); // ignore error — may already exist
 
-    // Source: /proc/self/fd/<cni_dir_fd> — resolves to host CNI dir
-    const fd_path = try std.fmt.allocPrintSentinel(arena_alloc, "/proc/self/fd/{d}", .{cni_dir_fd}, 0);
+    // Source: /proc/self/fd/<host_dir_fd> — resolves to the host directory
+    // regardless of current mount namespace.
+    const fd_path = try std.fmt.allocPrintSentinel(arena_alloc, "/proc/self/fd/{d}", .{host_dir_fd}, 0);
 
     // Bind mount
-    const bind_rc = linux.mount(fd_path, mnt_point_z, "", linux.MS.BIND, 0);
+    const bind_rc = linux.mount(fd_path, mnt_z, "", linux.MS.BIND, 0);
     if (std.posix.errno(bind_rc) != .SUCCESS) {
-        log.warn("Bind mount of CNI dir failed: {s}", .{@tagName(std.posix.errno(bind_rc))});
+        log.warn("{s} dir bind mount failed: {s}", .{ label, @tagName(std.posix.errno(bind_rc)) });
         return error.BindMountFailed;
     }
 
     // Remount read-only
-    const ro_rc = linux.mount(mnt_point_z, mnt_point_z, "", linux.MS.BIND | linux.MS.REMOUNT | linux.MS.RDONLY, 0);
+    const ro_rc = linux.mount(mnt_z, mnt_z, "", linux.MS.BIND | linux.MS.REMOUNT | linux.MS.RDONLY, 0);
     if (std.posix.errno(ro_rc) != .SUCCESS) {
-        log.warn("Read-only remount of CNI dir failed: {s}", .{@tagName(std.posix.errno(ro_rc))});
+        log.warn("{s} dir read-only remount failed: {s}", .{ label, @tagName(std.posix.errno(ro_rc)) });
         // Attempt to clean up the read-write mount
-        _ = linux.umount2(mnt_point_z, 0);
+        _ = linux.umount2(mnt_z, 0);
         return error.BindMountFailed;
     }
 
-    log.info("Bind mounted CNI plugin dir read-only: {s}", .{cni_plugin_dir});
+    log.info("Bind mounted {s} dir read-only: {s}", .{ label, mount_point });
 }
