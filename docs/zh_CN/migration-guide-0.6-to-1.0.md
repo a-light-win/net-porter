@@ -70,9 +70,10 @@ mv /etc/net-porter/acl.d/admins.json /etc/net-porter/acl.d/@admins.json
 
 像往常一样安装 1.0.0 包（deb、rpm 或 archlinux）。新的 `net-porter-worker@.service` 模板会自动安装。
 
-### 步骤 4：重启服务
+### 步骤 4：重新加载 systemd 并重启服务
 
 ```bash
+systemctl daemon-reload
 systemctl restart net-porter
 ```
 

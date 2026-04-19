@@ -613,12 +613,9 @@ Quick steps:
      "groups": ["dhcp-users"]
    }
    ```
-3. Install the new version and restart the service:
+3. Install the new version, reload systemd, and restart the service:
    ```bash
-   systemctl restart net-porter
-   ```
-3. Install the new version and restart the service:
-   ```bash
+   systemctl daemon-reload
    systemctl restart net-porter
    ```
 

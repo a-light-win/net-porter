@@ -70,9 +70,10 @@ This includes all grants from `@devops.json` into alice's effective permissions.
 
 Install the 1.0.0 package (deb, rpm, or archlinux) as usual. The new `net-porter-worker@.service` template will be installed automatically.
 
-### Step 4: Restart the service
+### Step 4: Reload systemd and restart the service
 
 ```bash
+systemctl daemon-reload
 systemctl restart net-porter
 ```
 

@@ -636,8 +636,9 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
      "groups": ["dhcp-users"]
    }
    ```
-3. 安装新版本并重启服务：
+3. 安装新版本，重新加载 systemd 并重启服务：
    ```bash
+   systemctl daemon-reload
    systemctl restart net-porter
    ```
 
