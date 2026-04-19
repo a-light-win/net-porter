@@ -14,8 +14,7 @@
 //!
 //! Security:
 //!   - CNI plugin dir is bind-mounted read-only from host (prevents binary replacement)
-//!   - ACL dir is bind-mounted read-only from host (prevents rule tampering)
-//!   - CNI config dir is bind-mounted read-only from host (prevents config tampering)
+//!   - ACL dir is bind-mounted read-only from host (prevents hot-reload privilege escalation)
 //!   - Worker runs in an independent mount namespace (rslave — no reverse pollution)
 //!   - Socket ownership verified via fchownat to target UID
 //!   - No nsenter executed — the worker IS in the correct namespace
@@ -103,7 +102,6 @@ pub fn new(opts: Opts) !Worker {
     try setupNamespace(catatonit_pid, .{
         .cni_plugin_dir = conf.cni_plugin_dir,
         .acl_dir = conf.acl_dir,
-        .cni_dir = conf.cni_dir,
     });
 
     // 6. Init DHCP manager (after namespace setup — CNI dir is bind-mounted)
@@ -238,7 +236,6 @@ fn pageAllocator(self: *Worker) std.mem.Allocator {
 const NamespaceDirs = struct {
     cni_plugin_dir: []const u8,
     acl_dir: []const u8,
-    cni_dir: []const u8,
 };
 
 /// Enter the container's mount namespace and set up a safe working environment.
@@ -277,23 +274,14 @@ fn setupNamespace(catatonit_pid: std.posix.pid_t, dirs: NamespaceDirs) !void {
     };
     defer _ = linux.close(cni_plugin_fd);
 
-    // ACL dir — optional (only needed for hot-reload; initial load already done)
-    const acl_fd: ?std.posix.fd_t = openDirFd(arena_alloc, dirs.acl_dir) catch |err| blk: {
-        log.warn("ACL dir '{s}' not available for bind mount ({s}), hot-reload will not work", .{ dirs.acl_dir, @errorName(err) });
-        break :blk null;
+    // ACL dir — mandatory (hot-reload reads from this path; without read-only
+    // bind mount, a container user could write malicious ACL files that the
+    // inotify watch thread would pick up and reload — privilege escalation).
+    const acl_fd = openDirFd(arena_alloc, dirs.acl_dir) catch |err| {
+        log.err("Failed to open ACL dir '{s}': {s}", .{ dirs.acl_dir, @errorName(err) });
+        return error.NamespaceSetupFailed;
     };
-    defer {
-        if (acl_fd) |fd| _ = linux.close(fd);
-    }
-
-    // CNI config dir — optional (configs already loaded into memory)
-    const cni_fd: ?std.posix.fd_t = openDirFd(arena_alloc, dirs.cni_dir) catch |err| blk: {
-        log.warn("CNI config dir '{s}' not available for bind mount ({s})", .{ dirs.cni_dir, @errorName(err) });
-        break :blk null;
-    };
-    defer {
-        if (cni_fd) |fd| _ = linux.close(fd);
-    }
+    defer _ = linux.close(acl_fd);
 
     // 3. setns — enter catatonit's mount namespace
     const setns_rc = linux.setns(mnt_ns_fd, linux.CLONE.NEWNS);
@@ -319,28 +307,17 @@ fn setupNamespace(catatonit_pid: std.posix.pid_t, dirs: NamespaceDirs) !void {
 
     // 6. Bind mount host directories read-only into this namespace.
     //
-    //    SECURITY: All config directories are mounted read-only to prevent
-    //    the container user from:
-    //      - Replacing CNI plugin binaries (executed as root by worker)
-    //      - Modifying ACL rules to grant themselves unauthorized access
-    //      - Tampering with CNI network configurations
+    //    SECURITY: Both directories MUST be mounted read-only to prevent
+    //    privilege escalation by the container user:
+    //      - CNI plugin dir: prevents replacing binaries executed as root
+    //      - ACL dir: prevents writing malicious ACL files that hot-reload
+    //        would pick up and apply (direct privilege escalation)
     //
-    //    CNI plugin dir failure is fatal — worker cannot function without it.
-    //    ACL/CNI config dir failures are non-fatal — data is already in memory.
+    //    Both failures are fatal — the worker refuses to start without
+    //    these security guarantees.
 
     try bindMountReadOnly(arena_alloc, cni_plugin_fd, dirs.cni_plugin_dir, "CNI plugin");
-
-    if (acl_fd) |fd| {
-        bindMountReadOnly(arena_alloc, fd, dirs.acl_dir, "ACL") catch |err| {
-            log.warn("ACL dir bind mount failed ({s}), hot-reload will not work", .{@errorName(err)});
-        };
-    }
-
-    if (cni_fd) |fd| {
-        bindMountReadOnly(arena_alloc, fd, dirs.cni_dir, "CNI config") catch |err| {
-            log.warn("CNI config dir bind mount failed ({s})", .{@errorName(err)});
-        };
-    }
+    try bindMountReadOnly(arena_alloc, acl_fd, dirs.acl_dir, "ACL");
 
     log.info("Namespace setup complete for catatonit_pid={d}", .{catatonit_pid});
 }
