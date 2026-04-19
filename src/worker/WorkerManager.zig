@@ -696,14 +696,17 @@ fn tryAdoptExistingService(self: *WorkerManager, uid: u32, catatonit_pid: std.po
     return true;
 }
 
-/// Find the worker PID by reading the service's cgroup.procs file.
+/// Find the worker PID by querying systemd for the service's MainPID.
+/// Uses `systemctl show --property=MainPID --value` instead of reading
+/// cgroup files directly — no hardcoded cgroup paths, resilient to
+/// systemd version or layout changes.
 fn findServiceWorkerPid(self: *WorkerManager, uid: u32) !std.posix.pid_t {
-    const path = try std.fmt.allocPrint(self.allocator, "/sys/fs/cgroup/system.slice/net-porter-worker@{d}.service/cgroup.procs", .{uid});
-    defer self.allocator.free(path);
+    const svc_name = std.fmt.allocPrint(self.allocator, "net-porter-worker@{d}.service", .{uid}) catch return error.OutOfMemory;
+    defer self.allocator.free(svc_name);
 
     var attempts: u8 = 0;
     while (attempts < 20) : (attempts += 1) {
-        if (self.readFirstPid(path)) |pid| {
+        if (self.queryServiceMainPid(svc_name)) |pid| {
             return pid;
         }
         const req: std.os.linux.timespec = .{ .sec = 0, .nsec = 50_000_000 };
@@ -712,21 +715,23 @@ fn findServiceWorkerPid(self: *WorkerManager, uid: u32) !std.posix.pid_t {
     return error.ScopeNotFound;
 }
 
-/// Read the first PID from a cgroup.procs file.
-/// Uses readPositionalAll (pread) for consistency with isCatatonit — avoids
-/// the sendFile path and eliminates a page_allocator heap allocation.
-fn readFirstPid(self: *WorkerManager, path: []const u8) ?std.posix.pid_t {
-    var file = std.Io.Dir.cwd().openFile(self.io, path, .{}) catch return null;
-    defer file.close(self.io);
+/// Query systemd for a service's MainPID via `systemctl show`.
+/// Returns null if the PID is not yet available or on any error.
+fn queryServiceMainPid(self: *WorkerManager, svc_name: []const u8) ?std.posix.pid_t {
+    const result = std.process.run(self.allocator, self.io, .{
+        .argv = &[_][]const u8{ "systemctl", "show", svc_name, "--property=MainPID", "--value" },
+    }) catch return null;
+    defer self.allocator.free(result.stdout);
+    defer self.allocator.free(result.stderr);
 
-    var buf: [128]u8 = undefined;
-    const n = file.readPositionalAll(self.io, &buf, 0) catch return null;
-    if (n == 0) return null;
+    if (result.term != .exited or result.term.exited != 0) return null;
 
-    const data = std.mem.trim(u8, buf[0..n], " \t\r\n");
-    if (data.len == 0) return null;
-    const first_line = if (std.mem.indexOf(u8, data, "\n")) |idx| data[0..idx] else data;
-    return std.fmt.parseUnsigned(std.posix.pid_t, first_line, 10) catch null;
+    const output = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (output.len == 0) return null;
+
+    const pid = std.fmt.parseUnsigned(std.posix.pid_t, output, 10) catch return null;
+    if (pid <= 0) return null;
+    return pid;
 }
 
 // ── /proc scanning ───────────────────────────────────────────────────
