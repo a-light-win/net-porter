@@ -11,8 +11,6 @@ pub const Response = NetavarkPlugin.Response;
 pub const Interface = NetavarkPlugin.Interface;
 pub const Subnet = NetavarkPlugin.Subnet;
 
-pub const NetworkPluginExec = NetavarkPlugin.NetworkPluginExec;
-
 var plugin = NetavarkPlugin.defaultNetavarkPlugin();
 
 pub fn setIo(io: std.Io) void {
