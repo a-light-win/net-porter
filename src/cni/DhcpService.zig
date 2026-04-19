@@ -93,7 +93,7 @@ fn start(self: *DhcpService) !void {
             //   - returns 0     → process is still running
             //   - returns pid   → process exited (zombie reaped)
             //   - returns -ECHILD → already reaped or not our child
-            var status: i32 = 0;
+            var status: u32 = 0;
             const rc = linux.wait4(pid, &status, linux.W.NOHANG, null);
             if (rc == 0) return true; // Still running
             // Process exited or error — no longer alive

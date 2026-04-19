@@ -853,7 +853,7 @@ const PluginConf = struct {
             if (process.stdin) |f| f.close(io);
             if (process.stdout) |f| f.close(io);
             if (process.stderr) |f| f.close(io);
-            process.wait(io) catch {}; // reap zombie
+            if (process.wait(io)) |_| {} else |_| {} // reap zombie
         }
 
         var stdout = std.ArrayListUnmanaged(u8).empty;
