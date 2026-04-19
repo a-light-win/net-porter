@@ -105,7 +105,10 @@ pub fn reload(self: *WorkerAclManager) void {
     // Phase 1: Build new ACLs in a separate arena (no lock needed — only reads
     // immutable fields: acl_dir, username, uid, io).
     var new_arena = ArenaAllocator.init(self.allocator) catch return;
-    errdefer new_arena.deinit();
+    var new_arena_owned = true;
+    defer {
+        if (new_arena_owned) new_arena.deinit();
+    }
 
     const new_alloc = new_arena.allocator();
     var new_acls: std.ArrayList(Acl) = .empty;
@@ -113,13 +116,11 @@ pub fn reload(self: *WorkerAclManager) void {
 
     self.doLoadInto(new_alloc, &new_acls, &new_group_names) catch {
         log.warn("ACL reload failed, keeping existing ACLs", .{});
-        new_arena.deinit();
         return;
     };
 
     // Phase 2: Atomic swap under lock.
     self.mutex.lock(self.io) catch {
-        new_arena.deinit();
         return;
     };
 
@@ -130,6 +131,7 @@ pub fn reload(self: *WorkerAclManager) void {
     self.arena = new_arena;
     self.acls = new_acls;
     self.group_names = new_group_names;
+    new_arena_owned = false;
 
     self.mutex.unlock(self.io);
 
@@ -224,18 +226,21 @@ fn setupInotify(self: *WorkerAclManager) void {
     const init_rc = linux.inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (std.posix.errno(init_rc) != .SUCCESS) return;
     const ifd: std.posix.fd_t = @intCast(init_rc);
-    errdefer _ = linux.close(ifd);
+    var ifd_owned = true;
+    defer {
+        if (ifd_owned) _ = linux.close(ifd);
+    }
 
     const acl_dir_z = self.arena.allocator().allocSentinel(u8, self.acl_dir.len, 0) catch return;
     @memcpy(acl_dir_z[0..self.acl_dir.len], self.acl_dir);
 
     const wd_rc = linux.inotify_add_watch(ifd, acl_dir_z, IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVED_FROM | IN_MOVED_TO | IN_CLOSE_WRITE);
     if (std.posix.errno(wd_rc) != .SUCCESS) {
-        _ = linux.close(ifd);
         return;
     }
 
     self.inotify_fd = ifd;
+    ifd_owned = false;
     log.info("Watching ACL directory: {s}", .{self.acl_dir});
 }
 

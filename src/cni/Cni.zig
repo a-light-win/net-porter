@@ -448,6 +448,7 @@ const PluginConf = struct {
 
     pub fn init(root_allocator: Allocator, cni_config: CniConfig, obj: json.ObjectMap) !PluginConf {
         var arena = try ArenaAllocator.init(root_allocator);
+        errdefer arena.deinit();
 
         const allocator = arena.allocator();
         const conf = try shadowCopy(allocator, obj);

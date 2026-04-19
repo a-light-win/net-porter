@@ -48,6 +48,7 @@ pub fn ensureStarted(self: *DhcpManager, uid: u32) !void {
     const result = try self.services.getOrPut(uid);
     if (!result.found_existing) {
         const svc = try self.allocator.create(DhcpService);
+        errdefer self.allocator.destroy(svc);
         svc.* = try DhcpService.init(self.io, self.allocator, uid, self.cni_plugin_dir);
         result.value_ptr.* = svc;
         log.info("Created DHCP service for uid={d}", .{uid});

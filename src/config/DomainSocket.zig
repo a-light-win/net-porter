@@ -42,19 +42,19 @@ pub fn listen(io: std.Io, path: [:0]const u8, uid: std.posix.uid_t) !std.Io.net.
         log.err("Failed to listen on {s}: {s}", .{ path, @errorName(e) });
         return e;
     };
+    errdefer {
+        server.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    }
 
     // Verify the created file is a socket (not a symlink replaced by attacker)
     if (isSymlink(path)) {
         log.err("Socket path replaced with symlink after bind: {s}", .{path});
-        server.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, path) catch {};
         return error.SymlinkDetected;
     }
 
     // Set mode first (path-based, after verifying not a symlink)
     setModePath(path, 0o600) catch |err| {
-        server.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, path) catch {};
         return err;
     };
 
@@ -68,8 +68,6 @@ pub fn listen(io: std.Io, path: [:0]const u8, uid: std.posix.uid_t) !std.Io.net.
     // fchownat(path) operates on the filesystem inode — the one that matters.
     // This is the same reason setModePath uses path-based fchmodat.
     setOwnerPath(path, uid) catch |err| {
-        server.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, path) catch {};
         return err;
     };
 
