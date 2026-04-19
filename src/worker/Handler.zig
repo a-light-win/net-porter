@@ -232,7 +232,17 @@ fn getClientInfo(responser: *Responser) std.posix.UnexpectedError!ClientInfo {
     return client_info;
 }
 
-fn authClient(self: *Handler, _: ClientInfo, request: *const plugin.Request) !void {
+fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
+    // Defense-in-depth: verify connecting UID matches the worker's target UID.
+    // Primary defense is socket file permission (0600, owner=uid), but an
+    // explicit check prevents misuse if file permissions are somehow bypassed
+    // (e.g. CAP_DAC_OVERRIDE in a compromised namespace).
+    if (client_info.uid != self.acl_manager.uid) {
+        log.warn("UID mismatch: client={}, expected={}", .{ client_info.uid, self.acl_manager.uid });
+        self.responser.writeError("Access denied", .{});
+        return error.AccessDenied;
+    }
+
     // Socket-level pre-filtering: reject if uid has no permission on any resource
     if (!self.acl_manager.hasAnyPermission()) {
         const err = error.AccessDenied;
