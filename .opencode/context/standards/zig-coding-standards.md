@@ -18,3 +18,8 @@ std.Io → std.posix → std.os.linux
 - ❌ `std.fs.max_path_bytes`（用 `std.Io.Dir.max_path_bytes`）
 - ❌ 把 `std.os.linux` 无故替换为 `std.posix`（先确认存在）
 - ❌ `std.Io` 调用漏传 `io` 参数
+
+## 规则 3：资源释放
+
+- **优先 `defer` / `errdefer`** 释放资源，而非在每个分支手动释放。
+- ✅ 在资源分配后立即写 `defer resource.free()` 或 `errdefer resource.free()`。
