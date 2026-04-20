@@ -28,8 +28,8 @@ pub fn postInit(self: *Config, io: std.Io, allocator: std.mem.Allocator, path: [
     }
 
     self.setCNIPluginDir(io);
-    self.setDefaultAclDir(allocator);
-    self.setDefaultCniDir(allocator);
+    self.setDefaultSubDir(allocator, "acl.d", &self.acl_dir);
+    self.setDefaultSubDir(allocator, "cni.d", &self.cni_dir);
 }
 
 const cni_plugin_search_paths = &[_][]const u8{
@@ -50,28 +50,16 @@ fn setCNIPluginDir(self: *Config, io: std.Io) void {
     }
 }
 
-/// Set default acl_dir to {config_dir}/acl.d if not explicitly configured.
-fn setDefaultAclDir(self: *Config, allocator: std.mem.Allocator) void {
-    if (self.acl_dir.len > 0) return;
+/// Set default sub-directory to {config_dir}/<suffix> if not explicitly configured.
+fn setDefaultSubDir(self: *Config, allocator: std.mem.Allocator, comptime suffix: []const u8, field: *[]const u8) void {
+    if (field.len > 0) return;
     if (self.config_dir.len == 0) return;
 
-    const default = std.fmt.allocPrint(allocator, "{s}/acl.d", .{self.config_dir}) catch {
-        std.log.warn("Failed to allocate default acl_dir path", .{});
+    const default = std.fmt.allocPrint(allocator, "{s}/" ++ suffix, .{self.config_dir}) catch {
+        std.log.warn("Failed to allocate default {s} path", .{suffix});
         return;
     };
-    self.acl_dir = default;
-}
-
-/// Set default cni_dir to {config_dir}/cni.d if not explicitly configured.
-fn setDefaultCniDir(self: *Config, allocator: std.mem.Allocator) void {
-    if (self.cni_dir.len > 0) return;
-    if (self.config_dir.len == 0) return;
-
-    const default = std.fmt.allocPrint(allocator, "{s}/cni.d", .{self.config_dir}) catch {
-        std.log.warn("Failed to allocate default cni_dir path", .{});
-        return;
-    };
-    self.cni_dir = default;
+    field.* = default;
 }
 
 // ============================================================
