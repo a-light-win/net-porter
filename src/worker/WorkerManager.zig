@@ -781,34 +781,6 @@ fn discoverAllCatatonitPids(io: std.Io, target_uids: []const u32, allocator: All
     return result;
 }
 
-/// Discover the catatonit PID for a single UID by scanning /proc directly.
-/// Convenience wrapper for single-uid lookups (used in tests).
-fn discoverCatatonitPid(io: std.Io, uid: u32) ?std.posix.pid_t {
-    var proc_dir = std.Io.Dir.cwd().openDir(io, "/proc", .{ .iterate = true }) catch {
-        log.warn("discoverCatatonitPid: failed to open /proc", .{});
-        return null;
-    };
-    defer proc_dir.close(io);
-
-    var iter = proc_dir.iterate();
-
-    while (iter.next(io) catch null) |entry| {
-        if (!isAllDigits(entry.name)) continue;
-
-        const pid = std.fmt.parseUnsigned(std.posix.pid_t, entry.name, 10) catch continue;
-
-        if (!checkProcessUidByStat(pid, uid)) continue;
-
-        if (isCatatonit(io, pid)) {
-            log.info("discoverCatatonitPid: found catatonit pid={d} for uid={d}", .{ pid, uid });
-            return pid;
-        }
-    }
-
-    log.debug("discoverCatatonitPid: no catatonit found for uid={d}", .{uid});
-    return null;
-}
-
 /// Check if a string consists entirely of ASCII digits.
 fn isAllDigits(s: []const u8) bool {
     if (s.len == 0) return false;
@@ -864,9 +836,11 @@ test "isAllDigits validates numeric strings" {
     try std.testing.expect(!isAllDigits("-1"));
 }
 
-test "discoverCatatonitPid returns null for non-existent UID" {
-    const result = discoverCatatonitPid(std.testing.io, 999999);
-    try std.testing.expect(result == null);
+test "discoverAllCatatonitPids returns null for non-existent UID" {
+    const allocator = std.testing.allocator;
+    var result = try discoverAllCatatonitPids(std.testing.io, &.{999999}, allocator);
+    defer result.deinit();
+    try std.testing.expect(result.get(999999) == null);
 }
 
 test "discoverAllCatatonitPids returns empty for non-existent UIDs" {
