@@ -27,22 +27,13 @@ const std = @import("std");
 const log = std.log.scoped(.worker);
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
-const AclFile = @import("../server/AclFile.zig");
-const Acl = @import("../server/Acl.zig");
+const inotify = @import("../utils/Inotify.zig");
+const AclFile = @import("../acl/AclFile.zig");
+const Acl = @import("../acl/Acl.zig");
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const WorkerAclManager = @This();
 
 const max_acl_file_size: usize = 64 * 1024;
-
-// inotify bits
-const IN_CREATE: u32 = 0x00000100;
-const IN_DELETE: u32 = 0x00000200;
-const IN_MODIFY: u32 = 0x00000002;
-const IN_MOVED_FROM: u32 = 0x00000040;
-const IN_MOVED_TO: u32 = 0x00000080;
-const IN_CLOSE_WRITE: u32 = 0x00000008;
-const IN_NONBLOCK: u32 = 0x800;
-const IN_CLOEXEC: u32 = 0x80000;
 
 arena: ArenaAllocator,
 allocator: Allocator,
@@ -223,7 +214,7 @@ fn addGrantsTo(self: *WorkerAclManager, arena_alloc: Allocator, acls: *std.Array
 }
 
 fn setupInotify(self: *WorkerAclManager) void {
-    const init_rc = linux.inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    const init_rc = linux.inotify_init1(inotify.IN_NONBLOCK | inotify.IN_CLOEXEC);
     if (std.posix.errno(init_rc) != .SUCCESS) return;
     const ifd: std.posix.fd_t = @intCast(init_rc);
     var ifd_owned = true;
@@ -234,7 +225,7 @@ fn setupInotify(self: *WorkerAclManager) void {
     const acl_dir_z = self.arena.allocator().allocSentinel(u8, self.acl_dir.len, 0) catch return;
     @memcpy(acl_dir_z[0..self.acl_dir.len], self.acl_dir);
 
-    const wd_rc = linux.inotify_add_watch(ifd, acl_dir_z, IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVED_FROM | IN_MOVED_TO | IN_CLOSE_WRITE);
+    const wd_rc = linux.inotify_add_watch(ifd, acl_dir_z, inotify.IN_CREATE | inotify.IN_DELETE | inotify.IN_MODIFY | inotify.IN_MOVED_FROM | inotify.IN_MOVED_TO | inotify.IN_CLOSE_WRITE);
     if (std.posix.errno(wd_rc) != .SUCCESS) {
         return;
     }

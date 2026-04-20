@@ -10,19 +10,10 @@ const std = @import("std");
 const log = std.log.scoped(.uid_tracker);
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
+const inotify = @import("../utils/Inotify.zig");
 const UidTracker = @This();
 
 const run_user_dir = "/run/user";
-
-// inotify event mask bits (from linux/inotify.h)
-const IN_CREATE: u32 = 0x00000100;
-const IN_DELETE: u32 = 0x00000200;
-const IN_MOVED_FROM: u32 = 0x00000040;
-const IN_MOVED_TO: u32 = 0x00000080;
-
-// inotify_init1 flags (same as O_NONBLOCK | O_CLOEXEC on all common archs)
-const IN_NONBLOCK: u32 = 0x800;
-const IN_CLOEXEC: u32 = 0x80000;
 
 /// Result of processing inotify events: UIDs that appeared/disappeared.
 pub const UidEvents = struct {
@@ -50,7 +41,7 @@ entries: std.ArrayList(UidEntry),
 inotify_fd: std.posix.fd_t,
 
 pub fn init(io: std.Io, allocator: Allocator, allowed_uids: std.ArrayList(u32)) !UidTracker {
-    const init_rc = linux.inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    const init_rc = linux.inotify_init1(inotify.IN_NONBLOCK | inotify.IN_CLOEXEC);
     if (std.posix.errno(init_rc) != .SUCCESS) {
         log.err("Failed to create inotify fd: {s}", .{@tagName(std.posix.errno(init_rc))});
         return error.InotifyInitFailed;
@@ -59,7 +50,7 @@ pub fn init(io: std.Io, allocator: Allocator, allowed_uids: std.ArrayList(u32)) 
     errdefer _ = linux.close(ifd);
 
     // Watch /run/user for directory create/delete
-    const wd_rc = linux.inotify_add_watch(ifd, run_user_dir, IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO);
+    const wd_rc = linux.inotify_add_watch(ifd, run_user_dir, inotify.IN_CREATE | inotify.IN_DELETE | inotify.IN_MOVED_FROM | inotify.IN_MOVED_TO);
     if (std.posix.errno(wd_rc) != .SUCCESS) {
         log.err("Failed to add inotify watch on {s}: {s}", .{ run_user_dir, @tagName(std.posix.errno(wd_rc)) });
         return error.InotifyWatchFailed;
@@ -172,13 +163,13 @@ pub fn processInotifyEvents(self: *UidTracker, event_buf: []u8) UidEvents {
             // Parse uid from directory name
             const uid = std.fmt.parseUnsigned(std.posix.uid_t, name, 10) catch continue;
 
-            if (event.mask & (IN_CREATE | IN_MOVED_TO) != 0) {
+            if (event.mask & (inotify.IN_CREATE | inotify.IN_MOVED_TO) != 0) {
                 if (self.isUidAllowed(uid)) {
                     log.info("Detected new /run/user/{d} directory", .{uid});
                     self.addUid(uid) catch continue;
                     created.appendAssumeCapacity(uid);
                 }
-            } else if (event.mask & (IN_DELETE | IN_MOVED_FROM) != 0) {
+            } else if (event.mask & (inotify.IN_DELETE | inotify.IN_MOVED_FROM) != 0) {
                 log.info("Detected removal of /run/user/{d} directory", .{uid});
                 self.removeUid(uid);
                 removed.appendAssumeCapacity(uid);
