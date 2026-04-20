@@ -39,8 +39,8 @@ fn run() !void {
 
 test {
     _ = @import("server/Server.zig");
-    _ = @import("server/Acl.zig");
-    _ = @import("server/AclFile.zig");
+    _ = @import("acl/Acl.zig");
+    _ = @import("acl/AclFile.zig");
     _ = @import("server/AclScanner.zig");
     _ = @import("server/UidTracker.zig");
 }
