@@ -332,7 +332,7 @@ fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !v
     // every IP that matches a template subnet, so each must be authorized.
     for (static_ips) |requested_ip| {
         if (!self.acl_manager.isIpAllowed(request.resource(), uid, requested_ip)) {
-            self.responser.writeError("IP address not allowed", .{});
+            self.responser.writeError("IP address not allowed: {s}", .{requested_ip});
             return error.IpNotAllowed;
         }
     }

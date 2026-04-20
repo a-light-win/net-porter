@@ -1,6 +1,6 @@
 const std = @import("std");
 const json = std.json;
-const log = std.log.scoped(.server);
+const log = std.log.scoped(.responser);
 const Responser = @This();
 
 io: std.Io,
