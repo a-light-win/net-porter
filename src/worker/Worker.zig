@@ -132,7 +132,7 @@ pub fn deinit(self: *Worker) void {
     self.server.deinit(self.io);
     std.Io.Dir.cwd().deleteFile(self.io, self.socket_path) catch {};
 
-    self.pageAllocator().free(self.socket_path);
+    std.heap.page_allocator.free(self.socket_path);
     self.cni_manager.deinit();
     self.acl_manager.deinit();
     self.managed_config.deinit();
@@ -164,12 +164,12 @@ pub fn run(self: *Worker) !void {
             continue;
         }
 
-        const conn = try self.pageAllocator().create(struct { stream: std.Io.net.Stream });
+        const conn = try std.heap.page_allocator.create(struct { stream: std.Io.net.Stream });
         conn.* = .{ .stream = conn_stream };
 
         var handler = Handler{
             .io = io,
-            .arena = try ArenaAllocator.init(self.pageAllocator()),
+            .arena = try ArenaAllocator.init(std.heap.page_allocator),
             .acl_manager = &self.acl_manager,
             .cni_manager = &self.cni_manager,
             .dhcp_service = &self.dhcp_service,
@@ -187,7 +187,7 @@ pub fn run(self: *Worker) !void {
             _ = self.active_handlers.fetchSub(1, .release);
             log.warn("Failed to spawn handler thread: {s}", .{@errorName(e)});
             handler.arena.deinit();
-            self.pageAllocator().destroy(conn);
+            std.heap.page_allocator.destroy(conn);
             continue;
         };
     }
@@ -224,9 +224,4 @@ fn handleRequests(handler: *Handler, active_handlers: *std.atomic.Value(usize)) 
         _ = active_handlers.fetchSub(1, .release);
     }
     try handler.handle();
-}
-
-fn pageAllocator(self: *Worker) std.mem.Allocator {
-    _ = self;
-    return std.heap.page_allocator;
 }
