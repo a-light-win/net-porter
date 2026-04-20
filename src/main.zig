@@ -3,7 +3,6 @@ const cli = @import("zig-cli");
 const plugin = @import("plugin.zig");
 const server = @import("server.zig");
 const worker_mod = @import("worker.zig");
-const json = @import("json.zig");
 const utils = @import("utils.zig");
 const Logger = utils.Logger;
 const ErrorMessage = utils.ErrorMessage;
@@ -57,8 +56,10 @@ pub fn main(init: std.process.Init) !void {
         switch (err) {
             error.AlreadyHandled => {},
             else => {
-                const error_message = ErrorMessage.init(@errorName(err));
-                try json.stringifyToStdout(init.io, error_message);
+                var write_buffer: [4096]u8 = undefined;
+                var file_writer = std.Io.File.stdout().writer(init.io, &write_buffer);
+                std.json.Stringify.value(ErrorMessage.init(@errorName(err)), .{ .whitespace = .indent_2 }, &file_writer.interface) catch {};
+                file_writer.end() catch {};
             },
         }
         std.process.exit(1);
@@ -67,7 +68,6 @@ pub fn main(init: std.process.Init) !void {
 
 test {
     _ = @import("config.zig");
-    _ = @import("json.zig");
     _ = @import("plugin.zig");
     _ = @import("server.zig");
     _ = @import("user.zig");
