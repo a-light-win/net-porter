@@ -43,7 +43,6 @@ pub fn new(opts: Opts) !Server {
 
     // Scan ACL directory for allowed UIDs (username → UID resolution)
     var acl_manager = AclScanner.init(allocator, conf.acl_dir);
-    errdefer acl_manager.deinit();
 
     const allowed_uids = acl_manager.scanUids(io);
     log.info("ACL scan: {} allowed UIDs", .{allowed_uids.items.len});
@@ -69,7 +68,6 @@ pub fn deinit(self: *Server) void {
     log.info("Server shutting down...", .{});
     self.worker_manager.deinit();
     self.uid_tracker.deinit();
-    self.acl_manager.deinit();
     self.managed_config.deinit();
 }
 

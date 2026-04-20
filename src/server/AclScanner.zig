@@ -26,10 +26,6 @@ pub fn init(allocator: Allocator, acl_dir: []const u8) AclScanner {
     };
 }
 
-pub fn deinit(self: *AclScanner) void {
-    _ = self;
-}
-
 /// Scan acl.d/ for <username>.json files and resolve to UIDs.
 /// Skips files starting with '@' (rule collection files, not users).
 /// Returns a list of deduplicated UIDs.
@@ -80,7 +76,6 @@ test "AclScanner: scanUids with no directory returns empty" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var manager = init(allocator, "/nonexistent/acl/directory");
-    defer manager.deinit();
 
     var uids = manager.scanUids(io);
     defer uids.deinit(allocator);
@@ -137,7 +132,6 @@ test "AclScanner: scanUids skips group files and non-json files" {
     try test_dir.writeFile("readme.txt", "ignored");
 
     var manager = init(allocator, test_dir.dir_path);
-    defer manager.deinit();
 
     var uids = manager.scanUids(io);
     defer uids.deinit(allocator);
@@ -155,7 +149,6 @@ test "AclScanner: scanUids with empty directory returns empty" {
     defer test_dir.deinit();
 
     var manager = init(allocator, test_dir.dir_path);
-    defer manager.deinit();
 
     var uids = manager.scanUids(io);
     defer uids.deinit(allocator);
