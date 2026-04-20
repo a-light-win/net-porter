@@ -523,18 +523,31 @@ const PluginConf = struct {
         } else unreachable;
     }
 
+    fn getIpamType(self: PluginConf) ?[]const u8 {
+        const ipam = self.conf.get("ipam") orelse return null;
+        const ipam_obj = switch (ipam) {
+            .object => |obj| obj,
+            else => return null,
+        };
+        const ipam_type = ipam_obj.get("type") orelse return null;
+        return switch (ipam_type) {
+            .string => |s| s,
+            else => null,
+        };
+    }
+
+    fn getIpamObject(self: PluginConf) ?json.ObjectMap {
+        const ipam = self.conf.get("ipam") orelse return null;
+        return switch (ipam) {
+            .object => |obj| obj,
+            else => null,
+        };
+    }
+
     pub fn getDhcpSocketPath(self: PluginConf) []const u8 {
-        if (self.conf.get("ipam")) |ipam| {
-            switch (ipam) {
-                .object => |ipam_obj| {
-                    if (ipam_obj.get("daemonSocketPath")) |socket| {
-                        switch (socket) {
-                            .string => |socket_str| return socket_str,
-                            else => {},
-                        }
-                    }
-                },
-                else => {},
+        if (self.getIpamObject()) |ipam_obj| {
+            if (ipam_obj.get("daemonSocketPath")) |socket| {
+                if (socket == .string) return socket.string;
             }
         }
         return "/run/cni/dhcp.sock";
@@ -543,31 +556,20 @@ const PluginConf = struct {
     fn setDhcpSocketPath(self: *PluginConf, uid: u32) !void {
         const allocator = self.arena.?.allocator();
 
-        const ipam = self.conf.get("ipam") orelse return;
-        const ipam_obj = switch (ipam) {
-            .object => |obj| obj,
-            else => return,
-        };
+        const ipam_obj = self.getIpamObject() orelse return;
 
         if (ipam_obj.get("daemonSocketPath")) |_| {
             return;
         }
 
-        const ipam_type = ipam_obj.get("type") orelse return;
-        const type_str = switch (ipam_type) {
-            .string => |s| s,
-            else => return,
-        };
+        const type_str = self.getIpamType() orelse return;
 
-        // /run/net-porter/workers/<uid>/ is root-owned.
-        // Both DHCP daemon and CNI dhcp plugin run as root children of the worker.
         const path = try std.fmt.allocPrint(
             allocator,
             "/run/net-porter/workers/{d}/dhcp.sock",
             .{uid},
         );
 
-        // Build a fresh ipam ObjectMap to avoid mutating the shared original
         var new_ipam = try json.ObjectMap.init(allocator, &.{}, &.{});
         try new_ipam.put(allocator, "type", .{ .string = type_str });
         try new_ipam.put(allocator, "daemonSocketPath", .{ .string = path });
@@ -576,41 +578,13 @@ const PluginConf = struct {
     }
 
     pub fn isDhcp(self: PluginConf) bool {
-        if (self.conf.get("ipam")) |ipam| {
-            switch (ipam) {
-                .object => |ipam_obj| {
-                    if (ipam_obj.get("type")) |ipam_type| {
-                        switch (ipam_type) {
-                            .string => |type_str| {
-                                return std.mem.eql(u8, "dhcp", type_str);
-                            },
-                            else => {},
-                        }
-                    }
-                },
-                else => {},
-            }
-        }
-        return false;
+        const type_str = self.getIpamType() orelse return false;
+        return std.mem.eql(u8, "dhcp", type_str);
     }
 
     pub fn isStatic(self: PluginConf) bool {
-        if (self.conf.get("ipam")) |ipam| {
-            switch (ipam) {
-                .object => |ipam_obj| {
-                    if (ipam_obj.get("type")) |ipam_type| {
-                        switch (ipam_type) {
-                            .string => |type_str| {
-                                return std.mem.eql(u8, "static", type_str);
-                            },
-                            else => {},
-                        }
-                    }
-                },
-                else => {},
-            }
-        }
-        return false;
+        const type_str = self.getIpamType() orelse return false;
+        return std.mem.eql(u8, "static", type_str);
     }
 
     fn isIpv6(addr: []const u8) bool {
