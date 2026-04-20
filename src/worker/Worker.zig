@@ -30,7 +30,7 @@ const CniManager = @import("../cni/CniManager.zig");
 const DhcpService = @import("../cni/DhcpService.zig");
 const Handler = @import("Handler.zig");
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
-const Responser = @import("Responser.zig");
+const Responser = @import("../common/Responser.zig");
 const DomainSocket = config_mod.DomainSocket;
 const Worker = @This();
 

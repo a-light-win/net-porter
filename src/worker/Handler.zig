@@ -10,7 +10,7 @@ const DhcpService = @import("../cni/DhcpService.zig");
 const Cni = @import("../cni/Cni.zig");
 const CniManager = @import("../cni/CniManager.zig");
 const StateFile = @import("../cni/StateFile.zig");
-const Responser = @import("Responser.zig");
+const Responser = @import("../common/Responser.zig");
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
 const Handler = @This();
 

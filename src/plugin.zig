@@ -1,7 +1,7 @@
 const std = @import("std");
 const cli = @import("zig-cli");
 const NetavarkPlugin = @import("plugin/NetavarkPlugin.zig");
-pub const Responser = @import("worker/Responser.zig");
+pub const Responser = @import("common/Responser.zig");
 
 pub const name = NetavarkPlugin.name;
 pub const version = NetavarkPlugin.version;
@@ -105,5 +105,5 @@ pub const cmd_info = cli.Command{
 
 test {
     _ = @import("plugin/NetavarkPlugin.zig");
-    _ = @import("worker/Responser.zig");
+    _ = @import("common/Responser.zig");
 }
