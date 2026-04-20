@@ -1029,7 +1029,7 @@ const Attachment = struct {
                 .object => |obj| obj,
                 else => continue,
             };
-            const conf_copy = try shadowCopyObjectMap(arena_alloc, conf_obj);
+            const conf_copy = try PluginConf.shadowCopy(arena_alloc, conf_obj);
             var plugin_conf = PluginConf{
                 .arena = arena,
                 .conf = conf_copy,
@@ -1045,15 +1045,6 @@ const Attachment = struct {
         }
 
         return attachment;
-    }
-
-    fn shadowCopyObjectMap(allocator: Allocator, src: json.ObjectMap) !json.ObjectMap {
-        var new_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
-        var it = src.iterator();
-        while (it.next()) |entry| {
-            try new_obj.put(allocator, try allocator.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
-        }
-        return new_obj;
     }
 
     const FinalResultPos = enum { first, last };
