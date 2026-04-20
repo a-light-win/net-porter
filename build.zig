@@ -110,6 +110,7 @@ pub fn build(b: *std.Build) void {
     // running the unit tests.
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
+    test_step.dependOn(&exe.step);
 
     // coverage
     const run_cover = b.addSystemCommand(&.{
