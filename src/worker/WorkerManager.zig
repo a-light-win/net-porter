@@ -157,21 +157,11 @@ pub fn processPollEvents(self: *WorkerManager, poll_results: []const std.posix.p
     for (poll_results, 0..) |pfd, i| {
         if (pfd.revents & std.posix.POLL.IN != 0) {
             const meta = self.monitored_metas.items[i];
-            switch (meta.kind) {
-                .catatonit => {
-                    log.info("Catatonit process died for uid={d} (pidfd event)", .{meta.uid});
-                    self.stopAndCleanup(meta.uid);
-                    self.addPendingLocked(meta.uid);
-                    self.rebuildMonitoredFds();
-                },
-                .worker => {
-                    log.info("Worker process died for uid={d} (pidfd event)", .{meta.uid});
-                    self.stopAndCleanup(meta.uid);
-                    self.addPendingLocked(meta.uid);
-                    self.rebuildMonitoredFds();
-                },
-            }
-            return; // One event per iteration — fd indices are now stale
+            log.info("{s} process died for uid={d} (pidfd event)", .{ @tagName(meta.kind), meta.uid });
+            self.stopAndCleanup(meta.uid);
+            self.addPendingLocked(meta.uid);
+            self.rebuildMonitoredFds();
+            return;
         }
     }
 }
