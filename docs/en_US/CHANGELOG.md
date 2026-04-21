@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2025-04-19
+## [1.0.0] - 2026-04-19
 
 ### Security
 
@@ -39,7 +39,7 @@ See the [Migration Guide (0.6 → 1.0)](migration-guide-0.6-to-1.0.md) for step-
 
 ---
 
-## [0.6.0] - 2025-04-17
+## [0.6.0] - 2026-04-17
 
 ### Added
 
@@ -77,7 +77,7 @@ See the [Migration Guide (0.5 → 0.6)](migration-guide-0.5-to-0.6.md) for step-
 
 ---
 
-## [0.5.0] - 2025-04-16
+## [0.5.0] - 2026-04-16
 
 ### Added
 
@@ -103,7 +103,7 @@ See the [Migration Guide (0.4 → 0.5)](migration-guide-0.4-to-0.5.md) for step-
 
 ---
 
-## [0.4.0] - 2025-04-15
+## [0.4.0] - 2026-04-15
 
 ### Added
 
