@@ -82,7 +82,7 @@ fn start(self: *DhcpService) !void {
     self.waitSocketPathCreated(max_wait);
 }
 
-fn isAlive(self: DhcpService) bool {
+fn isAlive(self: *DhcpService) bool {
     if (self.process) |process| {
         const pid = process.id orelse return false;
 
@@ -99,7 +99,11 @@ fn isAlive(self: DhcpService) bool {
         var status: u32 = 0;
         const rc = linux.wait4(pid, &status, linux.W.NOHANG, null);
         if (rc == 0) return true; // Still running
-        // Process exited or error — no longer alive
+        // Process exited or error — no longer alive.
+        // Clear self.process to prevent stop() from calling kill() on
+        // an already-reaped child, which would trigger undefined behavior
+        // in std.process.Child.kill (wait asserts child.id != null).
+        self.process = null;
         return false;
     }
     return false;
