@@ -137,7 +137,13 @@ pub const Attachment = struct {
                 result: ?json.Value = null,
             },
         }, allocator, state_json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
-        defer parsed.deinit();
+        // NOTE: parsed is intentionally not deinited here.
+        // shadowCopy() performs a shallow copy of json.ObjectMap — keys are deep-copied
+        // but json.Value entries are copied by value (pointer/length slices, not content).
+        // Calling parsed.deinit() would free the internal ArenaAllocator that owns the
+        // actual string/object/array data referenced by plugin_conf.conf, causing UAF.
+        // All memory is allocated on `allocator` (an arena in all current callers),
+        // so it will be reclaimed when the outer arena is deinitialized.
 
         var arena = try ArenaAllocator.init(allocator);
         var attachment = Attachment{
