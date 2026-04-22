@@ -138,7 +138,16 @@ pub fn handle(self: *Handler) !void {
         };
     }
 
-    validateCniIdentifier(request.resource(), "resource") catch |err| {
+    // Validate resource BEFORE calling request.resource(), which uses
+    // `catch unreachable` and would crash the worker if resource is null.
+    // A malicious client connecting directly to the socket can omit the
+    // resource field, so we must validate it as untrusted input.
+    const resource = request.network().options.resolveResource() catch {
+        log.err("Missing resource from uid={d}", .{client_info.uid});
+        self.responser.writeError("Missing resource", .{});
+        return;
+    };
+    validateCniIdentifier(resource, "resource") catch |err| {
         log.err("Invalid resource from uid={d}: {s}", .{ client_info.uid, @errorName(err) });
         self.responser.writeError("Invalid request", .{});
         return;
@@ -148,6 +157,19 @@ pub fn handle(self: *Handler) !void {
     // CNI plugins verify the file is a network namespace; this is a pre-filter
     // to reject obviously invalid paths before reaching the plugin.
     //
+    // For setup/teardown, netns is MANDATORY. Without it, Attachment.setup/teardown
+    // falls back to "/proc/self/ns/net" (the worker's own namespace = host namespace),
+    // which would cause CNI plugins to operate on the host's network namespace instead
+    // of the container's. A malicious client connecting to the socket directly could
+    // exploit this to create/modify host network interfaces.
+    if (request.action == .setup or request.action == .teardown) {
+        if (request.netns == null) {
+            log.err("Missing netns for {s} action from uid={d}", .{ @tagName(request.action), client_info.uid });
+            self.responser.writeError("netns is required", .{});
+            return;
+        }
+    }
+
     // For setup/teardown, also verify the catatonit process is still alive and
     // owned by the caller's UID. This prevents PID recycling attacks: if
     // catatonit dies and its PID is reused by a different process (potentially
@@ -473,11 +495,15 @@ fn verifyNetnsNsfs(resolved_path: []const u8) !void {
     };
 
     var stat_buf: linux.Statx = undefined;
+    // Request TYPE to ensure statx populates basic metadata.
+    // The dev_major/dev_minor fields are always filled by the kernel VFS
+    // regardless of the requested mask, but requesting at least one field
+    // ensures the syscall returns valid data.
     const rc = linux.statx(
         linux.AT.FDCWD,
         path_z,
         linux.AT.SYMLINK_NOFOLLOW,
-        .{ .INO = true },
+        .{ .TYPE = true },
         &stat_buf,
     );
     if (rc != 0) {
