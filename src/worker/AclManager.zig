@@ -137,7 +137,9 @@ pub fn reload(self: *WorkerAclManager) void {
 
 fn doLoad(self: *WorkerAclManager) void {
     const arena_alloc = self.arena.allocator();
-    self.doLoadInto(arena_alloc, &self.acls, &self.group_names) catch {};
+    self.doLoadInto(arena_alloc, &self.acls, &self.group_names) catch |err| {
+        log.err("Initial ACL load failed for uid={d}: {s}", .{ self.uid, @errorName(err) });
+    };
 }
 
 /// Load user ACL + referenced rule collections into the provided lists.
