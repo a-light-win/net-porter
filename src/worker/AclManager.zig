@@ -255,6 +255,9 @@ pub fn processInotifyEvents(self: *WorkerAclManager, event_buf: []u8) bool {
         };
         if (n == 0) return changed;
 
+        self.mutex.lock(self.io) catch return changed;
+        defer self.mutex.unlock(self.io);
+
         var offset: usize = 0;
         while (offset < n) {
             const event_ptr: *align(4) std.os.linux.inotify_event = @ptrCast(@alignCast(event_buf[offset..].ptr));
@@ -266,9 +269,6 @@ pub fn processInotifyEvents(self: *WorkerAclManager, event_buf: []u8) bool {
             const name_start = offset - event.len;
             const name = std.mem.sliceTo(event_buf[name_start..], 0);
 
-            // Check if the changed file is relevant to this worker:
-            // - <username>.json (user's own ACL)
-            // - @<name>.json where name is in our group_names (referenced rule collections)
             if (isRelevantFile(self.username, self.group_names.items, name)) {
                 log.info("ACL file changed: {s}, reloading", .{name});
                 changed = true;
