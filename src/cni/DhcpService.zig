@@ -69,6 +69,9 @@ fn start(self: *DhcpService) !void {
             "-socketpath",
             self.sock_path,
         },
+        .stdin = .close,
+        .stdout = .close,
+        .stderr = .close,
     }) catch |err| {
         self.process = null;
         log.warn("Failed to start DHCP service: {s}", .{@errorName(err)});
