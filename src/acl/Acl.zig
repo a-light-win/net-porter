@@ -63,16 +63,14 @@ pub fn parseIpRanges(allocator: Allocator, ips: []const [:0]const u8) !std.Array
 }
 
 fn parseIpRange(ip_spec: []const u8) !IpRange {
-    // Check if it's a range (contains '-')
     if (std.mem.indexOf(u8, ip_spec, "-")) |dash_pos| {
         const start_str = std.mem.trim(u8, ip_spec[0..dash_pos], " ");
         const end_str = std.mem.trim(u8, ip_spec[dash_pos + 1 ..], " ");
-        return IpRange{
-            .start = try parseIpToInt(start_str),
-            .end = try parseIpToInt(end_str),
-        };
+        const start = try parseIpToInt(start_str);
+        const end = try parseIpToInt(end_str);
+        if (start > end) return error.InvalidIpRange;
+        return IpRange{ .start = start, .end = end };
     } else {
-        // Single IP
         const ip_int = try parseIpToInt(ip_spec);
         return IpRange{ .start = ip_int, .end = ip_int };
     }
