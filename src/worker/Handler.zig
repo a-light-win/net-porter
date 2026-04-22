@@ -138,6 +138,12 @@ pub fn handle(self: *Handler) !void {
         };
     }
 
+    validateCniIdentifier(request.resource(), "net_porter_resource") catch |err| {
+        log.err("Invalid net_porter_resource from uid={d}: {s}", .{ client_info.uid, @errorName(err) });
+        self.responser.writeError("Invalid request", .{});
+        return;
+    };
+
     // Validate netns path: must be under /run/user/<uid>/netns/ with safe filename.
     // CNI plugins verify the file is a network namespace; this is a pre-filter
     // to reject obviously invalid paths before reaching the plugin.
