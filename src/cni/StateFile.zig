@@ -136,6 +136,11 @@ fn ensureDir(io: std.Io, dir_path: []const u8) !void {
     const path_z = try alloc.allocSentinel(u8, dir_path.len, 0);
     @memcpy(path_z[0..dir_path.len], dir_path);
 
+    // Set restrictive umask before directory creation to ensure 0700 permissions
+    // even during the creation window (before explicit chmod).
+    const old_mask = std.c.umask(0o077);
+    defer _ = std.c.umask(old_mask);
+
     // Use createDirPath for recursive creation
     std.Io.Dir.cwd().createDirPath(io, dir_path) catch |err| switch (err) {
         error.PathAlreadyExists => {},
