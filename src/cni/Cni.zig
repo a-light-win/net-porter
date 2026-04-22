@@ -109,10 +109,8 @@ pub fn responseError(allocator: Allocator, responser: *Responser, stdout: std.Ar
     defer parsed_error_msg.deinit();
 
     const error_msg = parsed_error_msg.value;
-    responser.writeError(
-        "{s}({d})",
-        .{ error_msg.msg, error_msg.code },
-    );
+    log.warn("CNI plugin error: {s} (code={d})", .{ error_msg.msg, error_msg.code });
+    responser.writeError("CNI plugin error", .{});
 }
 
 pub fn responseResult(allocator: Allocator, responser: *Responser, stdout: std.ArrayList(u8)) !void {
