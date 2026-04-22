@@ -164,6 +164,12 @@ fn doLoadInto(
     // 3. Load referenced rule collections
     if (user_entry.value.groups) |groups| {
         for (groups) |group_name| {
+            // Validate group_name: reject path traversal characters
+            if (!isValidGroupName(group_name)) {
+                log.warn("Invalid group name '{s}' (contains disallowed characters), skipping", .{group_name});
+                continue;
+            }
+
             // Store the collection name for later reference
             const name_copy = arena_alloc.dupe(u8, group_name) catch continue;
             group_names.append(arena_alloc, name_copy) catch continue;
@@ -274,7 +280,20 @@ pub fn getInotifyFd(self: WorkerAclManager) ?std.posix.fd_t {
     return self.inotify_fd;
 }
 
+fn isValidGroupName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64) return false;
+    for (name) |c| {
+        switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9', '-', '_' => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
 fn isRelevantFile(username: []const u8, group_names: []const []const u8, filename: []const u8) bool {
+    if (username.len == 0) return false;
+
     // Check if it's the user's own file: <username>.json
     if (std.mem.endsWith(u8, filename, ".json") and
         std.mem.eql(u8, filename[0 .. filename.len - ".json".len], username))
