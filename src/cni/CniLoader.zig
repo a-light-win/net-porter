@@ -112,7 +112,14 @@ pub const CniLoader = struct {
             const plugin_type = plugin_obj.get("type") orelse return error.MissingPluginType;
             if (plugin_type != .string) return error.InvalidPluginType;
 
-            // Check plugin binary exists
+            // Check plugin binary exists (reject path traversal in type name)
+            if (std.mem.indexOf(u8, plugin_type.string, "/") != null or
+                std.mem.indexOf(u8, plugin_type.string, "..") != null)
+            {
+                log.err("Invalid plugin type '{s}' (path traversal characters)", .{plugin_type.string});
+                return error.InvalidPluginType;
+            }
+
             const plugin_path = try std.fs.path.join(self.allocator, &[_][]const u8{ self.cni_plugin_dir, plugin_type.string });
             defer self.allocator.free(plugin_path);
 
