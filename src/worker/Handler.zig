@@ -349,11 +349,11 @@ fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !v
 }
 
 /// Validate a CNI identifier (container_id or interface_name) against a whitelist.
-/// Only [a-zA-Z0-9\-_.] are allowed. Rejects empty strings, strings > 256 chars,
+/// Only [a-zA-Z0-9\-_.] are allowed. Rejects empty strings, strings > 128 chars,
 /// and ".." sequences to prevent path traversal attacks.
 fn validateCniIdentifier(value: []const u8, field_name: []const u8) !void {
     if (value.len == 0) return error.InvalidParameter;
-    if (value.len > 256) return error.InvalidParameter;
+    if (value.len > 128) return error.InvalidParameter;
     for (value) |c| {
         switch (c) {
             'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.' => {},
@@ -510,13 +510,13 @@ test "validateCniIdentifier rejects empty string" {
     try std.testing.expectError(error.InvalidParameter, validateCniIdentifier("", "test_field"));
 }
 
-test "validateCniIdentifier rejects string exceeding 256 chars" {
-    const long_id = "a" ** 257;
+test "validateCniIdentifier rejects string exceeding 128 chars" {
+    const long_id = "a" ** 129;
     try std.testing.expectError(error.InvalidParameter, validateCniIdentifier(long_id, "test_field"));
 }
 
-test "validateCniIdentifier accepts exactly 256 chars" {
-    const max_id = "a" ** 256;
+test "validateCniIdentifier accepts exactly 128 chars" {
+    const max_id = "a" ** 128;
     try validateCniIdentifier(max_id, "test_field");
 }
 
