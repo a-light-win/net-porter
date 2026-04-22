@@ -137,8 +137,8 @@ fn parseIpv6ToInt(ip: []const u8) !u128 {
                 right_groups += 1;
             }
         }
+        if (groups + right_groups > 8) return error.InvalidIp;
         const zeros_needed = 8 - groups - right_groups;
-        if (zeros_needed > 8) return error.InvalidIp;
         const shift_bits = zeros_needed * 16;
         if (shift_bits > 0 and shift_bits < 128) {
             result = result << @intCast(shift_bits);
@@ -326,6 +326,10 @@ test "parseIpToInt IPv6" {
     try std.testing.expectError(error.InvalidIp, parseIpToInt(":::1"));
     try std.testing.expectError(error.InvalidIp, parseIpToInt("2001:db8:::1"));
     try std.testing.expectError(error.InvalidIp, parseIpToInt("2001:db8::1::2"));
+
+    // Reject overflows: explicit groups exceed 8 total when :: expansion adds groups
+    try std.testing.expectError(error.InvalidIp, parseIpToInt("1:2:3:4:5:6:7:8::a"));
+    try std.testing.expectError(error.InvalidIp, parseIpToInt("a::1:2:3:4:5:6:7:8"));
 }
 
 test "parseIpRange with range" {

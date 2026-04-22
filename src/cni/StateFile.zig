@@ -65,7 +65,8 @@ pub fn write(io: std.Io, allocator: Allocator, uid: u32, container_id: []const u
     // Generate temp file path with random suffix
     var prng = blk: {
         var seed_bytes: [8]u8 = undefined;
-        _ = std.os.linux.getrandom(&seed_bytes, seed_bytes.len, 0);
+        const rc = std.os.linux.getrandom(&seed_bytes, seed_bytes.len, 0);
+        if (rc != seed_bytes.len) return error.Unexpected;
         const seed = std.mem.readInt(u64, &seed_bytes, .little);
         break :blk std.Random.DefaultPrng.init(seed);
     };
