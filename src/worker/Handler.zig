@@ -138,8 +138,8 @@ pub fn handle(self: *Handler) !void {
         };
     }
 
-    validateCniIdentifier(request.resource(), "net_porter_resource") catch |err| {
-        log.err("Invalid net_porter_resource from uid={d}: {s}", .{ client_info.uid, @errorName(err) });
+    validateCniIdentifier(request.resource(), "resource") catch |err| {
+        log.err("Invalid resource from uid={d}: {s}", .{ client_info.uid, @errorName(err) });
         self.responser.writeError("Invalid request", .{});
         return;
     };
@@ -653,7 +653,7 @@ test "action/request consistency: setup+network is parseable from JSON" {
 
     // Malicious JSON: setup action paired with network type
     const malicious_json =
-        \\{"action":"setup","request":{"network":{"driver":"net-porter","options":{"net_porter_socket":"/run/user/1000/net-porter.sock","net_porter_resource":"test-resource"}}}}
+        \\{"action":"setup","request":{"network":{"driver":"net-porter","options":{"socket":"/run/user/1000/net-porter.sock","resource":"test-resource"}}}}
     ;
 
     const parsed = std.json.parseFromSlice(plugin.Request, allocator, malicious_json, .{}) catch |err| {
@@ -674,7 +674,7 @@ test "action/request consistency: teardown+network is parseable from JSON" {
     const allocator = std.testing.allocator;
 
     const malicious_json =
-        \\{"action":"teardown","request":{"network":{"driver":"net-porter","options":{"net_porter_socket":"/run/user/1000/net-porter.sock","net_porter_resource":"test-resource"}}}}
+        \\{"action":"teardown","request":{"network":{"driver":"net-porter","options":{"socket":"/run/user/1000/net-porter.sock","resource":"test-resource"}}}}
     ;
 
     const parsed = std.json.parseFromSlice(plugin.Request, allocator, malicious_json, .{}) catch return;
@@ -689,7 +689,7 @@ test "action/request consistency: create+exec is parseable from JSON" {
     const allocator = std.testing.allocator;
 
     const malicious_json =
-        \\{"action":"create","request":{"exec":{"container_name":"test","container_id":"test-id","network":{"driver":"net-porter","options":{"net_porter_socket":"/run/user/1000/net-porter.sock","net_porter_resource":"test-resource"}},"network_options":{"interface_name":"eth0"}}}}
+        \\{"action":"create","request":{"exec":{"container_name":"test","container_id":"test-id","network":{"driver":"net-porter","options":{"socket":"/run/user/1000/net-porter.sock","resource":"test-resource"}},"network_options":{"interface_name":"eth0"}}}}
     ;
 
     const parsed = std.json.parseFromSlice(plugin.Request, allocator, malicious_json, .{}) catch return;

@@ -1,6 +1,8 @@
 const std = @import("std");
 const json = std.json;
-const DomainSocket = @import("../config.zig").DomainSocket;
+const config_mod = @import("../config.zig");
+const DomainSocket = config_mod.DomainSocket;
+const log = std.log.scoped(.plugin);
 const NetavarkPlugin = @This();
 
 pub const name = "net-porter";
@@ -33,9 +35,121 @@ pub const Network = struct {
 };
 
 const DriverOptions = struct {
-    net_porter_socket: [:0]const u8,
-    net_porter_resource: []const u8,
+    socket: ?[:0]const u8 = null,
+    resource: ?[]const u8 = null,
+
+    /// Deprecated: use `socket` instead.
+    net_porter_socket: ?[:0]const u8 = null,
+    /// Deprecated: use `resource` instead.
+    net_porter_resource: ?[]const u8 = null,
+
+    pub fn resolveSocket(self: DriverOptions, allocator: std.mem.Allocator) ![:0]const u8 {
+        if (self.socket) |s| return s;
+        if (self.net_porter_socket) |s| {
+            log.warn("net_porter_socket is deprecated, use socket instead", .{});
+            return s;
+        }
+        return DomainSocket.pathForUid(allocator, std.os.linux.getuid());
+    }
+
+    pub fn resolveResource(self: DriverOptions) ![]const u8 {
+        if (self.resource) |r| return r;
+        if (self.net_porter_resource) |r| {
+            log.warn("net_porter_resource is deprecated, use resource instead", .{});
+            return r;
+        }
+        return error.MissingResource;
+    }
 };
+
+test "DriverOptions.resolveSocket returns explicit socket" {
+    const opts = DriverOptions{ .socket = "/custom/path.sock" };
+    const result = try opts.resolveSocket(std.testing.allocator);
+    try std.testing.expectEqualStrings("/custom/path.sock", result);
+}
+
+test "DriverOptions.resolveSocket falls back to deprecated net_porter_socket" {
+    const opts = DriverOptions{ .net_porter_socket = "/deprecated/path.sock" };
+    const result = try opts.resolveSocket(std.testing.allocator);
+    try std.testing.expectEqualStrings("/deprecated/path.sock", result);
+}
+
+test "DriverOptions.resolveSocket prefers new socket over deprecated" {
+    const opts = DriverOptions{ .socket = "/new.sock", .net_porter_socket = "/old.sock" };
+    const result = try opts.resolveSocket(std.testing.allocator);
+    try std.testing.expectEqualStrings("/new.sock", result);
+}
+
+test "DriverOptions.resolveSocket defaults to pathForUid when neither set" {
+    const opts = DriverOptions{};
+    const result = try opts.resolveSocket(std.testing.allocator);
+    defer std.testing.allocator.free(result);
+    const uid = std.os.linux.getuid();
+    const expected = try std.fmt.allocPrintSentinel(std.testing.allocator, "/run/user/{d}/{s}", .{ uid, DomainSocket.socket_name }, 0);
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, result);
+}
+
+test "DriverOptions.resolveResource returns explicit resource" {
+    const opts = DriverOptions{ .resource = "my-resource" };
+    const result = try opts.resolveResource();
+    try std.testing.expectEqualStrings("my-resource", result);
+}
+
+test "DriverOptions.resolveResource falls back to deprecated net_porter_resource" {
+    const opts = DriverOptions{ .net_porter_resource = "old-resource" };
+    const result = try opts.resolveResource();
+    try std.testing.expectEqualStrings("old-resource", result);
+}
+
+test "DriverOptions.resolveResource prefers new resource over deprecated" {
+    const opts = DriverOptions{ .resource = "new-res", .net_porter_resource = "old-res" };
+    const result = try opts.resolveResource();
+    try std.testing.expectEqualStrings("new-res", result);
+}
+
+test "DriverOptions.resolveResource returns error when neither set" {
+    const opts = DriverOptions{};
+    try std.testing.expectError(error.MissingResource, opts.resolveResource());
+}
+
+test "DriverOptions parses new field names from JSON" {
+    const allocator = std.testing.allocator;
+    const json_str =
+        \\{"driver":"net-porter","options":{"socket":"/run/user/1000/net-porter.sock","resource":"test-res"}}
+    ;
+    const parsed = try json.parseFromSlice(
+        struct { driver: []const u8, options: DriverOptions },
+        allocator,
+        json_str,
+        .{},
+    );
+    defer parsed.deinit();
+    const opts = parsed.value.options;
+    try std.testing.expect(opts.socket != null);
+    try std.testing.expectEqualStrings("/run/user/1000/net-porter.sock", opts.socket.?);
+    try std.testing.expect(opts.resource != null);
+    try std.testing.expectEqualStrings("test-res", opts.resource.?);
+}
+
+test "DriverOptions parses deprecated field names from JSON" {
+    const allocator = std.testing.allocator;
+    const json_str =
+        \\{"driver":"net-porter","options":{"net_porter_socket":"/run/user/1000/net-porter.sock","net_porter_resource":"old-res"}}
+    ;
+    const parsed = try json.parseFromSlice(
+        struct { driver: []const u8, options: DriverOptions },
+        allocator,
+        json_str,
+        .{},
+    );
+    defer parsed.deinit();
+    const opts = parsed.value.options;
+    try std.testing.expect(opts.net_porter_socket != null);
+    try std.testing.expectEqualStrings("/run/user/1000/net-porter.sock", opts.net_porter_socket.?);
+    try std.testing.expect(opts.net_porter_resource != null);
+    try std.testing.expectEqualStrings("old-res", opts.net_porter_resource.?);
+}
 
 const NetworkOptions = struct {
     interface_name: []const u8, // CNI_IFNAME
@@ -70,7 +184,7 @@ pub const Request = struct {
     raw_request: ?[]const u8 = null,
 
     pub fn resource(self: Request) []const u8 {
-        return self.network().options.net_porter_resource;
+        return self.network().options.resolveResource() catch unreachable;
     }
 
     pub fn network(self: Request) Network {
@@ -100,8 +214,8 @@ test "Request can stringify and parsed" {
                 .network = Network{
                     .driver = "net-porter",
                     .options = DriverOptions{
-                        .net_porter_socket = "test-socket",
-                        .net_porter_resource = "test-resource",
+                        .socket = "test-socket",
+                        .resource = "test-resource",
                     },
                 },
                 .network_options = NetworkOptions{
@@ -264,8 +378,15 @@ pub fn create(self: *NetavarkPlugin) !void {
         return error.AlreadyHandled;
     }
 
+    const socket_path = network.options.resolveSocket(self.allocator) catch {
+        try self.writeError("Failed to resolve socket path", .{});
+        return error.AlreadyHandled;
+    };
+    const needs_free = network.options.socket == null and network.options.net_porter_socket == null;
+    defer if (needs_free) self.allocator.free(socket_path);
+
     try self.sendRequest(
-        network.options.net_porter_socket,
+        socket_path,
         &Request{
             .action = PluginAction.create,
             .request = .{ .network = parsed_network.value },
@@ -306,8 +427,15 @@ fn exec(self: *NetavarkPlugin, action: PluginAction) !void {
         return error.AlreadyHandled;
     }
 
+    const socket_path = network.options.resolveSocket(self.allocator) catch {
+        try self.writeError("Failed to resolve socket path", .{});
+        return error.AlreadyHandled;
+    };
+    const needs_free = network.options.socket == null and network.options.net_porter_socket == null;
+    defer if (needs_free) self.allocator.free(socket_path);
+
     try self.sendRequest(
-        network.options.net_porter_socket,
+        socket_path,
         &Request{
             .action = action,
             .request = .{ .exec = parsed.value },
@@ -322,14 +450,10 @@ fn validateNetwork(self: *NetavarkPlugin, network: Network) bool {
         self.writeError("Expect driver name '{s}' but got '{s}'", .{ name, network.driver }) catch {};
         return false;
     }
-    if (network.options.net_porter_socket.len == 0) {
-        self.writeError("Missing net_porter_socket in network options", .{}) catch {};
+    _ = network.options.resolveResource() catch {
+        self.writeError("Missing resource in network options", .{}) catch {};
         return false;
-    }
-    if (network.options.net_porter_resource.len == 0) {
-        self.writeError("Missing net_porter_resource in network options", .{}) catch {};
-        return false;
-    }
+    };
     return true;
 }
 
