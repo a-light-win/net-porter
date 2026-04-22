@@ -164,10 +164,8 @@ pub fn run(self: *Worker) !void {
             continue;
         }
 
-        const conn = try std.heap.page_allocator.create(struct { stream: std.Io.net.Stream });
-        conn.* = .{ .stream = conn_stream };
-
-        var handler = Handler{
+        const handler = try std.heap.page_allocator.create(Handler);
+        handler.* = Handler{
             .io = io,
             .arena = try ArenaAllocator.init(std.heap.page_allocator),
             .acl_manager = &self.acl_manager,
@@ -175,19 +173,19 @@ pub fn run(self: *Worker) !void {
             .dhcp_service = &self.dhcp_service,
             .config = &self.config,
             .catatonit_pid = self.catatonit_pid,
-            .connection = .{ .stream = conn.stream },
+            .connection = .{ .stream = conn_stream },
             .responser = Responser{
                 .io = io,
-                .stream = &conn.stream,
+                .stream = &handler.connection.stream,
                 .log_response = log_response,
             },
         };
 
-        _ = std.Thread.spawn(.{}, handleRequests, .{ &handler, &self.active_handlers }) catch |e| {
+        _ = std.Thread.spawn(.{}, handleRequests, .{ handler, &self.active_handlers }) catch |e| {
             _ = self.active_handlers.fetchSub(1, .release);
             log.warn("Failed to spawn handler thread: {s}", .{@errorName(e)});
             handler.arena.deinit();
-            std.heap.page_allocator.destroy(conn);
+            std.heap.page_allocator.destroy(handler);
             continue;
         };
     }
@@ -221,6 +219,7 @@ fn aclWatchLoop(self: *Worker) void {
 fn handleRequests(handler: *Handler, active_handlers: *std.atomic.Value(usize)) !void {
     defer {
         handler.deinit();
+        std.heap.page_allocator.destroy(handler);
         _ = active_handlers.fetchSub(1, .release);
     }
     try handler.handle();
