@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-04-22
+
+### Security
+
+- **Fixed 9 security vulnerabilities** covering path traversal, TOCTOU race conditions, information leakage, and thread safety:
+  - Prevented symlink TOCTOU privilege escalation in unix socket creation.
+  - Prevented ACL IP restriction bypass via duplicate resource names.
+  - Added CNI identifier validation for `net_porter_resource` to prevent injection.
+  - Added path traversal validation for plugin type in CNI config loader.
+  - Added path traversal validation for group name in ACL loading.
+  - Heap-allocated handler to prevent thread data race.
+  - Used `getrandom` + `O_EXCL` for secure temporary state file creation.
+  - Set umask before state directory creation to restrict permissions.
+  - Avoided leaking CNI plugin details (paths, types) to clients in error messages.
+
+### Added
+
+- **Simplified plugin parameter names**: `net_porter_socket` → `socket`, `net_porter_resource` → `resource`, with a default socket path. Old parameter names still work but print a deprecation warning.
+
+### Changed
+
+- **CNI module architecture reorganized**: The monolithic `Cni.zig` (1500+ lines) has been split into four focused modules — `Cni`, `CniConfig`, `PluginConf`, and `Attachment` — for better maintainability.
+- **Module layout restructured**: Moved `Acl`/`AclFile` to `acl/`, `ManagedType` and `Responser` to `common/`, and shared inotify constants to `utils/Inotify.zig`.
+
+### Fixed
+
+- Fixed use-after-free in CNI `deserializeState` caused by premature `parsed.deinit()`.
+- Fixed memory leak of `env_map` in CNI setup and teardown paths.
+- Fixed DHCP daemon process not closing stdin/stdout/stderr.
+- Fixed stale process reference in DHCP `isAlive` after reaping child process.
+- Fixed missing mutex protection for `group_names` in inotify event processing.
+- Fixed OOM in `workers.put` not closing pid file descriptors.
+- Fixed OOM returning unresolved netns path instead of explicit error.
+- Fixed reversed IP ranges (e.g. `10.0.0.10-10.0.0.1`) being silently accepted in `parseIpRange`.
+- Fixed ACL initial load errors being silently swallowed instead of logged.
+- Fixed rejected IP not included in error log and incorrect log scope.
+- Reduced CNI identifier max length from 256 to 128 for consistency.
+
+### Internal
+
+- Merged `setDefaultAclDir`/`setDefaultCniDir` into generic `setDefaultSubDir`.
+- Removed redundant `discoverCatatonitPid`, consolidated to `discoverAllCatatonitPids`.
+- Removed trivial `Worker.pageAllocator()` wrapper, using `std.heap.page_allocator` directly.
+- Removed unused `json.zig`, inlined its single call in `main`.
+- Merged identical catatonit/worker branches in `processPollEvents`.
+- Extracted `getIpamType`/`getIpamObject` helpers to deduplicate `PluginConf` methods.
+- Removed duplicate `shadowCopyObjectMap`, reusing `PluginConf.shadowCopy`.
+- Removed empty `AclScanner.deinit` and its call sites.
+- Made test step depend on compilation to catch build errors early.
+
+---
+
 ## [1.0.0] - 2026-04-19
 
 ### Security
@@ -172,6 +224,7 @@ See the [Migration Guide (0.4 → 0.5)](migration-guide-0.4-to-0.5.md) for step-
 
 _Initial public release with per-user service architecture._
 
+[1.1.0]: https://github.com/a-light-win/net-porter/compare/1.0.0...1.1.0
 [1.0.0]: https://github.com/a-light-win/net-porter/compare/0.6.0...1.0.0
 [0.6.0]: https://github.com/a-light-win/net-porter/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/a-light-win/net-porter/compare/0.4.0...0.5.0

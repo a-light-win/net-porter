@@ -5,6 +5,58 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 2026-04-22
+
+### 安全
+
+- **修复了 9 个安全漏洞**，涵盖路径穿越、TOCTOU 竞态条件、信息泄露和线程安全：
+  - 防止 Unix socket 创建时的符号链接 TOCTOU 提权攻击。
+  - 防止通过重复资源名绕过 ACL IP 限制。
+  - 对 `net_porter_resource` 参数添加 CNI 标识符校验，防止注入攻击。
+  - 对 CNI 配置加载器中的插件类型添加路径穿越校验。
+  - 对 ACL 加载中的 group_name 添加路径穿越校验。
+  - 堆分配 handler 以防止线程数据竞争。
+  - 使用 `getrandom` + `O_EXCL` 安全创建状态临时文件。
+  - 在创建状态目录前设置 umask 以限制权限。
+  - 避免在错误消息中向客户端泄露 CNI 插件细节（路径、类型）。
+
+### 新增
+
+- **简化插件参数名**：`net_porter_socket` → `socket`，`net_porter_resource` → `resource`，并提供默认 socket 路径。旧参数名仍可使用，但会打印 deprecated 警告。
+
+### 变更
+
+- **CNI 模块架构重组**：将 1500+ 行的单体 `Cni.zig` 拆分为四个独立模块 —— `Cni`、`CniConfig`、`PluginConf` 和 `Attachment`，提升可维护性。
+- **模块布局调整**：将 `Acl`/`AclFile` 移至 `acl/`，`ManagedType` 和 `Responser` 移至 `common/`，共享 inotify 常量移至 `utils/Inotify.zig`。
+
+### 修复
+
+- 修复 CNI `deserializeState` 中因过早调用 `parsed.deinit()` 导致的 use-after-free。
+- 修复 CNI setup/teardown 路径中 `env_map` 的内存泄漏。
+- 修复 DHCP 守护进程未关闭 stdin/stdout/stderr。
+- 修复 DHCP `isAlive` 在回收子进程后残留的过期进程引用。
+- 修复 inotify 事件处理中 `group_names` 缺少互斥锁保护。
+- 修复 `workers.put` OOM 时未关闭 pid 文件描述符。
+- 修复 OOM 时返回未解析的 netns 路径而非明确错误。
+- 修复反向 IP 范围（如 `10.0.0.10-10.0.0.1`）被静默接受的问题。
+- 修复 ACL 初始加载错误被静默吞掉而非记录日志。
+- 修复错误日志中缺少被拒绝的 IP 信息及日志范围不正确。
+- CNI 标识符最大长度从 256 降至 128 以保持一致性。
+
+### 内部优化
+
+- 合并 `setDefaultAclDir`/`setDefaultCniDir` 为通用的 `setDefaultSubDir`。
+- 移除冗余的 `discoverCatatonitPid`，统一使用 `discoverAllCatatonitPids`。
+- 移除 `Worker.pageAllocator()` 包装，直接使用 `std.heap.page_allocator`。
+- 移除未使用的 `json.zig`，将其唯一调用内联到 `main`。
+- 合并 `processPollEvents` 中相同的 catatonit/worker 分支。
+- 提取 `getIpamType`/`getIpamObject` 辅助函数，去重 `PluginConf` 方法。
+- 移除重复的 `shadowCopyObjectMap`，复用 `PluginConf.shadowCopy`。
+- 移除空的 `AclScanner.deinit` 及其调用点。
+- 使测试步骤依赖编译步骤，以便尽早捕获构建错误。
+
+---
+
 ## [1.0.0] - 2026-04-19
 
 ### 安全
@@ -172,6 +224,7 @@
 
 _初始公开发布，采用每用户服务架构。_
 
+[1.1.0]: https://github.com/a-light-win/net-porter/compare/1.0.0...1.1.0
 [1.0.0]: https://github.com/a-light-win/net-porter/compare/0.6.0...1.0.0
 [0.6.0]: https://github.com/a-light-win/net-porter/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/a-light-win/net-porter/compare/0.4.0...0.5.0
