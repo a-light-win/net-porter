@@ -63,8 +63,12 @@ pub fn write(io: std.Io, allocator: Allocator, uid: u32, container_id: []const u
     defer allocator.free(final_path);
 
     // Generate temp file path with random suffix
-    var prng = std.Random.DefaultPrng.init(@intCast(std.os.linux.getpid()));
-    // Mix in a counter for uniqueness within same process
+    var prng = blk: {
+        var seed_bytes: [8]u8 = undefined;
+        _ = std.os.linux.getrandom(&seed_bytes, seed_bytes.len, 0);
+        const seed = std.mem.readInt(u64, &seed_bytes, .little);
+        break :blk std.Random.DefaultPrng.init(seed);
+    };
     const rand = prng.random().int(u32);
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}/.tmp_{s}_{s}_{x:0>8}", .{
         dir_path,
@@ -176,8 +180,9 @@ fn writeFileContent(io: std.Io, allocator: Allocator, path: []const u8, data: []
     defer allocator.free(path_z);
     @memcpy(path_z[0..path.len], path);
 
-    // Open with O_CREAT | O_WRONLY | O_TRUNC, mode 0600
-    const fd_rc = std.os.linux.open(path_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, mode_file);
+    // Open with O_CREAT | O_WRONLY | O_EXCL, mode 0600
+    // O_EXCL prevents following symlinks or overwriting existing files.
+    const fd_rc = std.os.linux.open(path_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, mode_file);
     if (fd_rc < 0) {
         log.warn("Failed to create state file {s}", .{path});
         return error.Unexpected;
