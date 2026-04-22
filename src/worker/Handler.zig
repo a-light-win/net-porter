@@ -175,7 +175,11 @@ pub fn handle(self: *Handler) !void {
             tentative_allocator,
             "/proc/{d}/root{s}",
             .{ self.catatonit_pid, netns },
-        ) catch netns; // fallback to original on OOM
+        ) catch {
+            log.err("OOM constructing netns path for uid={d}", .{client_info.uid});
+            self.responser.writeError("Internal error", .{});
+            return;
+        };
 
         // Verify the resolved path points to an nsfs file (device 0:4).
         // Rejects symlinks (AT_SYMLINK_NOFOLLOW) and non-nsfs files.
