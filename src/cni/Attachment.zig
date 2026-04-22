@@ -192,7 +192,8 @@ pub const Attachment = struct {
         // directly usable — no fd passing or resolution needed.
         const netns: []const u8 = request.netns orelse "/proc/self/ns/net";
 
-        const env_map = try self.envMap(tentative_allocator, .ADD, request, netns);
+        var env_map = try self.envMap(tentative_allocator, .ADD, request, netns);
+        defer env_map.deinit();
 
         for (self.exec_configs.items, 0..) |*exec_config, i| {
             // Inject prevResult from previous plugin's result (CNI spec chaining)
@@ -235,7 +236,8 @@ pub const Attachment = struct {
         // Response is sent by Handler.handle() after this returns.
         const netns: []const u8 = request.netns orelse "/proc/self/ns/net";
 
-        const env_map = try self.envMap(tentative_allocator, .DEL, request, netns);
+        var env_map = try self.envMap(tentative_allocator, .DEL, request, netns);
+        defer env_map.deinit();
 
         // Inject prevResult into ALL plugins (CNI spec: final ADD result)
         const final_add_result = self.finalResult(.last);
