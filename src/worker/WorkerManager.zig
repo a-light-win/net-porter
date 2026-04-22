@@ -571,7 +571,11 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
         .catatonit_pidfd = catatonit_pidfd,
     };
 
-    try self.workers.put(uid, entry);
+    self.workers.put(uid, entry) catch {
+        if (worker_pidfd >= 0) _ = linux.close(worker_pidfd);
+        if (catatonit_pidfd >= 0) _ = linux.close(catatonit_pidfd);
+        return error.OutOfMemory;
+    };
     self.rebuildMonitoredFds();
     log.info("Spawned worker for uid={d} (username={s}, pid={d}, service={s}, catatonit_pid={d})", .{ uid, username, worker_pid, svc_name, catatonit_pid });
 }
