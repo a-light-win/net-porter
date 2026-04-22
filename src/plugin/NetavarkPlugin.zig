@@ -43,13 +43,13 @@ const DriverOptions = struct {
     /// Deprecated: use `resource` instead.
     net_porter_resource: ?[]const u8 = null,
 
-    pub fn resolveSocket(self: DriverOptions, allocator: std.mem.Allocator) ![:0]const u8 {
+    pub fn resolveSocket(self: DriverOptions) error{MissingSocket}![:0]const u8 {
         if (self.socket) |s| return s;
         if (self.net_porter_socket) |s| {
             log.warn("net_porter_socket is deprecated, use socket instead", .{});
             return s;
         }
-        return DomainSocket.pathForUid(allocator, std.os.linux.getuid());
+        return error.MissingSocket;
     }
 
     pub fn resolveResource(self: DriverOptions) ![]const u8 {
@@ -64,30 +64,25 @@ const DriverOptions = struct {
 
 test "DriverOptions.resolveSocket returns explicit socket" {
     const opts = DriverOptions{ .socket = "/custom/path.sock" };
-    const result = try opts.resolveSocket(std.testing.allocator);
+    const result = try opts.resolveSocket();
     try std.testing.expectEqualStrings("/custom/path.sock", result);
 }
 
 test "DriverOptions.resolveSocket falls back to deprecated net_porter_socket" {
     const opts = DriverOptions{ .net_porter_socket = "/deprecated/path.sock" };
-    const result = try opts.resolveSocket(std.testing.allocator);
+    const result = try opts.resolveSocket();
     try std.testing.expectEqualStrings("/deprecated/path.sock", result);
 }
 
 test "DriverOptions.resolveSocket prefers new socket over deprecated" {
     const opts = DriverOptions{ .socket = "/new.sock", .net_porter_socket = "/old.sock" };
-    const result = try opts.resolveSocket(std.testing.allocator);
+    const result = try opts.resolveSocket();
     try std.testing.expectEqualStrings("/new.sock", result);
 }
 
-test "DriverOptions.resolveSocket defaults to pathForUid when neither set" {
+test "DriverOptions.resolveSocket returns error when neither set" {
     const opts = DriverOptions{};
-    const result = try opts.resolveSocket(std.testing.allocator);
-    defer std.testing.allocator.free(result);
-    const uid = std.os.linux.getuid();
-    const expected = try std.fmt.allocPrintSentinel(std.testing.allocator, "/run/user/{d}/{s}", .{ uid, DomainSocket.socket_name }, 0);
-    defer std.testing.allocator.free(expected);
-    try std.testing.expectEqualStrings(expected, result);
+    try std.testing.expectError(error.MissingSocket, opts.resolveSocket());
 }
 
 test "DriverOptions.resolveResource returns explicit resource" {
@@ -378,12 +373,10 @@ pub fn create(self: *NetavarkPlugin) !void {
         return error.AlreadyHandled;
     }
 
-    const socket_path = network.options.resolveSocket(self.allocator) catch {
-        try self.writeError("Failed to resolve socket path", .{});
+    const socket_path = network.options.resolveSocket() catch {
+        try self.writeError("Missing socket in network options", .{});
         return error.AlreadyHandled;
     };
-    const needs_free = network.options.socket == null and network.options.net_porter_socket == null;
-    defer if (needs_free) self.allocator.free(socket_path);
 
     try self.sendRequest(
         socket_path,
@@ -427,12 +420,10 @@ fn exec(self: *NetavarkPlugin, action: PluginAction) !void {
         return error.AlreadyHandled;
     }
 
-    const socket_path = network.options.resolveSocket(self.allocator) catch {
-        try self.writeError("Failed to resolve socket path", .{});
+    const socket_path = network.options.resolveSocket() catch {
+        try self.writeError("Missing socket in network options", .{});
         return error.AlreadyHandled;
     };
-    const needs_free = network.options.socket == null and network.options.net_porter_socket == null;
-    defer if (needs_free) self.allocator.free(socket_path);
 
     try self.sendRequest(
         socket_path,

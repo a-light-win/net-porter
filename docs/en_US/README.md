@@ -275,10 +275,11 @@ Run this command as the rootless user (e.g., `alice`):
 podman network create \
   -d net-porter \
   -o resource=macvlan-dhcp \
+  -o socket=/run/user/$(id -u)/net-porter.sock \
   macvlan-net
 ```
 
-> **Note**: The `socket` parameter defaults to `/run/user/$(id -u)/net-porter.sock`, so it usually does not need to be specified. The old parameter names `net_porter_socket` and `net_porter_resource` still work but print a deprecation warning.
+> **Note**: The `socket` parameter is required and must point to the per-user worker socket. The old parameter names `net_porter_socket` and `net_porter_resource` still work but print a deprecation warning.
 
 ### 5. Test it out
 Run this command as the rootless user (e.g., `alice`):
@@ -435,7 +436,7 @@ When IPAM type is `static`, the caller must request a specific IP (via podman `-
 
 User alice creates network:
 ```bash
-podman network create -d net-porter -o resource=vlan-100 vlan100
+podman network create -d net-porter -o resource=vlan-100 -o socket=/run/user/$(id -u)/net-porter.sock vlan100
 ```
 
 ### Example 2: Static IP with per-user ranges
@@ -616,10 +617,10 @@ The old names still work but print a deprecation warning. Update your podman net
 podman network create -d net-porter -o net_porter_resource=macvlan-dhcp -o net_porter_socket=/run/user/$(id -u)/net-porter.sock macvlan-net
 
 # New (recommended)
-podman network create -d net-porter -o resource=macvlan-dhcp macvlan-net
+podman network create -d net-porter -o resource=macvlan-dhcp -o socket=/run/user/$(id -u)/net-porter.sock macvlan-net
 ```
 
-> **Note**: The `socket` parameter now defaults to `/run/user/$(id -u)/net-porter.sock`, so it can usually be omitted.
+> **Note**: The `socket` parameter is required. Rootless podman invokes netavark plugins inside a user namespace where automatic UID detection is unreliable, so the socket path must be specified explicitly.
 
 ## Upgrade from v0.6
 
@@ -745,12 +746,13 @@ Restart service: `systemctl restart net-porter`
 Create a container network with `net-porter` driver, and use it with `podman`.
 
 ```bash
-podman network create -d net-porter -o resource=macvlan-dhcp macvlan-net
+podman network create -d net-porter -o resource=macvlan-dhcp -o socket=/run/user/$(id -u)/net-porter.sock macvlan-net
 ```
 
 - `-d net-porter`: use the `net-porter` driver.
 - `-o resource=macvlan-dhcp`: specify the resource name, should be the
   same with server configuration.
+- `-o socket=/run/user/$(id -u)/net-porter.sock`: specify the per-user worker socket path.
 - `macvlan-net`: the network name.
 
-> The `socket` parameter defaults to `/run/user/$(id -u)/net-porter.sock` and usually does not need to be specified.
+> The `socket` parameter is required. Use `/run/user/$(id -u)/net-porter.sock` for the default per-user socket location.

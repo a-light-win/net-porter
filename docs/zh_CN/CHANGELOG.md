@@ -22,9 +22,11 @@
 
 ### 新增
 
-- **简化插件参数名**：`net_porter_socket` → `socket`，`net_porter_resource` → `resource`，并提供默认 socket 路径。旧参数名仍可使用，但会打印 deprecated 警告。
+- **简化插件参数名**：`net_porter_socket` → `socket`，`net_porter_resource` → `resource`。旧参数名仍可使用，但会打印 deprecated 警告。
 
 ### 变更
+
+- **`socket` 参数改为必选**：Rootless podman 在用户命名空间内调用 netavark 插件，`getuid()` 返回映射后的 UID（0），导致自动检测 socket 路径不可靠。创建 podman 网络时必须显式指定 `socket` 路径。
 
 - **CNI 模块架构重组**：将 1500+ 行的单体 `Cni.zig` 拆分为四个独立模块 —— `Cni`、`CniConfig`、`PluginConf` 和 `Attachment`，提升可维护性。
 - **模块布局调整**：将 `Acl`/`AclFile` 移至 `acl/`，`ManagedType` 和 `Responser` 移至 `common/`，共享 inotify 常量移至 `utils/Inotify.zig`。

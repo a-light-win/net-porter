@@ -272,10 +272,11 @@ mkdir -p /etc/net-porter/acl.d
 podman network create \
   -d net-porter \
   -o resource=macvlan-dhcp \
+  -o socket=/run/user/$(id -u)/net-porter.sock \
   macvlan-net
 ```
 
-> **注意**：`socket` 参数默认为 `/run/user/$(id -u)/net-porter.sock`，通常无需指定。旧参数名 `net_porter_socket` 和 `net_porter_resource` 仍可使用，但会打印 deprecated 警告。
+> **注意**：`socket` 参数为必选项，必须指向每用户 worker 的 socket 路径。旧参数名 `net_porter_socket` 和 `net_porter_resource` 仍可使用，但会打印 deprecated 警告。
 
 ### 5. 测试
 以 rootless 用户（如 `alice`）身份运行：
@@ -639,10 +640,10 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 podman network create -d net-porter -o net_porter_resource=macvlan-dhcp -o net_porter_socket=/run/user/$(id -u)/net-porter.sock macvlan-net
 
 # 新写法（推荐）
-podman network create -d net-porter -o resource=macvlan-dhcp macvlan-net
+podman network create -d net-porter -o resource=macvlan-dhcp -o socket=/run/user/$(id -u)/net-porter.sock macvlan-net
 ```
 
-> **注意**：`socket` 参数现在默认为 `/run/user/$(id -u)/net-porter.sock`，通常可以省略。
+> **注意**：`socket` 参数为必选项。Rootless podman 在用户命名空间内调用 netavark 插件，自动 UID 检测不可靠，因此必须显式指定 socket 路径。
 
 ## 从 v0.6 升级
 
@@ -770,11 +771,12 @@ journalctl -u net-porter -f
 使用 `net-porter` 驱动创建容器网络，然后在 `podman` 中使用。
 
 ```bash
-podman network create -d net-porter -o resource=macvlan-dhcp macvlan-net
+podman network create -d net-porter -o resource=macvlan-dhcp -o socket=/run/user/$(id -u)/net-porter.sock macvlan-net
 ```
 
 - `-d net-porter`：使用 `net-porter` 驱动。
 - `-o resource=macvlan-dhcp`：指定资源名称，应与 CNI 配置中的名称一致。
+- `-o socket=/run/user/$(id -u)/net-porter.sock`：指定每用户 worker socket 路径。
 - `macvlan-net`：网络名称。
 
-> `socket` 参数默认为 `/run/user/$(id -u)/net-porter.sock`，通常无需指定。
+> `socket` 参数为必选项。使用 `/run/user/$(id -u)/net-porter.sock` 作为默认的每用户 socket 路径。

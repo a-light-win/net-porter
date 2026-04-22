@@ -22,9 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Simplified plugin parameter names**: `net_porter_socket` → `socket`, `net_porter_resource` → `resource`, with a default socket path. Old parameter names still work but print a deprecation warning.
+- **Simplified plugin parameter names**: `net_porter_socket` → `socket`, `net_porter_resource` → `resource`. Old parameter names still work but print a deprecation warning.
 
 ### Changed
+
+- **`socket` is now a required parameter**: Rootless podman invokes netavark plugins inside a user namespace where `getuid()` returns the mapped UID (0), making automatic socket path detection unreliable. The `socket` path must now be explicitly specified in `podman network create`.
 
 - **CNI module architecture reorganized**: The monolithic `Cni.zig` (1500+ lines) has been split into four focused modules — `Cni`, `CniConfig`, `PluginConf`, and `Attachment` — for better maintainability.
 - **Module layout restructured**: Moved `Acl`/`AclFile` to `acl/`, `ManagedType` and `Responser` to `common/`, and shared inotify constants to `utils/Inotify.zig`.
