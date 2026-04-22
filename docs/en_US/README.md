@@ -23,7 +23,7 @@ When a container starts, netavark will call the `net-porter plugin`. The plugin 
 │                    net-porter.service (root)                  │
 │                                                              │
 │  Server                                                      │
-│  ├── AclManager: scan acl.d/ → resolve usernames to UIDs    │
+│  ├── AclScanner: scan acl.d/ → resolve usernames to UIDs    │
 │  ├── UidTracker: monitor /run/user/ via inotify              │
 │  └── WorkerManager: spawn/stop/restart per-UID workers       │
 │                                                              │
@@ -165,10 +165,8 @@ net-porter/
 │   ├── server.zig                # Server module (CLI: `net-porter server`)
 │   ├── server/
 │   │   ├── Server.zig            # Server core — ACL scanner + worker lifecycle
-│   │   ├── UidTracker.zig         # /run/user/ monitor (inotify), reports UID events
-│   │   ├── AclManager.zig        # Server-side ACL scanner (username → UID resolution)
-│   │   ├── AclFile.zig           # ACL file format (Grant, Entry, groups)
-│   │   └── Acl.zig               # ACL validation & IP range matching
+│   │   ├── UidTracker.zig        # /run/user/ monitor (inotify), reports UID events
+│   │   └── AclScanner.zig       # Server-side ACL scanner (username → UID resolution)
 │   ├── worker.zig                # Worker module (CLI: `net-porter worker`)
 │   ├── worker/
 │   │   ├── Worker.zig            # Per-UID worker daemon (host namespace, netns via /proc)
@@ -178,11 +176,18 @@ net-porter/
 │   ├── cni.zig                   # CNI module re-exports
 │   ├── cni/
 │   │   ├── Cni.zig               # CNI execution logic
-│   │   ├── CniManager.zig        # CNI config management
+│   │   ├── CniConfig.zig         # CNI configuration management
 │   │   ├── CniLoader.zig         # CNI config file loader & validation
+│   │   ├── PluginConf.zig        # Plugin configuration helpers
+│   │   ├── Attachment.zig        # CNI attachment state management
 │   │   ├── StateFile.zig         # CNI attachment state persistence
-│   │   ├── DhcpService.zig       # Per-user DHCP service
-│   │   └── DhcpManager.zig       # DHCP service manager
+│   │   └── DhcpService.zig       # Per-user DHCP service
+│   ├── acl/
+│   │   ├── Acl.zig               # ACL validation & IP range matching
+│   │   └── AclFile.zig           # ACL file format (Grant, Entry, groups)
+│   ├── common/
+│   │   ├── ManagedType.zig       # Shared managed resource type
+│   │   └── Responser.zig         # Response builder helpers
 │   ├── config.zig                # Config module re-exports
 │   ├── config/
 │   │   ├── Config.zig            # Server config struct
@@ -190,21 +195,21 @@ net-porter/
 │   │   └── DomainSocket.zig      # Socket path helpers
 │   ├── plugin.zig                # Plugin module (CLI: create/setup/teardown/info)
 │   ├── plugin/
-│   │   ├── NetavarkPlugin.zig    # Netavark plugin protocol implementation
-│   │   └── Responser.zig         # Response builder helpers
+│   │   └── NetavarkPlugin.zig    # Netavark plugin protocol implementation
 │   ├── user.zig                  # UID/GID/username resolution (libc wrappers)
-│   ├── json.zig                  # JSON utilities (parse, stringify)
 │   ├── utils.zig                 # Utils module re-exports
 │   ├── utils/
 │   │   ├── ArenaAllocator.zig    # Arena-based allocator for per-request handling
 │   │   ├── ErrorMessage.zig      # Structured error output
+│   │   ├── Inotify.zig           # Shared inotify constants
 │   │   ├── Logger.zig            # Custom logger with runtime level control
 │   │   └── LogSettings.zig       # Log configuration
 │   └── test_utils/
 │       └── TempFileManager.zig   # Test helper for temporary files
 ├── misc/
 │   ├── systemd/                  # Systemd service files
-│   └── nfpm/                     # nfpm packaging configuration
+│   ├── nfpm/                     # nfpm packaging configuration
+│   └── cni-example.conflist      # Example CNI configuration
 ├── build.zig                     # Zig build configuration
 └── justfile                      # Just task definitions
 ```
@@ -269,10 +274,11 @@ Run this command as the rootless user (e.g., `alice`):
 ```bash
 podman network create \
   -d net-porter \
-  -o net_porter_resource=macvlan-dhcp \
-  -o net_porter_socket=/run/user/$(id -u)/net-porter.sock \
+  -o resource=macvlan-dhcp \
   macvlan-net
 ```
+
+> **Note**: The `socket` parameter defaults to `/run/user/$(id -u)/net-porter.sock`, so it usually does not need to be specified. The old parameter names `net_porter_socket` and `net_porter_resource` still work but print a deprecation warning.
 
 ### 5. Test it out
 Run this command as the rootless user (e.g., `alice`):
@@ -288,11 +294,7 @@ You should see the macvlan interface with an IP address from your DHCP server.
 {
   "cni_plugin_dir": "/usr/lib/cni",
   "log": {
-    "level": "info",
-    "dump_env": {
-      "enabled": false,
-      "path": "/tmp/net-porter-dump"
-    }
+    "level": "info"
   }
 }
 ```
@@ -368,7 +370,6 @@ When IPAM type is `static`, the caller must request a specific IP (via podman `-
 | `cni_dir` | Directory containing standard CNI config files | `{config_dir}/cni.d` |
 | `acl_dir` | Directory containing ACL files | `{config_dir}/acl.d` |
 | `log.level` | Log level: `debug`, `info`, `warn`, `error` | `info` |
-| `log.dump_env` | Environment dump for debugging | disabled |
 
 ## Usage Examples
 
@@ -434,7 +435,7 @@ When IPAM type is `static`, the caller must request a specific IP (via podman `-
 
 User alice creates network:
 ```bash
-podman network create -d net-porter -o net_porter_resource=vlan-100 vlan100
+podman network create -d net-porter -o resource=vlan-100 vlan100
 ```
 
 ### Example 2: Static IP with per-user ranges
@@ -595,6 +596,31 @@ podman run -it --rm --network static-net --ip 192.168.1.15 alpine ip addr
 }
 ```
 
+## Upgrade from v1.0
+
+Version 1.1.0 is a backward-compatible security and stability release. No configuration changes are required.
+
+### Deprecation notice
+
+The plugin parameter names have been simplified:
+
+| Old name (deprecated) | New name |
+|-----------------------|----------|
+| `net_porter_socket` | `socket` |
+| `net_porter_resource` | `resource` |
+
+The old names still work but print a deprecation warning. Update your podman network options when convenient:
+
+```bash
+# Old (still works, prints deprecation warning)
+podman network create -d net-porter -o net_porter_resource=macvlan-dhcp -o net_porter_socket=/run/user/$(id -u)/net-porter.sock macvlan-net
+
+# New (recommended)
+podman network create -d net-porter -o resource=macvlan-dhcp macvlan-net
+```
+
+> **Note**: The `socket` parameter now defaults to `/run/user/$(id -u)/net-porter.sock`, so it can usually be omitted.
+
 ## Upgrade from v0.6
 
 Version 1.0.0 introduces a per-UID worker architecture. The server now spawns independent worker processes for each allowed user instead of handling connections directly. The ACL file format has also changed — the `user`/`group` fields are replaced by filename-based identity (`<username>.json` for users), and a new `groups` field enables referencing shared rule collections (`@<name>.json`).
@@ -678,7 +704,7 @@ See the [Migration Guide (0.3 → 0.4)](migration-guide-0.3-to-0.4.md) for upgra
 **Error**: `Resource 'xxx' not found in config`
 **Solutions**:
 - Check if a CNI config file for this network exists in `/etc/net-porter/cni.d/`
-- Ensure the `name` field matches what you pass via `net_porter_resource`
+- Ensure the `name` field matches what you pass via `resource`
 - Confirm the file suffix is `.conf` or `.conflist`
 - Restart the service after modifying configuration
 
@@ -719,13 +745,12 @@ Restart service: `systemctl restart net-porter`
 Create a container network with `net-porter` driver, and use it with `podman`.
 
 ```bash
-podman network create -d net-porter -o net_porter_resource=macvlan-dhcp -o net_porter_socket=/run/user/$(id -u)/net-porter.sock macvlan-net
+podman network create -d net-porter -o resource=macvlan-dhcp macvlan-net
 ```
 
 - `-d net-porter`: use the `net-porter` driver.
-- `-o net_porter_resource=macvlan-dhcp`: specify the resource name, should be
-  the same with server configuration.
-- `-o net_porter_socket=/run/user/$(id -u)/net-porter.sock`: specify the
-  per-user socket path created by `net-porter server`. `$(id -u)` expands
-  to the current user's uid.
+- `-o resource=macvlan-dhcp`: specify the resource name, should be the
+  same with server configuration.
 - `macvlan-net`: the network name.
+
+> The `socket` parameter defaults to `/run/user/$(id -u)/net-porter.sock` and usually does not need to be specified.
