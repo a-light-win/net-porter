@@ -53,21 +53,15 @@ pub fn listen(io: std.Io, path: [:0]const u8, uid: std.posix.uid_t) !std.Io.net.
         return error.SymlinkDetected;
     }
 
-    // Set mode first (path-based, after verifying not a symlink)
-    setModePath(path, 0o600) catch |err| {
+    // IMPORTANT: setOwnerPath MUST be called before setModePath.
+    // setOwnerPath uses AT_SYMLINK_NOFOLLOW — if the socket was replaced
+    // with a symlink after the isSymlink() check, fchownat returns ELOOP
+    // and fails safely. If we called setModePath first (which cannot use
+    // AT_SYMLINK_NOFOLLOW on older kernels), chmod would follow the symlink.
+    setOwnerPath(path, uid) catch |err| {
         return err;
     };
-
-    // Set ownership via path (after verifying not a symlink above).
-    //
-    // IMPORTANT: Do NOT use fd-based fchown on socket fds!
-    // Unix domain sockets have two separate inodes:
-    //   1. sockfs inode (kernel-internal, pointed to by socket fd)
-    //   2. filesystem inode (visible via ls/stat, pointed to by path)
-    // fchown(fd) operates on the sockfs inode — invisible from ls -l.
-    // fchownat(path) operates on the filesystem inode — the one that matters.
-    // This is the same reason setModePath uses path-based fchmodat.
-    setOwnerPath(path, uid) catch |err| {
+    setModePath(path, 0o600) catch |err| {
         return err;
     };
 
@@ -83,7 +77,7 @@ fn isSymlink(path: [:0]const u8) bool {
     return (statx_buf.mode & 0o170000) == 0o120000; // S_IFLNK
 }
 
-/// Set socket ownership via path (after verifying it is not a symlink).
+/// Set socket ownership via path.
 ///
 /// IMPORTANT: Must use path-based fchownat, NOT fd-based fchown.
 /// On Linux, a Unix domain socket bound to a path has TWO inodes:
@@ -93,14 +87,16 @@ fn isSymlink(path: [:0]const u8) bool {
 /// filesystem perspective, so the socket file remains owned by root.
 /// fchownat(path) changes the filesystem inode's ownership — the one that
 /// actually controls access permissions and is visible via ls -l.
-/// Symlink TOCTOU is prevented by isSymlink() checks before and after bind.
+///
+/// Uses AT_SYMLINK_NOFOLLOW to prevent following an attacker's symlink
+/// in the TOCTOU window after the isSymlink() check.
 fn setOwnerPath(path: [:0]const u8, uid: std.posix.uid_t) !void {
     const rc = linux.fchownat(
         std.posix.AT.FDCWD,
         path,
         uid,
-        @as(std.posix.gid_t, @bitCast(@as(i32, -1))), // gid unchanged (-1)
-        0,
+        @as(std.posix.gid_t, @bitCast(@as(i32, -1))),
+        linux.AT.SYMLINK_NOFOLLOW,
     );
     if (std.posix.errno(rc) != .SUCCESS) {
         log.warn("Failed to set socket owner for {s}", .{path});
