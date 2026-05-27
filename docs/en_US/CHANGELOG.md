@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-05-27
+
+### Security
+
+- **Fixed 6 security issues** covering verification bypass, path traversal, process spoofing, UID reuse, and input validation:
+  - NSFS verification now uses `statfs` instead of a hardcoded device number, preventing verification bypass on systems with different device numbers.
+  - Added strict username validation (`a-zA-Z0-9_-`) to prevent path traversal via malicious NSS/LDAP entries returning crafted usernames.
+  - Improved catatonit process verification to resist PID recycling and process name spoofing attacks.
+  - Added UID reuse detection: when a user account is deleted and recreated with the same UID but a different username, the old worker is stopped to prevent ACL inheritance.
+  - Fixed integer underflow in IPv6 address parsing.
+  - Added validation for random seed generation to prevent use of uninitialized values.
+
+### Added
+
+- **Dynamic ACL management**: The service now watches the `acl.d/` directory in real-time. Adding, modifying, or removing ACL files automatically starts or stops the corresponding workers — no manual intervention needed. Previously, ACL changes required a service restart to take effect.
+
+### Fixed
+
+- Fixed potential out-of-bounds read when processing file system events that could cause crashes.
+- Fixed service panic when more than 8 users or ACL events were processed simultaneously.
+- Fixed several memory leaks in the ACL watcher.
+- Fixed incorrect error detection for certain system calls, which could cause operations to fail silently or report wrong errors.
+- Fixed transient I/O errors during user scanning causing all workers to be stopped.
+- Fixed event ordering: ACL changes are now processed before user login events, ensuring new users are recognized before their socket events arrive.
+- Improved ACL watcher efficiency by skipping non-user files (group rule collections and hidden dotfiles).
+
+### Internal
+
+- Added test coverage for UID reuse detection.
+- Code formatting cleanup.
+
+---
+
 ## [1.1.0] - 2026-04-22
 
 ### Security
@@ -226,6 +259,7 @@ See the [Migration Guide (0.4 → 0.5)](migration-guide-0.4-to-0.5.md) for step-
 
 _Initial public release with per-user service architecture._
 
+[1.2.0]: https://github.com/a-light-win/net-porter/compare/1.1.0...1.2.0
 [1.1.0]: https://github.com/a-light-win/net-porter/compare/1.0.0...1.1.0
 [1.0.0]: https://github.com/a-light-win/net-porter/compare/0.6.0...1.0.0
 [0.6.0]: https://github.com/a-light-win/net-porter/compare/0.5.0...0.6.0
