@@ -20,7 +20,7 @@
 //! Security:
 //!   - Socket ownership verified via fchownat to target UID
 //!   - Per-request catatonit process verification (UID + comm check)
-//!   - Per-request netns nsfs verification (statx AT_SYMLINK_NOFOLLOW + device 0:4)
+//!   - Per-request netns nsfs verification (statfs NSFS_MAGIC)
 
 const std = @import("std");
 const config_mod = @import("../config.zig");
