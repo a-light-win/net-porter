@@ -42,5 +42,6 @@ test {
     _ = @import("acl/Acl.zig");
     _ = @import("acl/AclFile.zig");
     _ = @import("server/AclScanner.zig");
+    _ = @import("server/AclWatcher.zig");
     _ = @import("server/UidTracker.zig");
 }
