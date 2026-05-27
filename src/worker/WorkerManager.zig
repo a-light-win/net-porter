@@ -30,6 +30,7 @@ const WorkerEntry = struct {
     pidfd: std.posix.fd_t,
     catatonit_pid: std.posix.pid_t,
     catatonit_pidfd: std.posix.fd_t,
+    username: []const u8,
 };
 
 const WorkerMap = std.HashMap(u32, WorkerEntry, WorkerMapContext, 80);
@@ -96,6 +97,7 @@ pub fn deinit(self: *WorkerManager) void {
         if (entry.value_ptr.catatonit_pidfd >= 0) {
             _ = linux.close(entry.value_ptr.catatonit_pidfd);
         }
+        self.allocator.free(entry.value_ptr.username);
     }
     self.workers.deinit();
     self.monitored_metas.deinit(self.allocator);
@@ -135,6 +137,7 @@ pub fn stopWorker(self: *WorkerManager, uid: u32) void {
         if (removed.value.catatonit_pidfd >= 0) {
             _ = linux.close(removed.value.catatonit_pidfd);
         }
+        self.allocator.free(removed.value.username);
         self.stopService(uid);
         self.rebuildMonitoredFds();
         log.info("Stopped worker for uid={d}", .{uid});
@@ -146,6 +149,14 @@ pub fn stopWorker(self: *WorkerManager, uid: u32) void {
 /// Valid until the next mutation (ensureWorkers, stopWorker, processPollEvents, retryPending).
 pub fn pollFdSlice(self: *WorkerManager) []const std.posix.pollfd {
     return self.monitored_pollfds.items;
+}
+
+/// Return the stored username for a running worker, or null if no worker exists.
+pub fn getWorkerUsername(self: *WorkerManager, uid: u32) ?[]const u8 {
+    if (self.workers.get(uid)) |entry| {
+        return entry.username;
+    }
+    return null;
 }
 
 /// Process poll events on the monitored fds.
@@ -505,7 +516,7 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
         log.err("Failed to resolve uid={d} to username, cannot spawn worker", .{uid});
         return error.UserNotFound;
     };
-    defer self.allocator.free(username);
+    errdefer self.allocator.free(username);
 
     // Write environment file for the template service to consume
     writeEnvFile(self.io, self.allocator, uid, username, catatonit_pid, self.config_path) catch |err| {
@@ -569,6 +580,7 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
         .pidfd = worker_pidfd,
         .catatonit_pid = catatonit_pid,
         .catatonit_pidfd = catatonit_pidfd,
+        .username = username,
     };
 
     self.workers.put(uid, entry) catch {
@@ -589,6 +601,7 @@ fn stopAndCleanup(self: *WorkerManager, uid: u32) void {
         if (removed.value.catatonit_pidfd >= 0) {
             _ = linux.close(removed.value.catatonit_pidfd);
         }
+        self.allocator.free(removed.value.username);
     }
     self.stopService(uid);
 }
@@ -671,12 +684,22 @@ fn tryAdoptExistingService(self: *WorkerManager, uid: u32, catatonit_pid: std.po
     };
     // catatonit_pidfd failure is non-fatal — we can still detect worker exit
 
+    // Resolve UID to username for tracking (detect UID reuse)
+    const username = user_mod.getUsername(self.allocator, uid) orelse {
+        log.warn("Failed to resolve uid={d} to username for adoption, skipping", .{uid});
+        _ = linux.close(worker_pidfd);
+        if (catatonit_pidfd >= 0) _ = linux.close(catatonit_pidfd);
+        return false;
+    };
+    errdefer self.allocator.free(username);
+
     const entry = WorkerEntry{
         .uid = uid,
         .pid = worker_pid,
         .pidfd = worker_pidfd,
         .catatonit_pid = catatonit_pid,
         .catatonit_pidfd = catatonit_pidfd,
+        .username = username,
     };
 
     self.workers.put(uid, entry) catch {
@@ -686,7 +709,7 @@ fn tryAdoptExistingService(self: *WorkerManager, uid: u32, catatonit_pid: std.po
     };
     self.rebuildMonitoredFds();
 
-    log.info("Adopted existing worker for uid={d} (pid={d}, service={s})", .{ uid, worker_pid, svc_name });
+    log.info("Adopted existing worker for uid={d} (username={s}, pid={d}, service={s})", .{ uid, username, worker_pid, svc_name });
     return true;
 }
 
@@ -1004,6 +1027,8 @@ test "ensureWorkerWithPidLocked is no-op when worker already running with same c
     var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
     defer wm.deinit();
 
+    const test_username = try std.testing.allocator.dupe(u8, "testuser");
+
     // Manually insert a worker entry
     try wm.workers.put(1000, .{
         .uid = 1000,
@@ -1011,6 +1036,7 @@ test "ensureWorkerWithPidLocked is no-op when worker already running with same c
         .pidfd = -1,
         .catatonit_pid = 500,
         .catatonit_pidfd = -1,
+        .username = test_username,
     });
 
     // Call with same catatonit_pid — should be no-op (worker stays)
@@ -1029,6 +1055,9 @@ test "rebuildMonitoredFds builds correct fd lists from workers" {
     var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
     defer wm.deinit();
 
+    const test_username_a = try std.testing.allocator.dupe(u8, "testuser_a");
+    const test_username_b = try std.testing.allocator.dupe(u8, "testuser_b");
+
     // Add two worker entries with valid-looking pidfds (use -1 to skip close)
     try wm.workers.put(1000, .{
         .uid = 1000,
@@ -1036,6 +1065,7 @@ test "rebuildMonitoredFds builds correct fd lists from workers" {
         .pidfd = -1,
         .catatonit_pid = 200,
         .catatonit_pidfd = -1,
+        .username = test_username_a,
     });
     try wm.workers.put(2000, .{
         .uid = 2000,
@@ -1043,6 +1073,7 @@ test "rebuildMonitoredFds builds correct fd lists from workers" {
         .pidfd = -1,
         .catatonit_pid = 400,
         .catatonit_pidfd = -1,
+        .username = test_username_b,
     });
 
     wm.rebuildMonitoredFds();
@@ -1059,12 +1090,15 @@ test "stopAndCleanup removes worker entry" {
     var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
     defer wm.deinit();
 
+    const test_username = try std.testing.allocator.dupe(u8, "testuser");
+
     try wm.workers.put(1000, .{
         .uid = 1000,
         .pid = 100,
         .pidfd = -1,
         .catatonit_pid = 200,
         .catatonit_pidfd = -1,
+        .username = test_username,
     });
 
     try std.testing.expect(wm.workers.get(1000) != null);
@@ -1079,6 +1113,35 @@ test "stopAndCleanup is no-op for non-existent UID" {
     // Should not crash
     wm.stopAndCleanup(9999);
     try std.testing.expectEqual(@as(usize, 0), wm.workers.count());
+}
+
+// ── Tests: getWorkerUsername ──────────────────────────────────────────
+
+test "getWorkerUsername returns stored username for running worker" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    const test_username = try std.testing.allocator.dupe(u8, "alice");
+
+    try wm.workers.put(1000, .{
+        .uid = 1000,
+        .pid = 100,
+        .pidfd = -1,
+        .catatonit_pid = 200,
+        .catatonit_pidfd = -1,
+        .username = test_username,
+    });
+
+    const result = wm.getWorkerUsername(1000);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("alice", result.?);
+}
+
+test "getWorkerUsername returns null for non-existent UID" {
+    var wm = WorkerManager.init(std.testing.io, std.testing.allocator, null);
+    defer wm.deinit();
+
+    try std.testing.expect(wm.getWorkerUsername(9999) == null);
 }
 
 // ── Tests: stopWorker ────────────────────────────────────────────────

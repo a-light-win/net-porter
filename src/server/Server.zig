@@ -6,6 +6,7 @@ const AclScanner = @import("AclScanner.zig");
 const AclWatcher = @import("AclWatcher.zig");
 const WorkerManager = @import("../worker/WorkerManager.zig");
 const UidTracker = @import("UidTracker.zig");
+const user_mod = @import("../user.zig");
 const Server = @This();
 
 config: config_mod.Config,
@@ -185,6 +186,8 @@ fn syncWorkers(self: *Server) void {
 
 /// Handle a detected change in the ACL directory.
 /// Re-scans UIDs, updates the allowed list, and starts/stops workers as needed.
+/// Detects UID reuse: if a username-to-UID mapping changed, stops the old worker
+/// so it gets respawned with the correct username and ACL.
 fn handleAclChange(self: *Server) void {
     var new_uids = self.acl_manager.scanUids(self.io);
 
@@ -205,6 +208,37 @@ fn handleAclChange(self: *Server) void {
         self.worker_manager.stopWorker(uid);
     }
 
+    // Detect username changes for unchanged UIDs (UID reuse attack prevention).
+    // If a user was deleted and a new user assigned the same UID, the existing
+    // worker still runs with the old username's ACL. Stop it so it respawns
+    // with the correct username.
+    var mismatched_uids = std.ArrayList(u32).initCapacity(self.uid_tracker.allocator, self.uid_tracker.allowed_uids.items.len) catch return;
+    defer mismatched_uids.deinit(self.uid_tracker.allocator);
+
+    for (self.uid_tracker.allowed_uids.items) |uid| {
+        // Skip newly added UIDs — they'll get fresh workers with correct usernames
+        var is_added = false;
+        for (delta.added.items) |added_uid| {
+            if (added_uid == uid) {
+                is_added = true;
+                break;
+            }
+        }
+        if (is_added) continue;
+
+        const stored_username = self.worker_manager.getWorkerUsername(uid) orelse continue;
+        const current_username = user_mod.getUsername(std.heap.page_allocator, uid) orelse continue;
+
+        if (!std.mem.eql(u8, stored_username, current_username)) {
+            log.warn("Username changed for uid={d}: '{s}' -> '{s}', restarting worker", .{ uid, stored_username, current_username });
+            std.heap.page_allocator.free(current_username);
+            self.worker_manager.stopWorker(uid);
+            mismatched_uids.appendAssumeCapacity(uid);
+        } else {
+            std.heap.page_allocator.free(current_username);
+        }
+    }
+
     // Start workers for added UIDs that are currently active
     if (delta.added.items.len > 0) {
         var active_added = std.ArrayList(u32).initCapacity(self.uid_tracker.allocator, delta.added.items.len) catch return;
@@ -217,6 +251,21 @@ fn handleAclChange(self: *Server) void {
         }
         if (active_added.items.len > 0) {
             self.worker_manager.ensureWorkers(active_added.items);
+        }
+    }
+
+    // Re-spawn workers for mismatched UIDs that are still active
+    if (mismatched_uids.items.len > 0) {
+        var active_mismatched = std.ArrayList(u32).initCapacity(self.uid_tracker.allocator, mismatched_uids.items.len) catch return;
+        defer active_mismatched.deinit(self.uid_tracker.allocator);
+
+        for (mismatched_uids.items) |uid| {
+            if (self.uid_tracker.isUidActive(uid)) {
+                active_mismatched.appendAssumeCapacity(uid);
+            }
+        }
+        if (active_mismatched.items.len > 0) {
+            self.worker_manager.ensureWorkers(active_mismatched.items);
         }
     }
 }
