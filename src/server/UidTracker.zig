@@ -42,7 +42,7 @@ inotify_fd: std.posix.fd_t,
 
 pub fn init(io: std.Io, allocator: Allocator, allowed_uids: std.ArrayList(u32)) !UidTracker {
     const init_rc = linux.inotify_init1(inotify.IN_NONBLOCK | inotify.IN_CLOEXEC);
-    if (std.posix.errno(init_rc) != .SUCCESS) {
+    if (@as(i64, @bitCast(init_rc)) < 0) {
         log.err("Failed to create inotify fd: {s}", .{@tagName(std.posix.errno(init_rc))});
         return error.InotifyInitFailed;
     }
@@ -51,7 +51,7 @@ pub fn init(io: std.Io, allocator: Allocator, allowed_uids: std.ArrayList(u32)) 
 
     // Watch /run/user for directory create/delete
     const wd_rc = linux.inotify_add_watch(ifd, run_user_dir, inotify.IN_CREATE | inotify.IN_DELETE | inotify.IN_MOVED_FROM | inotify.IN_MOVED_TO);
-    if (std.posix.errno(wd_rc) != .SUCCESS) {
+    if (@as(i64, @bitCast(wd_rc)) < 0) {
         log.err("Failed to add inotify watch on {s}: {s}", .{ run_user_dir, @tagName(std.posix.errno(wd_rc)) });
         return error.InotifyWatchFailed;
     }

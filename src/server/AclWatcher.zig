@@ -23,7 +23,7 @@ inotify_fd: ?std.posix.fd_t,
 
 pub fn init(allocator: Allocator, io: std.Io, acl_dir: []const u8) ?AclWatcher {
     const init_rc = linux.inotify_init1(inotify.IN_NONBLOCK | inotify.IN_CLOEXEC);
-    if (std.posix.errno(init_rc) != .SUCCESS) {
+    if (@as(i64, @bitCast(init_rc)) < 0) {
         log.warn("Failed to create inotify fd for acl.d: {s}", .{@tagName(std.posix.errno(init_rc))});
         return null;
     }
@@ -41,7 +41,7 @@ pub fn init(allocator: Allocator, io: std.Io, acl_dir: []const u8) ?AclWatcher {
     @memcpy(acl_dir_z[0..acl_dir.len], acl_dir);
 
     const wd_rc = linux.inotify_add_watch(ifd, acl_dir_z, inotify.IN_CREATE | inotify.IN_DELETE | inotify.IN_MODIFY | inotify.IN_MOVED_FROM | inotify.IN_MOVED_TO | inotify.IN_CLOSE_WRITE);
-    if (std.posix.errno(wd_rc) != .SUCCESS) {
+    if (@as(i64, @bitCast(wd_rc)) < 0) {
         log.warn("Failed to add inotify watch on acl.d '{s}': {s}", .{ acl_dir, @tagName(std.posix.errno(wd_rc)) });
         return null;
     }
