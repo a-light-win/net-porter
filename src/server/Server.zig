@@ -374,3 +374,55 @@ test "handleAclChange preserves UIDs on empty scan result" {
     try std.testing.expect(server.uid_tracker.isUidAllowed(1000));
     try std.testing.expect(server.uid_tracker.isUidAllowed(2000));
 }
+
+test "handleAclChange detects username mismatch and stops worker" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var test_dir = try AclScanner.TestAclDir.create(io, allocator);
+    defer test_dir.deinit();
+
+    // Create root.json which resolves to uid 0
+    try test_dir.writeFile("root.json", "{}");
+
+    var allowed_uids = std.ArrayList(u32).initCapacity(allocator, 1) catch return error.Unexpected;
+    allowed_uids.appendAssumeCapacity(0);
+
+    var entries = std.ArrayList(UidTracker.UidEntry).initCapacity(allocator, 1) catch return error.Unexpected;
+    entries.appendAssumeCapacity(.{ .uid = 0 });
+
+    var worker_manager = WorkerManager.init(io, allocator, null);
+    const hacker_username = try allocator.dupe(u8, "hacker");
+    try worker_manager.injectTestWorker(0, hacker_username);
+
+    try std.testing.expect(worker_manager.getWorkerUsername(0) != null);
+    try std.testing.expectEqualStrings("hacker", worker_manager.getWorkerUsername(0).?);
+
+    var server = Server{
+        .config = config_mod.Config{ .acl_dir = test_dir.dir_path },
+        .io = io,
+        .acl_manager = AclScanner.init(allocator, test_dir.dir_path),
+        .acl_watcher = AclWatcher{
+            .allocator = allocator,
+            .io = io,
+            .acl_dir = test_dir.dir_path,
+            .inotify_fd = null,
+        },
+        .worker_manager = worker_manager,
+        .uid_tracker = UidTracker{
+            .allocator = allocator,
+            .io = io,
+            .allowed_uids = allowed_uids,
+            .entries = entries,
+            .inotify_fd = -1,
+        },
+        .managed_config = config_mod.ManagedConfig{ .config = config_mod.Config{} },
+    };
+    defer server.deinit();
+
+    // Re-scan ACLs — should detect that uid 0's username changed from "hacker" to "root"
+    server.handleAclChange();
+
+    // Worker should have been stopped due to username mismatch
+    try std.testing.expect(server.worker_manager.getWorkerUsername(0) == null);
+}

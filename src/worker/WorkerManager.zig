@@ -159,6 +159,22 @@ pub fn getWorkerUsername(self: *WorkerManager, uid: u32) ?[]const u8 {
     return null;
 }
 
+/// Test helper: inject a fake worker entry directly into the workers map.
+/// Caller owns `username` memory; it will be freed when the worker is stopped or deinit'd.
+pub fn injectTestWorker(self: *WorkerManager, uid: u32, username: []const u8) !void {
+    self.mutex.lock(self.io) catch return error.LockFailed;
+    defer self.mutex.unlock(self.io);
+    try self.workers.put(uid, .{
+        .uid = uid,
+        .pid = 100,
+        .pidfd = -1,
+        .catatonit_pid = 200,
+        .catatonit_pidfd = -1,
+        .username = username,
+    });
+    self.rebuildMonitoredFds();
+}
+
 /// Process poll events on the monitored fds.
 /// `poll_results` must be the same length as pollFdSlice() at call time, in the same order.
 /// Handles at most one event per call, then rebuilds fd lists and returns.
