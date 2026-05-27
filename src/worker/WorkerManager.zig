@@ -714,6 +714,15 @@ fn tryAdoptExistingService(self: *WorkerManager, uid: u32, catatonit_pid: std.po
     };
     errdefer self.allocator.free(username);
 
+    // Validate username to prevent path traversal
+    if (!user_mod.isValidUsername(username)) {
+        log.warn("Adopted worker has invalid username '{s}' for uid={d}, refusing adoption", .{ username, uid });
+        self.allocator.free(username);
+        _ = linux.close(worker_pidfd);
+        if (catatonit_pidfd >= 0) _ = linux.close(catatonit_pidfd);
+        return false;
+    }
+
     const entry = WorkerEntry{
         .uid = uid,
         .pid = worker_pid,

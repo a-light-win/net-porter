@@ -78,7 +78,10 @@ pub fn new(opts: Opts) !Worker {
     errdefer managed_config.deinit();
 
     // 2. Load ACL for this user (loads <username>.json + groups)
-    var acl_manager = AclManager.init(page_alloc, io, conf.acl_dir, username, uid);
+    var acl_manager = AclManager.init(page_alloc, io, conf.acl_dir, username, uid) catch |e| {
+        log.err("Failed to initialize ACL manager for username '{s}': {s}", .{ username, @errorName(e) });
+        return e;
+    };
     acl_manager.load();
 
     // 3. Load CNI configs

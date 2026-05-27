@@ -50,9 +50,10 @@ group_names: std.ArrayList([]const u8),
 inotify_fd: ?std.posix.fd_t = null,
 mutex: std.Io.Mutex = .init,
 
-pub fn init(allocator: Allocator, io: std.Io, acl_dir: []const u8, username: []const u8, uid: u32) WorkerAclManager {
+pub fn init(allocator: Allocator, io: std.Io, acl_dir: []const u8, username: []const u8, uid: u32) !WorkerAclManager {
     if (!user_mod.isValidUsername(username)) {
-        log.err("Invalid username '{s}' (contains disallowed characters), ACL loading will fail", .{username});
+        log.err("Invalid username '{s}' (path traversal risk)", .{username});
+        return error.InvalidUsername;
     }
     return .{
         .arena = ArenaAllocator.init(allocator) catch unreachable,
@@ -427,7 +428,7 @@ test "reload preserves existing ACLs when user file is removed" {
     }
 
     // Create manager and load
-    var mgr = init(allocator, testing.io, tmp_path, "testuser", 1000);
+    var mgr = try init(allocator, testing.io, tmp_path, "testuser", 1000);
     defer mgr.deinit();
     mgr.load();
 
@@ -471,7 +472,7 @@ test "reload swaps to new ACLs when user file changes" {
         file_writer.end() catch return;
     }
 
-    var mgr = init(allocator, testing.io, tmp_path, "swapuser", 2000);
+    var mgr = try init(allocator, testing.io, tmp_path, "swapuser", 2000);
     defer mgr.deinit();
     mgr.load();
 
