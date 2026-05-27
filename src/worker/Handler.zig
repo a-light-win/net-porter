@@ -427,6 +427,7 @@ fn validateNetnsPath(netns: []const u8, uid: u32) !void {
 /// Checks:
 ///   1. /proc/<pid> directory exists and is owned by expected_uid (statx)
 ///   2. /proc/<pid>/comm contains "catatonit" (not a recycled process)
+///   3. /proc/<pid>/exe symlink ends with "/catatonit" (cannot be spoofed via prctl)
 fn verifyCatatonitProcess(io: std.Io, pid: std.posix.pid_t, expected_uid: u32) !void {
     // Check 1: Process UID via statx on /proc/<pid>
     var path_buf: [64:0]u8 = undefined;
@@ -461,6 +462,23 @@ fn verifyCatatonitProcess(io: std.Io, pid: std.posix.pid_t, expected_uid: u32) !
     const name = std.mem.trim(u8, read_buf[0..n], " \t\r\n");
     if (!std.mem.eql(u8, name, "catatonit")) {
         log.warn("catatonit comm mismatch: pid={d} expected 'catatonit' got '{s}'", .{ pid, name });
+        return error.CatatonitNotCatatonit;
+    }
+
+    // Check 3: Executable path via /proc/<pid>/exe
+    // Unlike comm (settable via prctl(PR_SET_NAME)), the exe symlink points
+    // to the actual binary path and cannot be changed by the process.
+    var exe_path_buf: [64]u8 = undefined;
+    const exe_path = std.fmt.bufPrint(&exe_path_buf, "/proc/{d}/exe", .{pid}) catch return error.CatatonitVerifyFailed;
+
+    var exe_buf: [std.posix.PATH_MAX]u8 = undefined;
+    const exe_n = std.Io.Dir.readLinkAbsolute(io, exe_path, &exe_buf) catch {
+        log.warn("catatonit exe readlink failed for pid={d}", .{pid});
+        return error.CatatonitProcessGone;
+    };
+    const exe = exe_buf[0..exe_n];
+    if (!std.mem.endsWith(u8, exe, "/catatonit") and !std.mem.endsWith(u8, exe, "/catatonit (deleted)")) {
+        log.warn("catatonit exe mismatch: pid={d} exe='{s}' does not end with /catatonit", .{ pid, exe });
         return error.CatatonitNotCatatonit;
     }
 }
