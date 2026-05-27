@@ -83,12 +83,12 @@ test "AclScanner: scanUids with no directory returns empty" {
 }
 
 /// Helper to create a temporary directory for ACL testing.
-const TestAclDir = struct {
+pub const TestAclDir = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     dir_path: []const u8,
 
-    fn create(io: std.Io, allocator: std.mem.Allocator) !TestAclDir {
+    pub fn create(io: std.Io, allocator: std.mem.Allocator) !TestAclDir {
         var prng = std.Random.DefaultPrng.init(@intCast(std.os.linux.getpid()));
         const rand = prng.random().int(u64);
         const dir_path = try std.fmt.allocPrint(allocator, "/tmp/acl-scan-test-{x:0>16}", .{rand});
@@ -96,7 +96,7 @@ const TestAclDir = struct {
         return TestAclDir{ .io = io, .allocator = allocator, .dir_path = dir_path };
     }
 
-    fn deinit(self: TestAclDir) void {
+    pub fn deinit(self: TestAclDir) void {
         var dir = std.Io.Dir.cwd().openDir(self.io, self.dir_path, .{ .iterate = true }) catch return;
         defer dir.close(self.io);
         var iter = dir.iterate();
@@ -107,7 +107,7 @@ const TestAclDir = struct {
         self.allocator.free(self.dir_path);
     }
 
-    fn writeFile(self: TestAclDir, filename: []const u8, content: []const u8) !void {
+    pub fn writeFile(self: TestAclDir, filename: []const u8, content: []const u8) !void {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const file_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ self.dir_path, filename }) catch return;
         const file = try std.Io.Dir.cwd().createFile(self.io, file_path, .{});

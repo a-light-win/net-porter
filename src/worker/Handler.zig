@@ -111,7 +111,7 @@ pub fn handle(self: *Handler) !void {
         },
         .setup, .teardown => {
             if (request.request != .exec) {
-                log.err("Invalid request: {s} action with non-exec type from uid={d}", .{@tagName(request.action), client_info.uid});
+                log.err("Invalid request: {s} action with non-exec type from uid={d}", .{ @tagName(request.action), client_info.uid });
                 self.responser.writeError("Invalid request", .{});
                 return;
             }

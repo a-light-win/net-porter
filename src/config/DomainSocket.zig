@@ -238,5 +238,3 @@ test "listen rejects symlink path" {
     const result = listen(io, link, uid);
     try std.testing.expectError(error.SymlinkDetected, result);
 }
-
-
