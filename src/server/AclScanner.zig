@@ -49,6 +49,11 @@ pub fn scanUids(self: AclScanner, io: std.Io) std.ArrayList(u32) {
         // Extract username: <name>.json → <name>
         const name = entry.name[0 .. entry.name.len - ".json".len];
 
+        if (!user_mod.isValidUsername(name)) {
+            log.warn("Skipping ACL file with invalid username '{s}'", .{name});
+            continue;
+        }
+
         // Resolve username to UID
         const name_z = self.allocator.dupeZ(u8, name) catch continue;
         defer self.allocator.free(name_z);

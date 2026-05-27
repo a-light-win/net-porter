@@ -518,6 +518,11 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
     };
     errdefer self.allocator.free(username);
 
+    if (!user_mod.isValidUsername(username)) {
+        log.err("Username '{s}' for uid={d} failed validation (possible path traversal), refusing to spawn worker", .{ username, uid });
+        return error.InvalidUsername;
+    }
+
     // Write environment file for the template service to consume
     writeEnvFile(self.io, self.allocator, uid, username, catatonit_pid, self.config_path) catch |err| {
         log.err("Failed to write env file for uid={d}: {s}", .{ uid, @errorName(err) });

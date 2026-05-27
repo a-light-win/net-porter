@@ -31,6 +31,7 @@ const inotify = @import("../utils/Inotify.zig");
 const AclFile = @import("../acl/AclFile.zig");
 const Acl = @import("../acl/Acl.zig");
 const ArenaAllocator = @import("../utils/ArenaAllocator.zig");
+const user_mod = @import("../user.zig");
 const WorkerAclManager = @This();
 
 const max_acl_file_size: usize = 64 * 1024;
@@ -50,6 +51,9 @@ inotify_fd: ?std.posix.fd_t = null,
 mutex: std.Io.Mutex = .init,
 
 pub fn init(allocator: Allocator, io: std.Io, acl_dir: []const u8, username: []const u8, uid: u32) WorkerAclManager {
+    if (!user_mod.isValidUsername(username)) {
+        log.err("Invalid username '{s}' (contains disallowed characters), ACL loading will fail", .{username});
+    }
     return .{
         .arena = ArenaAllocator.init(allocator) catch unreachable,
         .allocator = allocator,
