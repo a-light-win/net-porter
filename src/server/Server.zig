@@ -144,7 +144,15 @@ pub fn run(self: *Server) !void {
             self.worker_manager.processPollEvents(poll_buf[fixed_fds .. fixed_fds + wm_fds.len]);
         }
 
-        // Process uid_tracker inotify events (index 0)
+        // Process acl_watcher inotify events FIRST (index 1)
+        // so ACL changes take effect before /run/user/ events
+        if (has_acl_watch and poll_buf[acl_fd_index].revents & std.posix.POLL.IN != 0) {
+            if (self.acl_watcher.processInotifyEvents(&event_buf)) {
+                self.handleAclChange();
+            }
+        }
+
+        // Process uid_tracker inotify events SECOND (index 0)
         if (poll_buf[0].revents & std.posix.POLL.IN != 0) {
             var uid_events = self.uid_tracker.processInotifyEvents(&event_buf);
             // Start workers for newly appeared UIDs (batch — also scans pending UIDs)
@@ -156,13 +164,6 @@ pub fn run(self: *Server) !void {
                 self.worker_manager.stopWorker(uid);
             }
             uid_events.deinit(self.uid_tracker.allocator);
-        }
-
-        // Process acl_watcher inotify events (index 1)
-        if (has_acl_watch and poll_buf[acl_fd_index].revents & std.posix.POLL.IN != 0) {
-            if (self.acl_watcher.processInotifyEvents(&event_buf)) {
-                self.handleAclChange();
-            }
         }
 
         // Process retry timeout
@@ -185,7 +186,17 @@ fn syncWorkers(self: *Server) void {
 /// Handle a detected change in the ACL directory.
 /// Re-scans UIDs, updates the allowed list, and starts/stops workers as needed.
 fn handleAclChange(self: *Server) void {
-    const new_uids = self.acl_manager.scanUids(self.io);
+    var new_uids = self.acl_manager.scanUids(self.io);
+
+    // Guard: if scan returns empty but old list was non-empty, assume
+    // transient failure (e.g. ACL directory temporarily unavailable).
+    // This prevents wiping all workers due to a fleeting I/O error.
+    if (new_uids.items.len == 0 and self.uid_tracker.allowed_uids.items.len > 0) {
+        log.warn("ACL scan returned empty but {} UIDs were allowed, skipping update (possible transient failure)", .{self.uid_tracker.allowed_uids.items.len});
+        new_uids.deinit(self.uid_tracker.allocator);
+        return;
+    }
+
     var delta = self.uid_tracker.updateAllowedUids(new_uids);
     defer delta.deinit(self.uid_tracker.allocator);
 
@@ -208,4 +219,103 @@ fn handleAclChange(self: *Server) void {
             self.worker_manager.ensureWorkers(active_added.items);
         }
     }
+}
+
+test "handleAclChange updates allowed UIDs from ACL scan" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var test_dir = try AclScanner.TestAclDir.create(io, allocator);
+    defer test_dir.deinit();
+
+    // Create root.json which resolves to uid 0
+    try test_dir.writeFile("root.json", "{}");
+
+    // Start with a different allowed UID
+    var allowed_uids = std.ArrayList(u32).initCapacity(allocator, 1) catch return error.Unexpected;
+    allowed_uids.appendAssumeCapacity(9999);
+
+    // Add an active entry for root (uid 0)
+    var entries = std.ArrayList(UidTracker.UidEntry).initCapacity(allocator, 1) catch return error.Unexpected;
+    entries.appendAssumeCapacity(.{ .uid = 0 });
+
+    var server = Server{
+        .config = config_mod.Config{ .acl_dir = test_dir.dir_path },
+        .io = io,
+        .acl_manager = AclScanner.init(allocator, test_dir.dir_path),
+        .acl_watcher = AclWatcher{
+            .allocator = allocator,
+            .io = io,
+            .acl_dir = test_dir.dir_path,
+            .inotify_fd = null,
+        },
+        .worker_manager = WorkerManager.init(io, allocator, null),
+        .uid_tracker = UidTracker{
+            .allocator = allocator,
+            .io = io,
+            .allowed_uids = allowed_uids,
+            .entries = entries,
+            .inotify_fd = -1,
+        },
+        .managed_config = config_mod.ManagedConfig{ .config = config_mod.Config{} },
+    };
+    defer server.deinit();
+
+    // Before: 9999 is allowed, 0 is active but not allowed
+    try std.testing.expect(server.uid_tracker.isUidAllowed(9999));
+    try std.testing.expect(!server.uid_tracker.isUidAllowed(0));
+    try std.testing.expect(server.uid_tracker.isUidActive(0));
+
+    // Re-scan ACLs
+    server.handleAclChange();
+
+    // After: 0 should be allowed, 9999 removed
+    try std.testing.expect(!server.uid_tracker.isUidAllowed(9999));
+    try std.testing.expect(server.uid_tracker.isUidAllowed(0));
+    try std.testing.expect(server.uid_tracker.isUidActive(0));
+}
+
+test "handleAclChange preserves UIDs on empty scan result" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var test_dir = try AclScanner.TestAclDir.create(io, allocator);
+    defer test_dir.deinit();
+
+    // No ACL files - directory is empty
+
+    var allowed_uids = std.ArrayList(u32).initCapacity(allocator, 2) catch return error.Unexpected;
+    allowed_uids.appendAssumeCapacity(1000);
+    allowed_uids.appendAssumeCapacity(2000);
+
+    var server = Server{
+        .config = config_mod.Config{ .acl_dir = test_dir.dir_path },
+        .io = io,
+        .acl_manager = AclScanner.init(allocator, test_dir.dir_path),
+        .acl_watcher = AclWatcher{
+            .allocator = allocator,
+            .io = io,
+            .acl_dir = test_dir.dir_path,
+            .inotify_fd = null,
+        },
+        .worker_manager = WorkerManager.init(io, allocator, null),
+        .uid_tracker = UidTracker{
+            .allocator = allocator,
+            .io = io,
+            .allowed_uids = allowed_uids,
+            .entries = std.ArrayList(UidTracker.UidEntry).empty,
+            .inotify_fd = -1,
+        },
+        .managed_config = config_mod.ManagedConfig{ .config = config_mod.Config{} },
+    };
+    defer server.deinit();
+
+    try std.testing.expect(server.uid_tracker.isUidAllowed(1000));
+    try std.testing.expect(server.uid_tracker.isUidAllowed(2000));
+
+    server.handleAclChange();
+
+    // Empty scan with existing UIDs: guard kicks in, UIDs preserved
+    try std.testing.expect(server.uid_tracker.isUidAllowed(1000));
+    try std.testing.expect(server.uid_tracker.isUidAllowed(2000));
 }
