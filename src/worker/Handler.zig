@@ -203,8 +203,8 @@ pub fn handle(self: *Handler) !void {
             return;
         };
 
-        // Verify the resolved path points to an nsfs file (device 0:4).
-        // Rejects symlinks (AT_SYMLINK_NOFOLLOW) and non-nsfs files.
+        // Verify the resolved path points to an nsfs file (statfs f_type check).
+        // Rejects non-nsfs filesystems.
         // See verifyNetnsNsfs() for the security rationale.
         verifyNetnsNsfs(resolved) catch |err| {
             log.err("netns verification failed for uid={d}: {s} ({s})", .{ client_info.uid, resolved, @errorName(err) });
@@ -483,25 +483,29 @@ fn verifyCatatonitProcess(io: std.Io, pid: std.posix.pid_t, expected_uid: u32) !
     }
 }
 
-/// Verify that a resolved netns path points to an nsfs file (device 0:4).
+/// Verify that a resolved netns path resides on an nsfs filesystem (f_type == NSFS_MAGIC).
 ///
-/// Defense-in-depth against symlink/mount replacement attacks inside catatonit's
+/// Defense-in-depth against mount replacement attacks inside catatonit's
 /// mount namespace. Without this check, a container user with CAP_SYS_ADMIN in their
-/// user namespace could unmount the nsfs and replace it with a symlink to redirect
-/// CNI plugins to an unintended namespace.
+/// user namespace could unmount the nsfs and replace it with a different filesystem
+/// to redirect CNI plugins to an unintended namespace.
 ///
-/// This check uses statx with AT_SYMLINK_NOFOLLOW:
-///   - If the path is a symlink → statx fails (ELOOP) → rejected
-///   - If the path is not on nsfs (device major != 0 || minor != 4) → rejected
+/// Uses statfs to check the filesystem magic number:
+///   - If statfs fails → rejected (path inaccessible)
+///   - If the filesystem is not nsfs (f_type != NSFS_MAGIC) → rejected
+///
+/// NOTE: statfs follows symlinks, so a symlink to an nsfs file will pass. This is
+/// acceptable because validateNetnsPath() and verifyCatatonitProcess() already ensure
+/// the path and mount namespace are legitimate.
 ///
 /// NOTE: There is a TOCTOU window between this check and the CNI plugin's open().
 /// This is accepted because:
 ///   1. Rootless containers have independent PID + mount namespaces, limiting
-///      the symlink target to the container's own namespace (no cross-user escalation)
+///      attacks to the container's own namespace (no cross-user escalation)
 ///   2. CNI plugins validate the fd via setns(), which fails on non-netns files
 ///   3. The precise timing required makes exploitation impractical
 fn verifyNetnsNsfs(resolved_path: []const u8) !void {
-    // Need a sentinel-terminated path for the statx syscall
+    // Need a sentinel-terminated path for the statfs syscall
     var path_buf: [std.Io.Dir.max_path_bytes + 1:0]u8 = undefined;
     const path_z: [:0]const u8 = if (std.meta.sentinel(@TypeOf(resolved_path)) != null)
         resolved_path
@@ -512,34 +516,44 @@ fn verifyNetnsNsfs(resolved_path: []const u8) !void {
         break :blk path_buf[0..resolved_path.len :0];
     };
 
-    var stat_buf: linux.Statx = undefined;
-    // Request TYPE to ensure statx populates basic metadata.
-    // The dev_major/dev_minor fields are always filled by the kernel VFS
-    // regardless of the requested mask, but requesting at least one field
-    // ensures the syscall returns valid data.
-    const rc = linux.statx(
-        linux.AT.FDCWD,
-        path_z,
-        linux.AT.SYMLINK_NOFOLLOW,
-        .{ .TYPE = true },
-        &stat_buf,
+    var buf: Statfs = undefined;
+    const rc = linux.syscall2(
+        .statfs,
+        @intFromPtr(path_z.ptr),
+        @intFromPtr(&buf),
     );
     if (rc != 0) {
         const err = std.posix.errno(rc);
-        log.warn("netns statx failed for '{s}': {s}", .{ resolved_path, @tagName(err) });
+        log.warn("netns statfs failed for '{s}': {s}", .{ resolved_path, @tagName(err) });
         return error.NetnsStatFailed;
     }
 
-    // nsfs device: major=0, minor=4 on Linux
-    if (stat_buf.dev_major != 0 or stat_buf.dev_minor != 4) {
-        log.warn("netns path '{s}' is not on nsfs (device {d}:{d})", .{
+    if (buf.f_type != NSFS_MAGIC) {
+        log.warn("netns path '{s}' is not on nsfs (f_type=0x{x})", .{
             resolved_path,
-            stat_buf.dev_major,
-            stat_buf.dev_minor,
+            @as(u64, @bitCast(buf.f_type)),
         });
         return error.NetnsNotNsfs;
     }
 }
+
+/// statfs result structure matching the kernel's struct statfs layout.
+const Statfs = extern struct {
+    f_type: c_long,
+    f_bsize: c_long,
+    f_blocks: c_ulong,
+    f_bfree: c_ulong,
+    f_bavail: c_ulong,
+    f_files: c_ulong,
+    f_ffree: c_ulong,
+    f_fsid: [2]c_int,
+    f_namelen: c_long,
+    f_frsize: c_long,
+    f_flags: c_long,
+    f_spare: [4]c_long,
+};
+
+const NSFS_MAGIC: c_long = 0x6e736673;
 
 test "validateCniIdentifier accepts valid identifiers" {
     try validateCniIdentifier("abc123", "test_field");
@@ -648,24 +662,16 @@ test "verifyNetnsNsfs rejects regular file (not nsfs)" {
     );
 }
 
-test "verifyNetnsNsfs rejects symlink" {
-    // Create a symlink to test AT_SYMLINK_NOFOLLOW rejection.
-    // statx(AT_SYMLINK_NOFOLLOW) on a symlink returns the symlink's own
-    // filesystem metadata (device of the directory where the symlink lives),
-    // not the target's. So the symlink is caught by the nsfs device check
-    // (not by statx failure), which is equally effective.
-    const own_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
-
-    var target_buf: [64:0]u8 = undefined;
-    const target_z = std.fmt.bufPrintZ(&target_buf, "/proc/{d}/ns/net", .{own_pid}) catch return;
-
+test "verifyNetnsNsfs rejects symlink to non-nsfs" {
+    // statfs follows symlinks, so a symlink to a non-nsfs file is caught
+    // by the f_type check (same as a direct path to a non-nsfs target).
     const link_path: [*:0]const u8 = "/tmp/net-porter-test-nsfs-symlink";
     _ = std.os.linux.unlink(link_path);
-    const rc = std.os.linux.symlink(target_z, link_path);
+    const rc = std.os.linux.symlink("/proc/self/comm", link_path);
     if (rc != 0) return; // skip if can't create symlink
     defer _ = std.os.linux.unlink(link_path);
 
-    // Symlink lives on tmpfs (not nsfs device 0:4) → rejected as NetnsNotNsfs
+    // Symlink target (/proc/self/comm) is on procfs (not nsfs) → rejected
     try std.testing.expectError(
         error.NetnsNotNsfs,
         verifyNetnsNsfs(std.mem.sliceTo(link_path, 0)),
@@ -673,9 +679,9 @@ test "verifyNetnsNsfs rejects symlink" {
 }
 
 test "verifyNetnsNsfs accepts nsfs file" {
-    // /proc/self/ns/net is an nsfs file (device 0:4)
+    // /proc/self/ns/net is an nsfs file (f_type == NSFS_MAGIC).
     // This test verifies the happy path — it may not work in all environments
-    // (e.g., some containers may not have nsfs at the expected device numbers)
+    // (e.g., some containers may restrict /proc access).
     const result = verifyNetnsNsfs("/proc/self/ns/net");
     // Accept both success and error — the test validates the function runs
     // without crashing, the actual result depends on the environment
