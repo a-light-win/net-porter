@@ -27,7 +27,7 @@ pub const UidEvents = struct {
 };
 
 /// Tracked UID entry — a UID with an active /run/user/<uid>/ directory.
-const UidEntry = struct {
+pub const UidEntry = struct {
     uid: std.posix.uid_t,
 };
 
@@ -146,13 +146,23 @@ pub const UidDelta = struct {
 /// Returns the delta of added and removed UIDs.
 /// The caller must deinit the returned delta lists.
 pub fn updateAllowedUids(self: *UidTracker, new_uids: std.ArrayList(u32)) UidDelta {
-    var added = std.ArrayList(u32).initCapacity(self.allocator, 8) catch return .{ .added = .empty, .removed = .empty };
-    var removed = std.ArrayList(u32).initCapacity(self.allocator, 8) catch return .{ .added = .empty, .removed = .empty };
+    // Zig function params are const; local mutable copy for ownership transfer
+    var new_uids_owned = new_uids;
+    // Upper bounds: added <= new_uids.len, removed <= old_uids.len
+    var added = std.ArrayList(u32).initCapacity(self.allocator, new_uids_owned.items.len) catch {
+        new_uids_owned.deinit(self.allocator);
+        return .{ .added = .empty, .removed = .empty };
+    };
+    var removed = std.ArrayList(u32).initCapacity(self.allocator, self.allowed_uids.items.len) catch {
+        added.deinit(self.allocator);
+        new_uids_owned.deinit(self.allocator);
+        return .{ .added = .empty, .removed = .empty };
+    };
 
     var old_uids = self.allowed_uids;
 
     // Find UIDs in new list that are not in old list (added)
-    for (new_uids.items) |uid| {
+    for (new_uids_owned.items) |uid| {
         var found = false;
         for (old_uids.items) |old| {
             if (old == uid) {
@@ -168,7 +178,7 @@ pub fn updateAllowedUids(self: *UidTracker, new_uids: std.ArrayList(u32)) UidDel
     // Find UIDs in old list that are not in new list (removed)
     for (old_uids.items) |uid| {
         var found = false;
-        for (new_uids.items) |new_uid| {
+        for (new_uids_owned.items) |new_uid| {
             if (new_uid == uid) {
                 found = true;
                 break;
@@ -181,10 +191,10 @@ pub fn updateAllowedUids(self: *UidTracker, new_uids: std.ArrayList(u32)) UidDel
 
     // Swap: deinit old, store new
     old_uids.deinit(self.allocator);
-    self.allowed_uids = new_uids;
+    self.allowed_uids = new_uids_owned;
 
     if (added.items.len > 0 or removed.items.len > 0) {
-        log.info("ACL update: {} added, {} removed, {} total allowed", .{ added.items.len, removed.items.len, new_uids.items.len });
+        log.info("ACL update: {} added, {} removed, {} total allowed", .{ added.items.len, removed.items.len, new_uids_owned.items.len });
     }
 
     return .{ .added = added, .removed = removed };
@@ -216,8 +226,8 @@ pub fn processInotifyEvents(self: *UidTracker, event_buf: []u8) UidEvents {
 
         var offset: usize = 0;
         while (offset < n) {
-            const event_ptr: *align(4) std.os.linux.inotify_event = @ptrCast(@alignCast(event_buf[offset..].ptr));
-            const event = event_ptr.*;
+            var event: std.os.linux.inotify_event = undefined;
+            @memcpy(std.mem.asBytes(&event), event_buf[offset..][0..@sizeOf(std.os.linux.inotify_event)]);
             offset += @sizeOf(std.os.linux.inotify_event) + event.len;
 
             if (event.len == 0) continue;
@@ -300,4 +310,266 @@ test "isUidActive returns false when no entries" {
     }
 
     try std.testing.expect(!tracker.isUidActive(1000));
+}
+
+test "updateAllowedUids with no change returns empty deltas" {
+    const allocator = std.testing.allocator;
+
+    var old_uids = std.ArrayList(u32).initCapacity(allocator, 2) catch return error.Unexpected;
+    old_uids.appendAssumeCapacity(1000);
+    old_uids.appendAssumeCapacity(2000);
+
+    var tracker = UidTracker{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .allowed_uids = old_uids,
+        .entries = std.ArrayList(UidEntry).empty,
+        .inotify_fd = -1,
+    };
+    defer {
+        tracker.entries.deinit(allocator);
+        tracker.allowed_uids.deinit(allocator);
+    }
+
+    var new_uids = std.ArrayList(u32).initCapacity(allocator, 2) catch return error.Unexpected;
+    new_uids.appendAssumeCapacity(1000);
+    new_uids.appendAssumeCapacity(2000);
+
+    var delta = tracker.updateAllowedUids(new_uids);
+    defer delta.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), delta.added.items.len);
+    try std.testing.expectEqual(@as(usize, 0), delta.removed.items.len);
+    try std.testing.expectEqual(@as(usize, 2), tracker.allowed_uids.items.len);
+}
+
+test "updateAllowedUids with only additions" {
+    const allocator = std.testing.allocator;
+
+    var old_uids = std.ArrayList(u32).initCapacity(allocator, 1) catch return error.Unexpected;
+    old_uids.appendAssumeCapacity(1000);
+
+    var tracker = UidTracker{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .allowed_uids = old_uids,
+        .entries = std.ArrayList(UidEntry).empty,
+        .inotify_fd = -1,
+    };
+    defer {
+        tracker.entries.deinit(allocator);
+        tracker.allowed_uids.deinit(allocator);
+    }
+
+    var new_uids = std.ArrayList(u32).initCapacity(allocator, 3) catch return error.Unexpected;
+    new_uids.appendAssumeCapacity(1000);
+    new_uids.appendAssumeCapacity(2000);
+    new_uids.appendAssumeCapacity(3000);
+
+    var delta = tracker.updateAllowedUids(new_uids);
+    defer delta.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), delta.added.items.len);
+    try std.testing.expectEqual(@as(u32, 2000), delta.added.items[0]);
+    try std.testing.expectEqual(@as(u32, 3000), delta.added.items[1]);
+    try std.testing.expectEqual(@as(usize, 0), delta.removed.items.len);
+}
+
+test "updateAllowedUids with only removals" {
+    const allocator = std.testing.allocator;
+
+    var old_uids = std.ArrayList(u32).initCapacity(allocator, 3) catch return error.Unexpected;
+    old_uids.appendAssumeCapacity(1000);
+    old_uids.appendAssumeCapacity(2000);
+    old_uids.appendAssumeCapacity(3000);
+
+    var tracker = UidTracker{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .allowed_uids = old_uids,
+        .entries = std.ArrayList(UidEntry).empty,
+        .inotify_fd = -1,
+    };
+    defer {
+        tracker.entries.deinit(allocator);
+        tracker.allowed_uids.deinit(allocator);
+    }
+
+    var new_uids = std.ArrayList(u32).initCapacity(allocator, 1) catch return error.Unexpected;
+    new_uids.appendAssumeCapacity(1000);
+
+    var delta = tracker.updateAllowedUids(new_uids);
+    defer delta.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), delta.added.items.len);
+    try std.testing.expectEqual(@as(usize, 2), delta.removed.items.len);
+    try std.testing.expectEqual(@as(u32, 2000), delta.removed.items[0]);
+    try std.testing.expectEqual(@as(u32, 3000), delta.removed.items[1]);
+}
+
+test "updateAllowedUids with empty old list adds all as new" {
+    const allocator = std.testing.allocator;
+
+    const old_uids = std.ArrayList(u32).empty;
+
+    var tracker = UidTracker{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .allowed_uids = old_uids,
+        .entries = std.ArrayList(UidEntry).empty,
+        .inotify_fd = -1,
+    };
+    defer {
+        tracker.entries.deinit(allocator);
+        tracker.allowed_uids.deinit(allocator);
+    }
+
+    var new_uids = std.ArrayList(u32).initCapacity(allocator, 2) catch return error.Unexpected;
+    new_uids.appendAssumeCapacity(1000);
+    new_uids.appendAssumeCapacity(2000);
+
+    var delta = tracker.updateAllowedUids(new_uids);
+    defer delta.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), delta.added.items.len);
+    try std.testing.expectEqual(@as(usize, 0), delta.removed.items.len);
+}
+
+test "updateAllowedUids with empty new list removes all old" {
+    const allocator = std.testing.allocator;
+
+    var old_uids = std.ArrayList(u32).initCapacity(allocator, 2) catch return error.Unexpected;
+    old_uids.appendAssumeCapacity(1000);
+    old_uids.appendAssumeCapacity(2000);
+
+    var tracker = UidTracker{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .allowed_uids = old_uids,
+        .entries = std.ArrayList(UidEntry).empty,
+        .inotify_fd = -1,
+    };
+    defer {
+        tracker.entries.deinit(allocator);
+        tracker.allowed_uids.deinit(allocator);
+    }
+
+    const new_uids = std.ArrayList(u32).empty;
+
+    var delta = tracker.updateAllowedUids(new_uids);
+    defer delta.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), delta.added.items.len);
+    try std.testing.expectEqual(@as(usize, 2), delta.removed.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tracker.allowed_uids.items.len);
+}
+
+test "updateAllowedUids mixed add and remove with overlap" {
+    const allocator = std.testing.allocator;
+
+    var old_uids = std.ArrayList(u32).initCapacity(allocator, 3) catch return error.Unexpected;
+    old_uids.appendAssumeCapacity(1000);
+    old_uids.appendAssumeCapacity(2000);
+    old_uids.appendAssumeCapacity(3000);
+
+    var tracker = UidTracker{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .allowed_uids = old_uids,
+        .entries = std.ArrayList(UidEntry).empty,
+        .inotify_fd = -1,
+    };
+    defer {
+        tracker.entries.deinit(allocator);
+        tracker.allowed_uids.deinit(allocator);
+    }
+
+    // Keep 2000, remove 1000 and 3000, add 4000 and 5000
+    var new_uids = std.ArrayList(u32).initCapacity(allocator, 3) catch return error.Unexpected;
+    new_uids.appendAssumeCapacity(2000);
+    new_uids.appendAssumeCapacity(4000);
+    new_uids.appendAssumeCapacity(5000);
+
+    var delta = tracker.updateAllowedUids(new_uids);
+    defer delta.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), delta.added.items.len);
+    try std.testing.expectEqual(@as(u32, 4000), delta.added.items[0]);
+    try std.testing.expectEqual(@as(u32, 5000), delta.added.items[1]);
+
+    try std.testing.expectEqual(@as(usize, 2), delta.removed.items.len);
+    try std.testing.expectEqual(@as(u32, 1000), delta.removed.items[0]);
+    try std.testing.expectEqual(@as(u32, 3000), delta.removed.items[1]);
+
+    try std.testing.expectEqual(@as(usize, 3), tracker.allowed_uids.items.len);
+    try std.testing.expect(tracker.isUidAllowed(2000));
+    try std.testing.expect(tracker.isUidAllowed(4000));
+    try std.testing.expect(tracker.isUidAllowed(5000));
+    try std.testing.expect(!tracker.isUidAllowed(1000));
+    try std.testing.expect(!tracker.isUidAllowed(3000));
+}
+
+test "isUidActive returns true for tracked UIDs" {
+    const allocator = std.testing.allocator;
+
+    var entries = std.ArrayList(UidEntry).initCapacity(allocator, 2) catch return error.Unexpected;
+    entries.appendAssumeCapacity(.{ .uid = 1000 });
+    entries.appendAssumeCapacity(.{ .uid = 2000 });
+
+    var tracker = UidTracker{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .allowed_uids = .empty,
+        .entries = entries,
+        .inotify_fd = -1,
+    };
+    defer tracker.entries.deinit(allocator);
+
+    try std.testing.expect(tracker.isUidActive(1000));
+    try std.testing.expect(tracker.isUidActive(2000));
+}
+
+test "isUidActive returns false for non-tracked UIDs" {
+    const allocator = std.testing.allocator;
+
+    var entries = std.ArrayList(UidEntry).initCapacity(allocator, 1) catch return error.Unexpected;
+    entries.appendAssumeCapacity(.{ .uid = 1000 });
+
+    var tracker = UidTracker{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .allowed_uids = .empty,
+        .entries = entries,
+        .inotify_fd = -1,
+    };
+    defer tracker.entries.deinit(allocator);
+
+    try std.testing.expect(!tracker.isUidActive(2000));
+    try std.testing.expect(!tracker.isUidActive(3000));
+    try std.testing.expect(!tracker.isUidActive(0));
+}
+
+test "isUidAllowed returns true for allowed UIDs" {
+    const allocator = std.testing.allocator;
+
+    var allowed = std.ArrayList(u32).initCapacity(allocator, 2) catch return error.Unexpected;
+    allowed.appendAssumeCapacity(1000);
+    allowed.appendAssumeCapacity(2000);
+
+    var tracker = UidTracker{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .allowed_uids = allowed,
+        .entries = std.ArrayList(UidEntry).empty,
+        .inotify_fd = -1,
+    };
+    defer {
+        tracker.entries.deinit(allocator);
+        tracker.allowed_uids.deinit(allocator);
+    }
+
+    try std.testing.expect(tracker.isUidAllowed(1000));
+    try std.testing.expect(tracker.isUidAllowed(2000));
+    try std.testing.expect(!tracker.isUidAllowed(3000));
+    try std.testing.expect(!tracker.isUidAllowed(0));
 }
