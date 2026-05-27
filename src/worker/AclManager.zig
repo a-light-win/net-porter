@@ -260,11 +260,14 @@ pub fn processInotifyEvents(self: *WorkerAclManager, event_buf: []u8) bool {
 
         var offset: usize = 0;
         while (offset < n) {
-            const event_ptr: *align(4) std.os.linux.inotify_event = @ptrCast(@alignCast(event_buf[offset..].ptr));
-            const event = event_ptr.*;
+            if (offset + @sizeOf(std.os.linux.inotify_event) > n) break;
+
+            var event: std.os.linux.inotify_event = undefined;
+            @memcpy(std.mem.asBytes(&event), event_buf[offset..][0..@sizeOf(std.os.linux.inotify_event)]);
             offset += @sizeOf(std.os.linux.inotify_event) + event.len;
 
             if (event.len == 0) continue;
+            if (offset > n) break;
 
             const name_start = offset - event.len;
             const name = std.mem.sliceTo(event_buf[name_start..], 0);
