@@ -211,8 +211,12 @@ pub fn isUidActive(self: UidTracker, uid: u32) bool {
 /// Process pending inotify events.
 /// Returns UIDs that appeared/disappeared.
 pub fn processInotifyEvents(self: *UidTracker, event_buf: []u8) UidEvents {
-    var created = std.ArrayList(u32).initCapacity(self.allocator, 8) catch return .{ .created = .empty, .removed = .empty };
-    var removed = std.ArrayList(u32).initCapacity(self.allocator, 8) catch return .{ .created = .empty, .removed = .empty };
+    const max_events = event_buf.len / @sizeOf(std.os.linux.inotify_event);
+    var created = std.ArrayList(u32).initCapacity(self.allocator, max_events) catch return .{ .created = .empty, .removed = .empty };
+    var removed = std.ArrayList(u32).initCapacity(self.allocator, max_events) catch {
+        created.deinit(self.allocator);
+        return .{ .created = .empty, .removed = .empty };
+    };
 
     while (true) {
         const n = std.posix.read(self.inotify_fd, event_buf) catch |err| switch (err) {
