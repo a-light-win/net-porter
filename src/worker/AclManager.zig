@@ -56,7 +56,7 @@ pub fn init(allocator: Allocator, io: std.Io, acl_dir: []const u8, username: []c
         return error.InvalidUsername;
     }
     return .{
-        .arena = ArenaAllocator.init(allocator) catch unreachable,
+        .arena = try ArenaAllocator.init(allocator),
         .allocator = allocator,
         .io = io,
         .acl_dir = acl_dir,
