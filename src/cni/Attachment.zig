@@ -93,7 +93,8 @@ pub const Attachment = struct {
     fn appendExecConfig(self: *Attachment, allocator: Allocator, cni_config: CniConfig, cni_plugin: json.Value) !void {
         switch (cni_plugin) {
             .object => |obj| {
-                const exec_config = try PluginConf.init(allocator, cni_config, obj);
+                var exec_config = try PluginConf.init(allocator, cni_config, obj);
+                errdefer exec_config.deinit();
                 try self.exec_configs.append(allocator, exec_config);
             },
             else => return,
@@ -233,7 +234,7 @@ pub const Attachment = struct {
         try responseResult(
             tentative_allocator,
             responser,
-            self.finalResult(.last).?,
+            self.finalResult(.last) orelse return error.NoExecConfigs,
         );
     }
 
