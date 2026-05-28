@@ -23,6 +23,7 @@
 //!   - Per-request netns nsfs verification (statfs NSFS_MAGIC)
 
 const std = @import("std");
+const linux = std.os.linux;
 const config_mod = @import("../config.zig");
 const version = @import("build_options").version;
 const AclManager = @import("AclManager.zig");
@@ -58,6 +59,8 @@ server: std.Io.net.Server,
 socket_path: [:0]const u8,
 managed_config: config_mod.ManagedConfig,
 active_handlers: std.atomic.Value(usize) = .init(0),
+acl_thread: ?std.Thread = null,
+shutdown_pipe: [2]std.posix.fd_t = .{ -1, -1 },
 
 /// Initialize the worker. Performs all setup in the correct order:
 /// load config → create socket → namespace setup → init subsystems.
@@ -128,6 +131,18 @@ pub fn new(opts: Opts) !Worker {
 pub fn deinit(self: *Worker) void {
     log.info("Worker shutting down for uid={d}", .{self.uid});
 
+    // Signal and join ACL watch thread before freeing any resources it accesses.
+    // Order: signal -> join -> close pipe fds -> release shared resources.
+    if (self.acl_thread) |thread| {
+        const signal = "x";
+        _ = linux.write(self.shutdown_pipe[1], signal.ptr, signal.len);
+        thread.join();
+        _ = linux.close(self.shutdown_pipe[0]);
+        _ = linux.close(self.shutdown_pipe[1]);
+        self.shutdown_pipe = .{ -1, -1 };
+        self.acl_thread = null;
+    }
+
     // Stop DHCP service first
     self.dhcp_service.deinit();
 
@@ -146,11 +161,22 @@ pub fn run(self: *Worker) !void {
     log.info("net-porter worker {s} started for uid={d} (username={s}, catatonit_pid={d})", .{ version, self.uid, self.username, self.catatonit_pid });
     const log_response = self.config.log.logEnabled(.debug, .traffic);
 
-    // Start ACL inotify watch thread (daemon thread, outlives worker)
+    // Start ACL inotify watch thread with shutdown pipe for clean teardown.
     if (self.acl_manager.getInotifyFd()) |_| {
-        _ = std.Thread.spawn(.{}, aclWatchLoop, .{self}) catch |err| {
-            log.warn("Failed to start ACL watch thread: {s} (ACL hot-reload disabled)", .{@errorName(err)});
-        };
+        var pipe_fds: [2]std.posix.fd_t = undefined;
+        if (linux.pipe(&pipe_fds) == 0) {
+            self.shutdown_pipe = pipe_fds;
+            if (std.Thread.spawn(.{}, aclWatchLoop, .{self})) |thread| {
+                self.acl_thread = thread;
+            } else |err| {
+                log.warn("Failed to start ACL watch thread: {s} (ACL hot-reload disabled)", .{@errorName(err)});
+                _ = linux.close(self.shutdown_pipe[0]);
+                _ = linux.close(self.shutdown_pipe[1]);
+                self.shutdown_pipe = .{ -1, -1 };
+            }
+        } else {
+            log.warn("Failed to create shutdown pipe (ACL hot-reload disabled)", .{});
+        }
     }
 
     while (true) {
@@ -167,17 +193,31 @@ pub fn run(self: *Worker) !void {
             continue;
         }
 
-        const handler = try std.heap.page_allocator.create(Handler);
-        handler.* = Handler{
+        const handler = std.heap.page_allocator.create(Handler) catch |err| {
+            log.err("Failed to allocate handler: {s}", .{@errorName(err)});
+            conn_stream.close(io);
+            _ = self.active_handlers.fetchSub(1, .release);
+            continue;
+        };
+
+        const arena = ArenaAllocator.init(std.heap.page_allocator) catch |err| {
+            log.err("Failed to init handler arena: {s}", .{@errorName(err)});
+            std.heap.page_allocator.destroy(handler);
+            conn_stream.close(io);
+            _ = self.active_handlers.fetchSub(1, .release);
+            continue;
+        };
+
+        handler.* = .{
             .io = io,
-            .arena = try ArenaAllocator.init(std.heap.page_allocator),
+            .arena = arena,
             .acl_manager = &self.acl_manager,
             .cni_manager = &self.cni_manager,
             .dhcp_service = &self.dhcp_service,
             .config = &self.config,
             .catatonit_pid = self.catatonit_pid,
             .connection = .{ .stream = conn_stream },
-            .responser = Responser{
+            .responser = .{
                 .io = io,
                 .stream = &handler.connection.stream,
                 .log_response = log_response,
@@ -187,7 +227,7 @@ pub fn run(self: *Worker) !void {
         _ = std.Thread.spawn(.{}, handleRequests, .{ handler, &self.active_handlers }) catch |e| {
             _ = self.active_handlers.fetchSub(1, .release);
             log.warn("Failed to spawn handler thread: {s}", .{@errorName(e)});
-            handler.arena.deinit();
+            handler.deinit();
             std.heap.page_allocator.destroy(handler);
             continue;
         };
@@ -195,13 +235,20 @@ pub fn run(self: *Worker) !void {
 }
 
 /// Background thread: watches ACL directory for changes and triggers reload.
+/// Monitors shutdown pipe alongside inotify fd for clean teardown.
 fn aclWatchLoop(self: *Worker) void {
     const fd = self.acl_manager.getInotifyFd() orelse return;
+    const shutdown_fd = self.shutdown_pipe[0];
     var event_buf: [4096]u8 = undefined;
 
-    var poll_fds = [1]std.posix.pollfd{
+    var poll_fds = [2]std.posix.pollfd{
         .{
             .fd = fd,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        },
+        .{
+            .fd = shutdown_fd,
             .events = std.posix.POLL.IN,
             .revents = 0,
         },
@@ -212,6 +259,12 @@ fn aclWatchLoop(self: *Worker) void {
     while (true) {
         const n = std.posix.poll(&poll_fds, -1) catch continue;
         if (n == 0) continue;
+
+        // Shutdown signal takes priority — exit without touching shared state
+        if (poll_fds[1].revents & std.posix.POLL.IN != 0) {
+            log.info("ACL watch thread shutting down for uid={d}", .{self.uid});
+            break;
+        }
 
         if (self.acl_manager.processInotifyEvents(&event_buf)) {
             self.acl_manager.reload();
