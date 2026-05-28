@@ -63,13 +63,12 @@ pub fn write(io: std.Io, allocator: Allocator, uid: u32, container_id: []const u
     defer allocator.free(final_path);
 
     // Generate temp file path with random suffix
-    var prng = blk: {
+    const seed: u64 = seed: {
         var seed_bytes: [8]u8 = undefined;
-        const rc = std.os.linux.getrandom(&seed_bytes, seed_bytes.len, 0);
-        if (rc != seed_bytes.len) return error.Unexpected;
-        const seed = std.mem.readInt(u64, &seed_bytes, .little);
-        break :blk std.Random.DefaultPrng.init(seed);
+        io.random(&seed_bytes);
+        break :seed std.mem.readInt(u64, &seed_bytes, .little);
     };
+    var prng = std.Random.DefaultPrng.init(seed);
     const rand = prng.random().int(u32);
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}/.tmp_{s}_{s}_{x:0>8}", .{
         dir_path,
