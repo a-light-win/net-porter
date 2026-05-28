@@ -39,8 +39,13 @@ pub fn init(io: std.Io, allocator: Allocator, caller_uid: std.posix.uid_t, cni_p
 }
 
 pub fn deinit(self: *DhcpService) void {
-    self.mutex.lock(self.io) catch {};
-    defer self.mutex.unlock(self.io);
+    const locked = blk: {
+        self.mutex.lock(self.io) catch break :blk false;
+        break :blk true;
+    };
+    defer {
+        if (locked) self.mutex.unlock(self.io);
+    }
     self.stop();
 
     self.removeSocketPath();
