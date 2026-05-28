@@ -44,7 +44,7 @@ pub const CniLoader = struct {
             if (entry.kind == .directory) continue;
             if (!std.mem.endsWith(u8, entry.name, ".conf") and !std.mem.endsWith(u8, entry.name, ".conflist")) continue;
 
-            const path = try std.fs.path.join(self.allocator, &[_][]const u8{ self.cni_dir, entry.name });
+            const path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.cni_dir, entry.name });
             defer self.allocator.free(path);
 
             log.debug("Loading CNI config: {s}", .{path});
@@ -120,7 +120,7 @@ pub const CniLoader = struct {
                 return error.InvalidPluginType;
             }
 
-            const plugin_path = try std.fs.path.join(self.allocator, &[_][]const u8{ self.cni_plugin_dir, plugin_type.string });
+            const plugin_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.cni_plugin_dir, plugin_type.string });
             defer self.allocator.free(plugin_path);
 
             std.Io.Dir.cwd().access(self.io, plugin_path, .{ .execute = true }) catch |err| {
