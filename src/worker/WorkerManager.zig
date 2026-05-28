@@ -181,8 +181,9 @@ pub fn injectTestWorker(self: *WorkerManager, uid: u32, username: []const u8) !v
 pub fn processPollEvents(self: *WorkerManager, poll_results: []const std.posix.pollfd) void {
     if (poll_results.len == 0) return;
 
+    const interesting = std.posix.POLL.IN | std.posix.POLL.ERR | std.posix.POLL.HUP;
     for (poll_results, 0..) |pfd, i| {
-        if (pfd.revents & std.posix.POLL.IN != 0) {
+        if (pfd.revents & interesting != 0) {
             const meta = self.monitored_metas.items[i];
             log.info("{s} process died for uid={d} (pidfd event)", .{ @tagName(meta.kind), meta.uid });
             self.stopAndCleanup(meta.uid);
@@ -231,7 +232,7 @@ pub fn retryPending(self: *WorkerManager) void {
     if (found_any) {
         self.backoff_ms = initial_backoff_ms;
     } else {
-        self.backoff_ms = @min(self.backoff_ms * 2, max_backoff_ms);
+        self.backoff_ms = @min(self.backoff_ms *| 2, max_backoff_ms);
     }
 
     if (self.pending_uids.items.len > 0) {
@@ -383,30 +384,36 @@ fn rebuildMonitoredFds(self: *WorkerManager) void {
     while (it.next()) |entry| {
         const e = entry.value_ptr;
 
-        // Catatonit pidfd
+        // Catatonit pidfd — append to both arrays atomically to keep them in sync
         if (e.catatonit_pidfd >= 0) {
             self.monitored_pollfds.append(self.allocator, .{
                 .fd = e.catatonit_pidfd,
                 .events = std.posix.POLL.IN,
                 .revents = 0,
-            }) catch {};
+            }) catch continue;
             self.monitored_metas.append(self.allocator, .{
                 .uid = e.uid,
                 .kind = .catatonit,
-            }) catch {};
+            }) catch {
+                _ = self.monitored_pollfds.pop();
+                continue;
+            };
         }
 
-        // Worker pidfd
+        // Worker pidfd — append to both arrays atomically to keep them in sync
         if (e.pidfd >= 0) {
             self.monitored_pollfds.append(self.allocator, .{
                 .fd = e.pidfd,
                 .events = std.posix.POLL.IN,
                 .revents = 0,
-            }) catch {};
+            }) catch continue;
             self.monitored_metas.append(self.allocator, .{
                 .uid = e.uid,
                 .kind = .worker,
-            }) catch {};
+            }) catch {
+                _ = self.monitored_pollfds.pop();
+                continue;
+            };
         }
     }
 }
@@ -607,6 +614,7 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
     self.workers.put(uid, entry) catch {
         if (worker_pidfd >= 0) _ = linux.close(worker_pidfd);
         if (catatonit_pidfd >= 0) _ = linux.close(catatonit_pidfd);
+        self.allocator.free(username);
         return error.OutOfMemory;
     };
     self.rebuildMonitoredFds();
@@ -735,6 +743,7 @@ fn tryAdoptExistingService(self: *WorkerManager, uid: u32, catatonit_pid: std.po
     self.workers.put(uid, entry) catch {
         _ = linux.close(worker_pidfd);
         if (catatonit_pidfd >= 0) _ = linux.close(catatonit_pidfd);
+        self.allocator.free(username);
         return false;
     };
     self.rebuildMonitoredFds();
