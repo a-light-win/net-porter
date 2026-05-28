@@ -178,8 +178,8 @@ pub const Request = struct {
     user_id: ?std.posix.uid_t = null,
     raw_request: ?[]const u8 = null,
 
-    pub fn resource(self: Request) []const u8 {
-        return self.network().options.resolveResource() catch unreachable;
+    pub fn resource(self: Request) ![]const u8 {
+        return try self.network().options.resolveResource();
     }
 
     pub fn network(self: Request) Network {
@@ -189,9 +189,9 @@ pub const Request = struct {
         };
     }
 
-    pub fn requestExec(self: Request) NetworkPluginExec {
+    pub fn requestExec(self: Request) !NetworkPluginExec {
         return switch (self.request) {
-            .network => unreachable,
+            .network => error.InvalidRequestType,
             .exec => |net_exec| net_exec,
         };
     }
@@ -225,8 +225,8 @@ test "Request can stringify and parsed" {
 
     const parsed = try json.parseFromSlice(Request, test_allocator, output, .{});
     defer parsed.deinit();
-    try std.testing.expectEqualSlices(u8, "test-resource", parsed.value.resource());
-    try std.testing.expectEqualSlices(u8, "test-container", parsed.value.requestExec().container_name);
+    try std.testing.expectEqualSlices(u8, "test-resource", try parsed.value.resource());
+    try std.testing.expectEqualSlices(u8, "test-container", (try parsed.value.requestExec()).container_name);
 }
 
 pub const Response = struct {

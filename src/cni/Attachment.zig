@@ -214,7 +214,7 @@ pub const Attachment = struct {
             if (exec_config.isDhcp()) {
                 try exec_config.setDhcpSocketPath(request.user_id.?);
             } else if (exec_config.isStatic()) {
-                const exec_request = request.requestExec();
+                const exec_request = try request.requestExec();
                 if (exec_request.network_options.static_ips) |static_ips| {
                     if (static_ips.len > 0) {
                         try exec_config.patchAddresses(static_ips);
@@ -278,7 +278,7 @@ pub const Attachment = struct {
     /// Build the CNI environment map for plugin execution.
     /// `netns` is the netns path — directly usable in the worker's namespace.
     fn envMap(self: Attachment, allocator: Allocator, cni_command: CniCommand, request: plugin.Request, netns: []const u8) !std.process.Environ.Map {
-        const exec_request = request.requestExec();
+        const exec_request = try request.requestExec();
 
         var env_map = std.process.Environ.Map.init(allocator);
         try env_map.put("CNI_COMMAND", @tagName(cni_command));

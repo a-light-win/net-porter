@@ -193,7 +193,7 @@ pub fn setup(self: *Cni, tentative_allocator: Allocator, request: plugin.Request
     try self.mutex.lock(self.io);
     defer self.mutex.unlock(self.io);
 
-    const exec_request = request.requestExec();
+    const exec_request = try request.requestExec();
     const container_id = exec_request.container_id;
     const ifname = exec_request.network_options.interface_name;
 
@@ -224,7 +224,7 @@ pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Requ
     try self.mutex.lock(self.io);
     defer self.mutex.unlock(self.io);
 
-    const exec_request = request.requestExec();
+    const exec_request = try request.requestExec();
     const container_id = exec_request.container_id;
     const ifname = exec_request.network_options.interface_name;
 
