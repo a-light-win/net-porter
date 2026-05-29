@@ -183,9 +183,14 @@ pub fn deinit(self: *Cni) void {
 }
 
 /// Check if the first plugin's IPAM type is "static".
-/// Precondition: `initFromConfig` guarantees plugins array is non-empty with valid IPAM type.
+/// Returns false if plugins array is empty or first plugin has no IPAM.
 pub fn isStaticIpam(self: Cni) bool {
-    const first_plugin = self.config.plugins.array.items[0];
+    const plugins = switch (self.config.plugins) {
+        .array => |a| a.items,
+        else => return false,
+    };
+    if (plugins.len == 0) return false;
+    const first_plugin = plugins[0];
     const plugin_conf = PluginConf{ .conf = switch (first_plugin) {
         .object => |obj| obj,
         else => return false,
@@ -345,6 +350,29 @@ test "isStaticIpam returns false when first plugin is not an object" {
     const config = CniConfig{
         .cniVersion = "1.0.0",
         .name = "test-invalid",
+        .plugins = json.Value{ .array = plugins_arr },
+    };
+
+    const cni = Cni{
+        .arena = arena,
+        .io = std.testing.io,
+        .cni_plugin_dir = "/tmp",
+        .config = config,
+    };
+
+    try std.testing.expect(!cni.isStaticIpam());
+}
+
+test "isStaticIpam returns false when plugins array is empty" {
+    const allocator = std.testing.allocator;
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const plugins_arr = try json.Array.initCapacity(arena.allocator(), 0);
+
+    const config = CniConfig{
+        .cniVersion = "1.0.0",
+        .name = "test-empty",
         .plugins = json.Value{ .array = plugins_arr },
     };
 
