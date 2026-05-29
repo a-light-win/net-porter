@@ -79,6 +79,8 @@ pub fn new(opts: Opts) !Worker {
         return e;
     };
     const conf = managed_config.config;
+    var logger = @import("root").logger;
+    logger.log_settings = conf.log;
     errdefer managed_config.deinit();
 
     // 2. Load ACL for this user (loads <username>.json + groups)
