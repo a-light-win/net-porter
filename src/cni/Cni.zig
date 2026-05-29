@@ -182,6 +182,8 @@ pub fn deinit(self: *Cni) void {
     allocator.destroy(self);
 }
 
+/// Check if the first plugin's IPAM type is "static".
+/// Precondition: `initFromConfig` guarantees plugins array is non-empty with valid IPAM type.
 pub fn isStaticIpam(self: Cni) bool {
     const first_plugin = self.config.plugins.array.items[0];
     const plugin_conf = PluginConf{ .conf = switch (first_plugin) {

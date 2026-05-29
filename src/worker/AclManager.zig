@@ -346,22 +346,6 @@ pub fn hasAnyPermission(self: *WorkerAclManager) bool {
     return self.acls.items.len > 0;
 }
 
-/// Check if a resource is a static IP resource.
-/// Iterates ALL matching ACL entries — if ANY grant has IP ranges, the resource
-/// is considered static. This prevents bypass via duplicate resource names where
-/// a non-IP grant from user file would mask an IP-restricted grant from a group.
-pub fn isStaticResource(self: *WorkerAclManager, name: []const u8) bool {
-    self.mutex.lock(self.io) catch return false;
-    defer self.mutex.unlock(self.io);
-
-    for (self.acls.items) |acl| {
-        if (std.mem.eql(u8, name, acl.name)) {
-            if (acl.isStatic()) return true;
-        }
-    }
-    return false;
-}
-
 /// Check if a uid is allowed to use the given IP on the specified resource.
 /// Iterates ALL matching ACL entries — if ANY grant allows the IP, it passes.
 /// This prevents bypass via duplicate resource names where a non-IP grant from
