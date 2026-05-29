@@ -356,7 +356,6 @@ pub const PluginConf = struct {
         };
         defer allocator.free(buf);
 
-        std.debug.print("{s}\n", .{buf});
         try std.testing.expect(buf.len > 0);
     }
 

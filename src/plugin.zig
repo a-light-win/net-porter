@@ -11,7 +11,7 @@ pub const Response = NetavarkPlugin.Response;
 pub const Interface = NetavarkPlugin.Interface;
 pub const Subnet = NetavarkPlugin.Subnet;
 
-var plugin = NetavarkPlugin.defaultNetavarkPlugin();
+var plugin = NetavarkPlugin.defaultNetavarkPlugin(std.heap.page_allocator);
 
 pub fn setIo(io: std.Io) void {
     plugin.io = io;

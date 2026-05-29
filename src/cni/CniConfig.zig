@@ -182,6 +182,6 @@ pub const CniConfig = struct {
         );
         defer parsed_config.deinit();
         const config = parsed_config.value;
-        config.validate() catch unreachable;
+        try config.validate();
     }
 };

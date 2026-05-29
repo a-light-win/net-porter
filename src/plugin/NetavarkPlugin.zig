@@ -295,9 +295,9 @@ stdout_file: std.Io.File,
 io: std.Io = undefined,
 namespace_path: []const u8 = undefined,
 
-pub fn defaultNetavarkPlugin() NetavarkPlugin {
+pub fn defaultNetavarkPlugin(allocator: std.mem.Allocator) NetavarkPlugin {
     return NetavarkPlugin{
-        .allocator = std.heap.page_allocator,
+        .allocator = allocator,
         .stdin_file = std.Io.File.stdin(),
         .stdout_file = std.Io.File.stdout(),
     };

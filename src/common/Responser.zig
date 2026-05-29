@@ -21,10 +21,8 @@ pub fn writeError(self: *Responser, comptime fmt: []const u8, args: anytype) voi
 
     var buf: [1024]u8 = undefined;
 
-    const error_msg = std.fmt.bufPrint(&buf, fmt, args) catch |err| {
-        log.warn("Failed to format error message: {s}", .{@errorName(err)});
-        return;
-    };
+    const error_msg = std.fmt.bufPrint(&buf, fmt, args) catch
+        "error: internal error message too long";
 
     log.warn("{s}", .{error_msg});
 
