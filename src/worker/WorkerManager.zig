@@ -253,8 +253,7 @@ pub fn nextRetryTimeoutMs(self: *WorkerManager) ?i32 {
     if (remaining_ns <= 0) return 0; // Already due
 
     const remaining_ms = @divTrunc(remaining_ns, std.time.ns_per_ms);
-    if (remaining_ms > std.math.maxInt(i32)) return std.math.maxInt(i32);
-    return @intCast(remaining_ms);
+    return std.math.cast(i32, remaining_ms) orelse std.math.maxInt(i32);
 }
 
 // ── Internal — mutex held by caller ──────────────────────────────────
