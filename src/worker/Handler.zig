@@ -193,8 +193,6 @@ pub fn handle(self: *Handler) !void {
         // The original path (e.g., /run/user/1000/netns/netns-xxx) is only meaningful
         // inside catatonit's mount namespace where the nsfs is mounted.
         // /proc/<catatonit_pid>/root/ traverses into that mount namespace.
-        // NOTE: nsfs verification (verifyNetnsNsfs) is temporarily disabled.
-        // CNI plugins perform their own validation via setns().
         const resolved = std.fmt.allocPrint(
             tentative_allocator,
             "/proc/{d}/root{s}",
@@ -202,6 +200,13 @@ pub fn handle(self: *Handler) !void {
         ) catch {
             log.err("OOM constructing netns path for uid={d}", .{client_info.uid});
             self.responser.writeError("Internal error", .{});
+            return;
+        };
+
+        // Verify the resolved path points to an nsfs file (statfs f_type check).
+        verifyNetnsNsfs(resolved) catch |err| {
+            log.err("netns verification failed for uid={d}: {s} ({s})", .{ client_info.uid, resolved, @errorName(err) });
+            self.responser.writeError("Invalid network namespace path", .{});
             return;
         };
 
@@ -590,6 +595,10 @@ fn diagStatfs(path: []const u8, label: []const u8) void {
 /// Log diagnostic information about netns resolution for cross-distribution debugging.
 /// This function NEVER returns errors and NEVER affects the request flow.
 /// All syscalls are wrapped to silently swallow failures; results are logged only.
+///
+/// Uses raw linux.* syscalls intentionally: diagnostic code must work even when
+/// the std.Io instance is in an error state, and must not depend on std.Io
+/// allocations that could fail. This is a deliberate deviation from Rule 1.
 fn logNetnsDiagnostics(
     io: std.Io,
     netns: []const u8,
@@ -617,10 +626,6 @@ fn logNetnsDiagnostics(
 
     inspect_resolved: {
         var res_buf: [std.Io.Dir.max_path_bytes + 1:0]u8 = undefined;
-        if (resolved.len > std.Io.Dir.max_path_bytes) {
-            log.debug("[diag] open resolved: path too long", .{});
-            break :inspect_resolved;
-        }
         @memcpy(res_buf[0..resolved.len], resolved);
         res_buf[resolved.len] = 0;
 
