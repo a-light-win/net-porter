@@ -47,6 +47,7 @@ pub const Opts = struct {
 
 const max_concurrent_handlers: usize = 64;
 
+allocator: std.mem.Allocator,
 config: config_mod.Config,
 io: std.Io,
 uid: u32,
@@ -116,6 +117,7 @@ pub fn new(opts: Opts) !Worker {
     errdefer dhcp_service.deinit();
 
     return .{
+        .allocator = page_alloc,
         .config = conf,
         .io = io,
         .uid = uid,
@@ -167,7 +169,7 @@ pub fn deinit(self: *Worker) void {
     self.server.deinit(self.io);
     std.Io.Dir.cwd().deleteFile(self.io, self.socket_path) catch {};
 
-    std.heap.page_allocator.free(self.socket_path);
+    self.allocator.free(self.socket_path);
     self.cni_manager.deinit();
     self.acl_manager.deinit();
     self.managed_config.deinit();
@@ -199,7 +201,7 @@ pub fn run(self: *Worker) !void {
     while (true) {
         var conn_stream = self.server.accept(io) catch |err| {
             log.err("Failed to accept connection: {s}", .{@errorName(err)});
-            const req = std.posix.timespec{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
+            const req = linux.timespec{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
             _ = linux.nanosleep(&req, null);
             continue;
         };
@@ -212,16 +214,16 @@ pub fn run(self: *Worker) !void {
             continue;
         }
 
-        const handler = std.heap.page_allocator.create(Handler) catch |err| {
+        const handler = self.allocator.create(Handler) catch |err| {
             log.err("Failed to allocate handler: {s}", .{@errorName(err)});
             conn_stream.close(io);
             _ = self.active_handlers.fetchSub(1, .release);
             continue;
         };
 
-        const arena = ArenaAllocator.init(std.heap.page_allocator) catch |err| {
+        const arena = ArenaAllocator.init(self.allocator) catch |err| {
             log.err("Failed to init handler arena: {s}", .{@errorName(err)});
-            std.heap.page_allocator.destroy(handler);
+            self.allocator.destroy(handler);
             conn_stream.close(io);
             _ = self.active_handlers.fetchSub(1, .release);
             continue;
@@ -243,11 +245,11 @@ pub fn run(self: *Worker) !void {
             },
         };
 
-        const thread = std.Thread.spawn(.{}, handleRequests, .{ handler, &self.active_handlers }) catch |e| {
+        const thread = std.Thread.spawn(.{}, handleRequests, .{ handler, &self.active_handlers, self.allocator }) catch |e| {
             _ = self.active_handlers.fetchSub(1, .release);
             log.warn("Failed to spawn handler thread: {s}", .{@errorName(e)});
             handler.deinit();
-            std.heap.page_allocator.destroy(handler);
+            self.allocator.destroy(handler);
             continue;
         };
         thread.detach();
@@ -294,10 +296,10 @@ fn aclWatchLoop(self: *Worker) void {
     }
 }
 
-fn handleRequests(handler: *Handler, active_handlers: *std.atomic.Value(usize)) !void {
+fn handleRequests(handler: *Handler, active_handlers: *std.atomic.Value(usize), allocator: std.mem.Allocator) !void {
     defer {
         handler.deinit();
-        std.heap.page_allocator.destroy(handler);
+        allocator.destroy(handler);
         _ = active_handlers.fetchSub(1, .release);
     }
     try handler.handle();
