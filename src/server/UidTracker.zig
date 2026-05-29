@@ -125,6 +125,8 @@ fn removeUid(self: *UidTracker, uid: std.posix.uid_t) void {
 
 /// Get list of currently active (tracked) UIDs.
 pub fn getActiveUids(self: *UidTracker) std.ArrayList(u32) {
+    // Guard against integer overflow in initCapacity
+    _ = std.math.mul(usize, self.entries.items.len, @sizeOf(u32)) catch return .empty;
     var uids = std.ArrayList(u32).initCapacity(self.allocator, self.entries.items.len) catch return .empty;
     for (self.entries.items) |entry| {
         uids.appendAssumeCapacity(entry.uid);
