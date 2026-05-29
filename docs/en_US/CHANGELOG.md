@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-05-29
+
+### Security
+
+- **Restored network namespace verification**: Re-enabled NSFS-based verification of resolved network namespace paths to prevent mount replacement attacks. This protection was accidentally disabled in a previous update.
+- **Fixed ACL authorization bypass on resource errors**: When network resource resolution encountered an error, subsequent operations could proceed without proper authorization checks. Errors are now correctly propagated and access is properly denied.
+- **Fixed memory safety issue in ACL directory watcher**: The ACL watcher thread could access freed memory during shutdown, potentially causing crashes or undefined behavior. The thread now performs a clean shutdown via a dedicated signaling pipe.
+- **Improved secure random number generation**: Temporary file creation now uses `std.io.random` for seed generation, eliminating the risk of using partially-initialized random data.
+
+### Changed
+
+- **Static IPAM now requires explicit `addresses` field**: When using static IPAM (`"type": "static"`), the `addresses` array must be explicitly specified in the CNI configuration. Previously, missing addresses were silently inferred, which could lead to unexpected network behavior.
+
+### Fixed
+
+- **Fixed service hang on shutdown**: The service could hang indefinitely during shutdown when the ACL directory watcher was active, requiring a forced kill.
+- **Fixed worker becoming unresponsive after socket errors**: Fatal socket errors during connection acceptance could leave the worker process in a zombie-like state, unable to accept new connections.
+- **Fixed log configuration not taking effect in worker**: Log level settings from the configuration file were not applied to worker processes — workers always used the default log level regardless of configuration.
+- **Fixed DHCP service misdetecting static IP configurations**: The DHCP start/stop logic incorrectly used ACL IP ranges instead of the CNI config's IPAM type to determine whether a resource uses static IP, potentially causing DHCP to be started or stopped unnecessarily.
+- **Fixed potential crash on malformed CNI configuration**: Empty or malformed plugin arrays in CNI configuration files could cause the service to panic and crash.
+- **Fixed multiple integer overflow issues**: Several timestamp calculations and event loop counters could overflow on long-running or heavily loaded systems, causing incorrect behavior or crashes.
+- **Fixed resource leaks in CNI plugin setup**: File descriptors were leaked when setting up CNI plugin directories, and memory was leaked during CNI attachment state serialization.
+- **Fixed memory leak in ACL manager**: Out-of-memory conditions during ACL manager initialization were not properly handled, leaking previously allocated resources.
+- **Fixed connection hang from error handling gap**: Certain request processing errors were silently swallowed, causing client connections to hang indefinitely without a response.
+- **Fixed heap corruption when spawning workers**: A double-free bug during worker process spawning could corrupt the heap and cause unpredictable crashes.
+- **Fixed deadlock during shutdown under load**: The shutdown signal could deadlock if the system call was interrupted by a signal, preventing clean service shutdown.
+- **Fixed DHCP mutex state corruption**: The DHCP service mutex could be unlocked without being locked first during cleanup, causing undefined behavior.
+- **Fixed multiple reliability issues in worker management**: Worker lifecycle management had edge cases causing out-of-bounds access, memory leaks, and incorrect worker death detection.
+
+### Internal
+
+- Added unit tests for CNI static IPAM type detection.
+- Replaced non-standard API calls to comply with project coding standards.
+- Added build-id to the executable for easier debugging.
+- Removed dead code and improved error propagation in internal modules.
+
+---
+
 ## [1.2.0] - 2026-05-27
 
 ### Security
@@ -259,7 +297,8 @@ See the [Migration Guide (0.4 → 0.5)](migration-guide-0.4-to-0.5.md) for step-
 
 _Initial public release with per-user service architecture._
 
-[1.2.0]: https://github.com/a-light-win/net-porter/compare/1.1.0...1.2.0
+[1.3.0]: https://github.com/a-light-win/net-porter/compare/1.2.0...1.3.0
+[1.2.0]: https://github.com/a-light-win/net-porter/compare/1.3.0...1.2.0
 [1.1.0]: https://github.com/a-light-win/net-porter/compare/1.0.0...1.1.0
 [1.0.0]: https://github.com/a-light-win/net-porter/compare/0.6.0...1.0.0
 [0.6.0]: https://github.com/a-light-win/net-porter/compare/0.5.0...0.6.0
