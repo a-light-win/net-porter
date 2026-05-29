@@ -279,7 +279,7 @@ fn execAction(
     const resource = request.resource() catch |err| {
         log.err("Failed to resolve resource: {s}", .{@errorName(err)});
         self.responser.writeError("Internal error", .{});
-        return;
+        return err;
     };
 
     // Only start DHCP service for DHCP resources (not static).
@@ -333,7 +333,7 @@ fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Re
     const resource = request.resource() catch |err| {
         log.err("Failed to resolve resource: {s}", .{@errorName(err)});
         self.responser.writeError("Internal error", .{});
-        return;
+        return err;
     };
 
     // Defense-in-depth: verify connecting UID matches the worker's target UID.
@@ -364,7 +364,7 @@ fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !v
     const resource = request.resource() catch |err| {
         log.err("Failed to resolve resource: {s}", .{@errorName(err)});
         self.responser.writeError("Internal error", .{});
-        return;
+        return err;
     };
 
     const exec_request = try request.requestExec();
