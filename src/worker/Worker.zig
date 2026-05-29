@@ -132,7 +132,7 @@ pub fn deinit(self: *Worker) void {
     log.info("Worker shutting down for uid={d}", .{self.uid});
 
     // Signal and join ACL watch thread before freeing any resources it accesses.
-    // Order: signal -> join -> close pipe fds -> release shared resources.
+    // Order: signal -> close write-end (triggers POLL.HUP) -> join -> close read-end.
     if (self.acl_thread) |thread| {
         const signal = "x";
         var written: usize = 0;
@@ -145,14 +145,16 @@ pub fn deinit(self: *Worker) void {
             } else if (e == .INTR or e == .AGAIN) {
                 continue;
             } else {
-                log.warn("failed to write shutdown signal (errno={s}), proceeding with join to avoid hang", .{@tagName(e)});
+                log.warn("failed to write shutdown signal (errno={s}), proceeding with close+join to avoid hang", .{@tagName(e)});
                 break;
             }
         }
+        // Close write-end before join so the thread sees POLL.HUP and exits.
+        _ = linux.close(self.shutdown_pipe[1]);
+        self.shutdown_pipe[1] = -1;
         thread.join();
         _ = linux.close(self.shutdown_pipe[0]);
-        _ = linux.close(self.shutdown_pipe[1]);
-        self.shutdown_pipe = .{ -1, -1 };
+        self.shutdown_pipe[0] = -1;
         self.acl_thread = null;
     }
 
