@@ -97,7 +97,7 @@ pub fn run(self: *Server) !void {
     while (true) {
         const wm_fds = self.worker_manager.pollFdSlice();
         const has_acl_watch = self.acl_watcher.getInotifyFd() != null;
-        const fixed_fds: usize = 1 + @as(usize, @intFromBool(has_acl_watch));
+        const fixed_fds: usize = if (has_acl_watch) 2 else 1;
         const total_fds = fixed_fds + wm_fds.len;
 
         var poll_buf: [256]std.posix.pollfd = undefined;
