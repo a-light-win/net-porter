@@ -224,9 +224,9 @@ pub fn handle(self: *Handler) !void {
         return;
     };
 
-    const cni = self.cni_manager.loadCni(try request.resource()) catch |err| {
+    const cni = self.cni_manager.loadCni(resource) catch |err| {
         log.err("Failed to load CNI for resource={s}: {s}", .{
-            request.resource() catch "<unknown>",
+            resource,
             @errorName(err),
         });
         self.responser.writeError("Internal error", .{});
@@ -235,7 +235,7 @@ pub fn handle(self: *Handler) !void {
 
     // Static IP validation for setup action
     if (request.action == .setup) {
-        if (self.acl_manager.isStaticResource(try request.resource())) {
+        if (self.acl_manager.isStaticResource(resource)) {
             self.validateStaticIp(client_info.uid, &request) catch |err| {
                 log.err("Static IP validation failed for uid={d}, resource={s}: {s}", .{
                     client_info.uid,
@@ -276,12 +276,18 @@ fn execAction(
     request: plugin.Request,
     caller_uid: u32,
 ) !void {
+    const resource = request.resource() catch |err| {
+        log.err("Failed to resolve resource: {s}", .{@errorName(err)});
+        self.responser.writeError("Internal error", .{});
+        return;
+    };
+
     // Only start DHCP service for DHCP resources (not static).
     // During teardown, the DHCP daemon may have crashed or the last
     // container (catatonit) may already be gone, causing ensureStarted()
     // to fail. Teardown should still proceed to clean up whatever it can.
     if (request.action != .teardown) {
-        if (!self.acl_manager.isStaticResource(try request.resource())) {
+        if (!self.acl_manager.isStaticResource(resource)) {
             try self.dhcp_service.ensureStarted();
         }
     }
@@ -293,7 +299,7 @@ fn execAction(
 
     // After teardown, stop DHCP service if no active attachments remain
     if (request.action == .teardown) {
-        if (!self.acl_manager.isStaticResource(try request.resource())) {
+        if (!self.acl_manager.isStaticResource(resource)) {
             if (!StateFile.hasActiveAttachments(self.io, caller_uid)) {
                 self.dhcp_service.stop();
             }
@@ -324,6 +330,12 @@ fn getClientInfo(responser: *Responser) std.posix.UnexpectedError!ClientInfo {
 }
 
 fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Request) !void {
+    const resource = request.resource() catch |err| {
+        log.err("Failed to resolve resource: {s}", .{@errorName(err)});
+        self.responser.writeError("Internal error", .{});
+        return;
+    };
+
     // Defense-in-depth: verify connecting UID matches the worker's target UID.
     // Primary defense is socket file permission (0600, owner=uid), but an
     // explicit check prevents misuse if file permissions are somehow bypassed
@@ -341,7 +353,7 @@ fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Re
         return err;
     }
     // Resource-level ACL check
-    if (!self.acl_manager.isAllowed(try request.resource())) {
+    if (!self.acl_manager.isAllowed(resource)) {
         const err = error.AccessDenied;
         self.responser.writeError("Access denied", .{});
         return err;
@@ -349,6 +361,12 @@ fn authClient(self: *Handler, client_info: ClientInfo, request: *const plugin.Re
 }
 
 fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !void {
+    const resource = request.resource() catch |err| {
+        log.err("Failed to resolve resource: {s}", .{@errorName(err)});
+        self.responser.writeError("Internal error", .{});
+        return;
+    };
+
     const exec_request = try request.requestExec();
     const static_ips = exec_request.network_options.static_ips orelse {
         self.responser.writeError("Static IP is required", .{});
@@ -363,7 +381,7 @@ fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !v
     // In dual-stack configurations (IPv4 + IPv6), patchAddresses() injects
     // every IP that matches a template subnet, so each must be authorized.
     for (static_ips) |requested_ip| {
-        if (!self.acl_manager.isIpAllowed(try request.resource(), uid, requested_ip)) {
+        if (!self.acl_manager.isIpAllowed(resource, uid, requested_ip)) {
             self.responser.writeError("IP address not allowed: {s}", .{requested_ip});
             return error.IpNotAllowed;
         }
