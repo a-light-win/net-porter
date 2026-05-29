@@ -203,10 +203,10 @@ fn parseAclFile(self: WorkerAclManager, path: []const u8) !std.json.Parsed(AclFi
 
     var read_buffer: [4096]u8 = undefined;
     var file_reader = file.reader(self.io, &read_buffer);
-    const data = try file_reader.interface.allocRemaining(std.heap.page_allocator, .limited(max_acl_file_size));
-    defer std.heap.page_allocator.free(data);
+    const data = try file_reader.interface.allocRemaining(self.allocator, .limited(max_acl_file_size));
+    defer self.allocator.free(data);
 
-    return try std.json.parseFromSlice(AclFile.Entry, std.heap.page_allocator, data, .{
+    return try std.json.parseFromSlice(AclFile.Entry, self.allocator, data, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
     });

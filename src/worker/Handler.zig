@@ -316,7 +316,7 @@ fn getClientInfo(responser: *Responser) std.posix.UnexpectedError!ClientInfo {
         responser.writeError("Internal error", .{});
 
         const json_err = std.posix.errno(res);
-        log.warn("Failed to send error message: {s}", .{@tagName(json_err)});
+        log.warn("Failed to get peer credentials: {s}", .{@tagName(json_err)});
         return std.posix.unexpectedErrno(json_err);
     }
     return client_info;

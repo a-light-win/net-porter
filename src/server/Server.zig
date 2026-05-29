@@ -227,21 +227,21 @@ fn handleAclChange(self: *Server) void {
         if (is_added) continue;
 
         const stored_username = self.worker_manager.getWorkerUsername(uid) orelse continue;
-        const current_username = user_mod.getUsername(std.heap.page_allocator, uid) orelse continue;
+        const current_username = user_mod.getUsername(self.uid_tracker.allocator, uid) orelse continue;
 
         if (!user_mod.isValidUsername(current_username)) {
             log.warn("Username '{s}' for uid={d} failed validation, skipping", .{ current_username, uid });
-            std.heap.page_allocator.free(current_username);
+            self.uid_tracker.allocator.free(current_username);
             continue;
         }
 
         if (!std.mem.eql(u8, stored_username, current_username)) {
             log.warn("Username changed for uid={d}: '{s}' -> '{s}', restarting worker", .{ uid, stored_username, current_username });
-            std.heap.page_allocator.free(current_username);
+            self.uid_tracker.allocator.free(current_username);
             self.worker_manager.stopWorker(uid);
             mismatched_uids.appendAssumeCapacity(uid);
         } else {
-            std.heap.page_allocator.free(current_username);
+            self.uid_tracker.allocator.free(current_username);
         }
     }
 
