@@ -7,6 +7,14 @@ const AclWatcher = @import("AclWatcher.zig");
 const WorkerManager = @import("../worker/WorkerManager.zig");
 const UidTracker = @import("UidTracker.zig");
 const user_mod = @import("../user.zig");
+
+fn diag(io: std.Io, comptime msg: []const u8) void {
+    var buf: [256]u8 = undefined;
+    var w = std.Io.File.stderr().writer(io, &buf);
+    w.interface.writeAll(msg ++ "\n") catch {};
+    w.interface.flush() catch {};
+}
+
 const Server = @This();
 
 config: config_mod.Config,
@@ -89,37 +97,35 @@ pub fn deinit(self: *Server) void {
 
 pub fn run(self: *Server) !void {
     log.info("net-porter {s} started, monitoring /run/user/", .{version});
-
-    // Start workers for UIDs that already exist at startup
     self.syncWorkers();
+    diag(self.io, "RUN-001: syncWorkers done");
 
     var event_buf: [4096]u8 = undefined;
 
     while (true) {
-        // Build combined poll set:
-        //   [0] = uid_tracker inotify (/run/user/)
-        //   [1] = acl_watcher inotify (acl.d/)
-        //   [2..N] = worker/catatonit pidfds
+        diag(self.io, "RUN-010: loop start");
         const wm_fds = self.worker_manager.pollFdSlice();
+        diag(self.io, "RUN-011: pollFdSlice done");
         const has_acl_watch = self.acl_watcher.getInotifyFd() != null;
+        diag(self.io, "RUN-012: has_acl_watch checked");
         const fixed_fds: usize = 1 + @intFromBool(has_acl_watch);
         const total_fds = fixed_fds + wm_fds.len;
+        diag(self.io, "RUN-013: total_fds computed");
 
-        // Stack buffer: 256 entries = 2 inotify + worker pidfds
         var poll_buf: [256]std.posix.pollfd = undefined;
         if (total_fds > poll_buf.len) {
             log.err("Too many poll fds: {d} (max {d})", .{ total_fds, poll_buf.len });
             return error.TooManyFds;
         }
+        diag(self.io, "RUN-014: poll_buf check done");
 
-        // [0] uid_tracker inotify
         poll_buf[0] = .{
             .fd = self.uid_tracker.inotify_fd,
             .events = std.posix.POLL.IN,
             .revents = 0,
         };
+        diag(self.io, "RUN-015: poll_buf[0] set");
 
-        // [1] acl_watcher inotify (if available)
         const acl_fd_index: usize = if (has_acl_watch) 1 else 0;
         if (has_acl_watch) {
             poll_buf[1] = .{
@@ -128,49 +134,50 @@ pub fn run(self: *Server) !void {
                 .revents = 0,
             };
         }
+        diag(self.io, "RUN-016: acl_watcher set");
 
-        // [fixed_fds..N] worker/catatonit pidfds
         for (wm_fds, 0..) |pfd, i| {
             poll_buf[fixed_fds + i] = pfd;
         }
+        diag(self.io, "RUN-017: wm_fds copied");
 
         const timeout = self.worker_manager.nextRetryTimeoutMs() orelse -1;
+        diag(self.io, "RUN-018: timeout computed");
+
         const n = std.posix.poll(poll_buf[0..total_fds], timeout) catch |err| {
             log.err("poll failed: {s}", .{@errorName(err)});
             return err;
         };
+        diag(self.io, "RUN-019: poll done");
 
-        // Process worker/catatonit pidfd events (index fixed_fds+)
         if (wm_fds.len > 0) {
             self.worker_manager.processPollEvents(poll_buf[fixed_fds .. fixed_fds + wm_fds.len]);
         }
+        diag(self.io, "RUN-020: processPollEvents done");
 
-        // Process acl_watcher inotify events FIRST (index 1)
-        // so ACL changes take effect before /run/user/ events
         if (has_acl_watch and poll_buf[acl_fd_index].revents & std.posix.POLL.IN != 0) {
             if (self.acl_watcher.processInotifyEvents(&event_buf)) {
                 self.handleAclChange();
             }
         }
+        diag(self.io, "RUN-021: acl_watcher processed");
 
-        // Process uid_tracker inotify events SECOND (index 0)
         if (poll_buf[0].revents & std.posix.POLL.IN != 0) {
             var uid_events = self.uid_tracker.processInotifyEvents(&event_buf);
-            // Start workers for newly appeared UIDs (batch — also scans pending UIDs)
             if (uid_events.created.items.len > 0) {
                 self.worker_manager.ensureWorkers(uid_events.created.items);
             }
-            // Stop workers for disappeared UIDs
             for (uid_events.removed.items) |uid| {
                 self.worker_manager.stopWorker(uid);
             }
             uid_events.deinit(self.uid_tracker.allocator);
         }
+        diag(self.io, "RUN-022: uid_tracker processed");
 
-        // Process retry timeout
         if (n == 0) {
             self.worker_manager.retryPending();
         }
+        diag(self.io, "RUN-023: retryPending done");
     }
 }
 
