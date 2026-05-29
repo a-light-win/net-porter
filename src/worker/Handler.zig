@@ -573,7 +573,7 @@ const NSFS_MAGIC: c_long = 0x6e736673;
 fn diagStatfs(path: []const u8, label: []const u8) void {
     var path_buf: [std.Io.Dir.max_path_bytes + 1:0]u8 = undefined;
     if (path.len > std.Io.Dir.max_path_bytes) {
-        log.info("[diag] statfs on {s}: path too long", .{label});
+        log.debug("[diag] statfs on {s}: path too long", .{label});
         return;
     }
     @memcpy(path_buf[0..path.len], path);
@@ -583,13 +583,13 @@ fn diagStatfs(path: []const u8, label: []const u8) void {
     const rc = linux.syscall2(.statfs, @intFromPtr(&path_buf), @intFromPtr(&buf));
     if (rc == 0) {
         const is_nsfs = buf.f_type == NSFS_MAGIC;
-        log.info("[diag] statfs on {s}: f_type=0x{x}, is_nsfs={}", .{
+        log.debug("[diag] statfs on {s}: f_type=0x{x}, is_nsfs={}", .{
             label,
             @as(u64, @bitCast(buf.f_type)),
             is_nsfs,
         });
     } else {
-        log.info("[diag] statfs on {s}: error={s}", .{ label, @tagName(std.posix.errno(rc)) });
+        log.debug("[diag] statfs on {s}: error={s}", .{ label, @tagName(std.posix.errno(rc)) });
     }
 }
 
@@ -610,8 +610,8 @@ fn logNetnsDiagnostics(
 
     const NS_GET_USERNS: u64 = 0x0000B701;
 
-    log.info("[diag] original netns path: {s}", .{netns});
-    log.info("[diag] resolved netns path: {s}", .{resolved});
+    log.debug("[diag] original netns path: {s}", .{netns});
+    log.debug("[diag] resolved netns path: {s}", .{resolved});
 
     diagStatfs(netns, "original");
     diagStatfs(resolved, "resolved");
@@ -624,7 +624,7 @@ fn logNetnsDiagnostics(
     inspect_resolved: {
         var res_buf: [std.Io.Dir.max_path_bytes + 1:0]u8 = undefined;
         if (resolved.len > std.Io.Dir.max_path_bytes) {
-            log.info("[diag] open resolved: path too long", .{});
+            log.debug("[diag] open resolved: path too long", .{});
             break :inspect_resolved;
         }
         @memcpy(res_buf[0..resolved.len], resolved);
@@ -632,7 +632,7 @@ fn logNetnsDiagnostics(
 
         const open_rc = linux.openat(linux.AT.FDCWD, res_buf[0..resolved.len :0], .{ .CLOEXEC = true }, 0);
         if (std.posix.errno(open_rc) != .SUCCESS) {
-            log.info("[diag] open resolved: error={s}", .{@tagName(std.posix.errno(open_rc))});
+            log.debug("[diag] open resolved: error={s}", .{@tagName(std.posix.errno(open_rc))});
             break :inspect_resolved;
         }
         const netns_fd: std.posix.fd_t = @intCast(open_rc);
@@ -643,9 +643,9 @@ fn logNetnsDiagnostics(
         if (fstat_rc == 0) {
             netns_inode = stat_buf.ino;
             found_netns_inode = true;
-            log.info("[diag] open resolved: inode={d}", .{netns_inode});
+            log.debug("[diag] open resolved: inode={d}", .{netns_inode});
         } else {
-            log.info("[diag] open resolved: fstat error={s}", .{@tagName(std.posix.errno(fstat_rc))});
+            log.debug("[diag] open resolved: fstat error={s}", .{@tagName(std.posix.errno(fstat_rc))});
         }
 
         const ioctl_rc = linux.syscall3(
@@ -655,7 +655,7 @@ fn logNetnsDiagnostics(
             0,
         );
         if (std.posix.errno(ioctl_rc) != .SUCCESS) {
-            log.info("[diag] NS_GET_USERNS: error={s}", .{@tagName(std.posix.errno(ioctl_rc))});
+            log.debug("[diag] NS_GET_USERNS: error={s}", .{@tagName(std.posix.errno(ioctl_rc))});
             break :inspect_resolved;
         }
         const userns_fd: std.posix.fd_t = @intCast(ioctl_rc);
@@ -666,9 +666,9 @@ fn logNetnsDiagnostics(
         if (user_fstat_rc == 0) {
             owning_userns_inode = user_stat.ino;
             found_owning_inode = true;
-            log.info("[diag] NS_GET_USERNS: owning_userns_inode={d}", .{owning_userns_inode});
+            log.debug("[diag] NS_GET_USERNS: owning_userns_inode={d}", .{owning_userns_inode});
         } else {
-            log.info("[diag] NS_GET_USERNS: fstat error={s}", .{@tagName(std.posix.errno(user_fstat_rc))});
+            log.debug("[diag] NS_GET_USERNS: fstat error={s}", .{@tagName(std.posix.errno(user_fstat_rc))});
         }
     }
 
@@ -676,7 +676,7 @@ fn logNetnsDiagnostics(
         const host_path = "/proc/1/ns/net";
         const open_rc = linux.openat(linux.AT.FDCWD, host_path, .{ .CLOEXEC = true }, 0);
         if (std.posix.errno(open_rc) != .SUCCESS) {
-            log.info("[diag] host netns /proc/1/ns/net: error={s}", .{@tagName(std.posix.errno(open_rc))});
+            log.debug("[diag] host netns /proc/1/ns/net: error={s}", .{@tagName(std.posix.errno(open_rc))});
             break :compare_host;
         }
         const host_fd: std.posix.fd_t = @intCast(open_rc);
@@ -685,12 +685,12 @@ fn logNetnsDiagnostics(
         var host_stat: linux.Statx = undefined;
         const fstat_rc = linux.statx(host_fd, "", linux.AT.EMPTY_PATH, .{ .INO = true }, &host_stat);
         if (fstat_rc == 0) {
-            log.info("[diag] host netns /proc/1/ns/net: inode={d}", .{host_stat.ino});
+            log.debug("[diag] host netns /proc/1/ns/net: inode={d}", .{host_stat.ino});
             if (found_netns_inode) {
-                log.info("[diag] netns vs host: match={}", .{netns_inode == host_stat.ino});
+                log.debug("[diag] netns vs host: match={}", .{netns_inode == host_stat.ino});
             }
         } else {
-            log.info("[diag] host netns /proc/1/ns/net: fstat error={s}", .{@tagName(std.posix.errno(fstat_rc))});
+            log.debug("[diag] host netns /proc/1/ns/net: fstat error={s}", .{@tagName(std.posix.errno(fstat_rc))});
         }
     }
 
@@ -701,7 +701,7 @@ fn logNetnsDiagnostics(
 
         const open_rc = linux.openat(linux.AT.FDCWD, client_buf[0..client_path.len :0], .{ .CLOEXEC = true }, 0);
         if (std.posix.errno(open_rc) != .SUCCESS) {
-            log.info("[diag] client user ns /proc/{d}/ns/user: error={s}", .{ client_pid, @tagName(std.posix.errno(open_rc)) });
+            log.debug("[diag] client user ns /proc/{d}/ns/user: error={s}", .{ client_pid, @tagName(std.posix.errno(open_rc)) });
             break :compare_client_userns;
         }
         const client_fd: std.posix.fd_t = @intCast(open_rc);
@@ -710,12 +710,12 @@ fn logNetnsDiagnostics(
         var client_stat: linux.Statx = undefined;
         const fstat_rc = linux.statx(client_fd, "", linux.AT.EMPTY_PATH, .{ .INO = true }, &client_stat);
         if (fstat_rc == 0) {
-            log.info("[diag] client user ns /proc/{d}/ns/user: inode={d}", .{ client_pid, client_stat.ino });
+            log.debug("[diag] client user ns /proc/{d}/ns/user: inode={d}", .{ client_pid, client_stat.ino });
             if (found_owning_inode) {
-                log.info("[diag] netns owner vs client user ns: match={}", .{owning_userns_inode == client_stat.ino});
+                log.debug("[diag] netns owner vs client user ns: match={}", .{owning_userns_inode == client_stat.ino});
             }
         } else {
-            log.info("[diag] client user ns /proc/{d}/ns/user: fstat error={s}", .{ client_pid, @tagName(std.posix.errno(fstat_rc)) });
+            log.debug("[diag] client user ns /proc/{d}/ns/user: fstat error={s}", .{ client_pid, @tagName(std.posix.errno(fstat_rc)) });
         }
     }
 }
