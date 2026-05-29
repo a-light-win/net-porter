@@ -182,6 +182,15 @@ pub fn deinit(self: *Cni) void {
     allocator.destroy(self);
 }
 
+pub fn isStaticIpam(self: Cni) bool {
+    const first_plugin = self.config.plugins.array.items[0];
+    const plugin_conf = PluginConf{ .conf = switch (first_plugin) {
+        .object => |obj| obj,
+        else => return false,
+    } };
+    return plugin_conf.isStatic();
+}
+
 pub fn create(self: *Cni, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
     _ = self;
     _ = tentative_allocator;

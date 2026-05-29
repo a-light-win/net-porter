@@ -230,7 +230,7 @@ pub fn handle(self: *Handler) !void {
 
     // Static IP validation for setup action
     if (request.action == .setup) {
-        if (self.acl_manager.isStaticResource(resource)) {
+        if (cni.isStaticIpam()) {
             self.validateStaticIp(client_info.uid, &request) catch |err| {
                 log.err("Static IP validation failed for uid={d}, resource={s}: {s}", .{
                     client_info.uid,
@@ -271,18 +271,12 @@ fn execAction(
     request: plugin.Request,
     caller_uid: u32,
 ) !void {
-    const resource = request.resource() catch |err| {
-        log.err("Failed to resolve resource: {s}", .{@errorName(err)});
-        self.responser.writeError("Internal error", .{});
-        return err;
-    };
-
     // Only start DHCP service for DHCP resources (not static).
     // During teardown, the DHCP daemon may have crashed or the last
     // container (catatonit) may already be gone, causing ensureStarted()
     // to fail. Teardown should still proceed to clean up whatever it can.
     if (request.action != .teardown) {
-        if (!self.acl_manager.isStaticResource(resource)) {
+        if (!cni.isStaticIpam()) {
             try self.dhcp_service.ensureStarted();
         }
     }
@@ -294,7 +288,7 @@ fn execAction(
 
     // After teardown, stop DHCP service if no active attachments remain
     if (request.action == .teardown) {
-        if (!self.acl_manager.isStaticResource(resource)) {
+        if (!cni.isStaticIpam()) {
             if (!StateFile.hasActiveAttachments(self.io, caller_uid)) {
                 self.dhcp_service.stop();
             }
