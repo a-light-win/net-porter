@@ -221,7 +221,7 @@ pub const PluginConf = struct {
         const maybe_template = ipam_obj.get("addresses");
         if (maybe_template == null) {
             // No template addresses — create addresses directly from static IPs
-            log.info("no template addresses in ipam config, creating {d} address(es) from static IPs", .{ips.len});
+            log.debug("no template addresses in ipam config, creating {d} address(es) from static IPs", .{ips.len});
 
             var new_addrs = try json.Array.initCapacity(allocator, ips.len);
             for (ips) |ip| {
