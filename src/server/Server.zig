@@ -176,7 +176,10 @@ pub fn run(self: *Server) !void {
 
 /// Synchronize workers with current /run/user/ state.
 fn syncWorkers(self: *Server) void {
-    var active_uids = self.uid_tracker.getActiveUids();
+    var active_uids = self.uid_tracker.getActiveUids() catch |err| {
+        log.warn("Failed to get active UIDs: {s}, skipping worker sync", .{@errorName(err)});
+        return;
+    };
     defer active_uids.deinit(self.uid_tracker.allocator);
 
     log.info("syncWorkers: {} active UIDs", .{active_uids.items.len});

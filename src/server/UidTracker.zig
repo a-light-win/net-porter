@@ -124,10 +124,8 @@ fn removeUid(self: *UidTracker, uid: std.posix.uid_t) void {
 }
 
 /// Get list of currently active (tracked) UIDs.
-pub fn getActiveUids(self: *UidTracker) std.ArrayList(u32) {
-    // Guard against integer overflow in initCapacity
-    _ = std.math.mul(usize, self.entries.items.len, @sizeOf(u32)) catch return .empty;
-    var uids = std.ArrayList(u32).initCapacity(self.allocator, self.entries.items.len) catch return .empty;
+pub fn getActiveUids(self: *const UidTracker) !std.ArrayList(u32) {
+    var uids = try std.ArrayList(u32).initCapacity(self.allocator, self.entries.items.len);
     for (self.entries.items) |entry| {
         uids.appendAssumeCapacity(entry.uid);
     }
@@ -581,4 +579,46 @@ test "isUidAllowed returns true for allowed UIDs" {
     try std.testing.expect(tracker.isUidAllowed(2000));
     try std.testing.expect(!tracker.isUidAllowed(3000));
     try std.testing.expect(!tracker.isUidAllowed(0));
+}
+
+test "getActiveUids returns correct UIDs when entries are populated" {
+    const allocator = std.testing.allocator;
+
+    var entries = std.ArrayList(UidEntry).initCapacity(allocator, 3) catch return error.Unexpected;
+    entries.appendAssumeCapacity(.{ .uid = 1000 });
+    entries.appendAssumeCapacity(.{ .uid = 2000 });
+    entries.appendAssumeCapacity(.{ .uid = 3000 });
+
+    var tracker = UidTracker{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .allowed_uids = .empty,
+        .entries = entries,
+        .inotify_fd = -1,
+    };
+    defer tracker.entries.deinit(allocator);
+
+    var uids = try tracker.getActiveUids();
+    defer uids.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), uids.items.len);
+    try std.testing.expectEqual(@as(u32, 1000), uids.items[0]);
+    try std.testing.expectEqual(@as(u32, 2000), uids.items[1]);
+    try std.testing.expectEqual(@as(u32, 3000), uids.items[2]);
+}
+
+test "getActiveUids returns empty list when no entries exist" {
+    var tracker = UidTracker{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .allowed_uids = .empty,
+        .entries = std.ArrayList(UidEntry).empty,
+        .inotify_fd = -1,
+    };
+    defer tracker.entries.deinit(std.testing.allocator);
+
+    var uids = try tracker.getActiveUids();
+    defer uids.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), uids.items.len);
 }
