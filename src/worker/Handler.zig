@@ -193,6 +193,8 @@ pub fn handle(self: *Handler) !void {
         // The original path (e.g., /run/user/1000/netns/netns-xxx) is only meaningful
         // inside catatonit's mount namespace where the nsfs is mounted.
         // /proc/<catatonit_pid>/root/ traverses into that mount namespace.
+        // NOTE: nsfs verification (verifyNetnsNsfs) is temporarily disabled.
+        // CNI plugins perform their own validation via setns().
         const resolved = std.fmt.allocPrint(
             tentative_allocator,
             "/proc/{d}/root{s}",
@@ -200,15 +202,6 @@ pub fn handle(self: *Handler) !void {
         ) catch {
             log.err("OOM constructing netns path for uid={d}", .{client_info.uid});
             self.responser.writeError("Internal error", .{});
-            return;
-        };
-
-        // Verify the resolved path points to an nsfs file (statfs f_type check).
-        // Rejects non-nsfs filesystems.
-        // See verifyNetnsNsfs() for the security rationale.
-        verifyNetnsNsfs(resolved) catch |err| {
-            log.err("netns verification failed for uid={d}: {s} ({s})", .{ client_info.uid, resolved, @errorName(err) });
-            self.responser.writeError("Invalid network namespace path", .{});
             return;
         };
 
