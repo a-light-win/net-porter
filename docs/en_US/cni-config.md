@@ -126,6 +126,11 @@ Files without `.conf` or `.conflist` suffixes are ignored (e.g., files with `.ex
 }
 ```
 
+> **Important**:
+> - The `address` field **must** use CIDR notation (e.g., `192.168.1.0/24`); the prefix length cannot be omitted.
+> - net-porter extracts the prefix (e.g., `/24`) from the template address and combines it with the user-requested IP to form the final container address (e.g., `192.168.1.15/24`).
+> - If the prefix is omitted (e.g., `"192.168.1.0"` instead of `"192.168.1.0/24"`), static IP injection will silently skip, and the container will not receive an IP address.
+
 #### Chained Plugins (Bandwidth Limiting)
 
 `/etc/net-porter/cni.d/30-limited.conflist`:
