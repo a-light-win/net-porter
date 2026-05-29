@@ -42,9 +42,10 @@ pub fn log(
 
     const io = logger.io.?;
     const ts = std.Io.Timestamp.now(io, .awake);
+    const ms: i96 = @divTrunc(ts.nanoseconds, std.time.ns_per_ms);
 
     nosuspend {
-        writer.interface.print("{d}ms ", .{ts.toMilliseconds()}) catch return;
+        writer.interface.print("{d}ms ", .{ms}) catch return;
         writer.interface.print(level_txt ++ scope_txt ++ format ++ "\n", args) catch return;
         writer.interface.flush() catch return;
     }
