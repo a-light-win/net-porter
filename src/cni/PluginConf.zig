@@ -190,7 +190,7 @@ pub const PluginConf = struct {
 
     /// Replace template addresses in the ipam config with actual IPs.
     /// If no template addresses exist, creates addresses directly from static IPs
-    /// using /32 (IPv4) or /128 (IPv6) host prefixes with no gateway.
+    /// using /24 (IPv4) or /64 (IPv6) LAN prefixes with no gateway.
     /// Routes, DNS, and other ipam fields are preserved from the CNI config as-is.
     pub fn patchAddresses(self: *PluginConf, ips: []const []const u8) !void {
         const allocator = self.arena.?.allocator();
@@ -221,11 +221,15 @@ pub const PluginConf = struct {
         const maybe_template = ipam_obj.get("addresses");
         if (maybe_template == null) {
             // No template addresses — create addresses directly from static IPs
+            if (ips.len == 0) {
+                log.debug("no template addresses and no static IPs to inject", .{});
+                return;
+            }
             log.debug("no template addresses in ipam config, creating {d} address(es) from static IPs", .{ips.len});
 
             var new_addrs = try json.Array.initCapacity(allocator, ips.len);
             for (ips) |ip| {
-                const prefix: []const u8 = if (isIpv6(ip)) "128" else "32";
+                const prefix: []const u8 = if (isIpv6(ip)) "64" else "24";
                 const actual_addr = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ip, prefix });
 
                 var addr_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
@@ -243,7 +247,10 @@ pub const PluginConf = struct {
 
         const template_addrs = switch (maybe_template.?) {
             .array => |a| a.items,
-            else => return,
+            else => {
+                log.debug("ipam.addresses is not an array, skipping", .{});
+                return;
+            },
         };
 
         // Build actual addresses by matching requested IPs to template subnets by address family
@@ -256,11 +263,17 @@ pub const PluginConf = struct {
             const tmpl_obj = template_addrs[idx].object;
             const tmpl_addr = switch (tmpl_obj.get("address") orelse continue) {
                 .string => |s| s,
-                else => continue,
+                else => {
+                    log.warn("template address entry has non-string 'address' field, skipping", .{});
+                    continue;
+                },
             };
 
             // Extract prefix from template address (e.g. "192.168.1.0/24" → "24")
-            const slash_pos = std.mem.lastIndexOf(u8, tmpl_addr, "/") orelse continue;
+            const slash_pos = std.mem.lastIndexOf(u8, tmpl_addr, "/") orelse {
+                log.warn("template address '{s}' has no prefix separator, skipping", .{tmpl_addr});
+                continue;
+            };
             const prefix = tmpl_addr[slash_pos + 1 ..];
 
             // Build actual address: "192.168.1.15/24"
@@ -683,7 +696,7 @@ test "patchAddresses creates addresses from static IPs when no template exists" 
     const result_ipam = plugin_conf.conf.get("ipam").?.object;
     const addresses = result_ipam.get("addresses").?.array;
     try std.testing.expectEqual(@as(usize, 1), addresses.items.len);
-    try std.testing.expectEqualSlices(u8, "192.168.1.50/32", addresses.items[0].object.get("address").?.string);
+    try std.testing.expectEqualSlices(u8, "192.168.1.50/24", addresses.items[0].object.get("address").?.string);
     // No gateway when created without template
     try std.testing.expect(addresses.items[0].object.get("gateway") == null);
 }
@@ -712,7 +725,7 @@ test "patchAddresses creates IPv6 address from static IPs when no template exist
     const result_ipam = plugin_conf.conf.get("ipam").?.object;
     const addresses = result_ipam.get("addresses").?.array;
     try std.testing.expectEqual(@as(usize, 1), addresses.items.len);
-    try std.testing.expectEqualSlices(u8, "2001:db8::42/128", addresses.items[0].object.get("address").?.string);
+    try std.testing.expectEqualSlices(u8, "2001:db8::42/64", addresses.items[0].object.get("address").?.string);
     try std.testing.expect(addresses.items[0].object.get("gateway") == null);
 }
 
