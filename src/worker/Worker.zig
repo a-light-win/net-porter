@@ -135,7 +135,20 @@ pub fn deinit(self: *Worker) void {
     // Order: signal -> join -> close pipe fds -> release shared resources.
     if (self.acl_thread) |thread| {
         const signal = "x";
-        _ = linux.write(self.shutdown_pipe[1], signal.ptr, signal.len);
+        var written: usize = 0;
+        while (written < signal.len) {
+            const remaining = signal[written..];
+            const rc = linux.write(self.shutdown_pipe[1], remaining.ptr, remaining.len);
+            const e = linux.errno(rc);
+            if (e == .SUCCESS) {
+                written += rc;
+            } else if (e == .INTR or e == .AGAIN) {
+                continue;
+            } else {
+                log.warn("failed to write shutdown signal (errno={s}), proceeding with join to avoid hang", .{@tagName(e)});
+                break;
+            }
+        }
         thread.join();
         _ = linux.close(self.shutdown_pipe[0]);
         _ = linux.close(self.shutdown_pipe[1]);
@@ -260,8 +273,10 @@ fn aclWatchLoop(self: *Worker) void {
         const n = std.posix.poll(&poll_fds, -1) catch continue;
         if (n == 0) continue;
 
-        // Shutdown signal takes priority — exit without touching shared state
-        if (poll_fds[1].revents & std.posix.POLL.IN != 0) {
+        // Shutdown signal takes priority — exit without touching shared state.
+        // Check POLL.IN for normal signal, POLL.ERR|POLL.HUP for unexpected
+        // write-end close (prevents spinning if pipe breaks).
+        if (poll_fds[1].revents & (std.posix.POLL.IN | std.posix.POLL.ERR | std.posix.POLL.HUP) != 0) {
             log.info("ACL watch thread shutting down for uid={d}", .{self.uid});
             break;
         }
