@@ -101,10 +101,12 @@ pub fn new(opts: Opts) !Worker {
     };
     errdefer page_alloc.free(socket_path);
 
-    const server = DomainSocket.listen(io, socket_path, uid) catch |e| {
+    var server = DomainSocket.listen(io, socket_path, uid) catch |e| {
         log.err("Failed to listen on {s}: {s}", .{ socket_path, @errorName(e) });
         return e;
     };
+    errdefer server.deinit(io);
+    errdefer std.Io.Dir.cwd().deleteFile(io, socket_path) catch {};
 
     // 5. Init DHCP service
     const dhcp_service = DhcpService.init(io, page_alloc, uid, conf.cni_plugin_dir) catch |e| {
@@ -197,6 +199,8 @@ pub fn run(self: *Worker) !void {
     while (true) {
         var conn_stream = self.server.accept(io) catch |err| {
             log.err("Failed to accept connection: {s}", .{@errorName(err)});
+            const req = std.posix.timespec{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
+            _ = linux.nanosleep(&req, null);
             continue;
         };
 
@@ -239,13 +243,14 @@ pub fn run(self: *Worker) !void {
             },
         };
 
-        _ = std.Thread.spawn(.{}, handleRequests, .{ handler, &self.active_handlers }) catch |e| {
+        const thread = std.Thread.spawn(.{}, handleRequests, .{ handler, &self.active_handlers }) catch |e| {
             _ = self.active_handlers.fetchSub(1, .release);
             log.warn("Failed to spawn handler thread: {s}", .{@errorName(e)});
             handler.deinit();
             std.heap.page_allocator.destroy(handler);
             continue;
         };
+        thread.detach();
     }
 }
 
