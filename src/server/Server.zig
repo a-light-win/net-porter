@@ -42,8 +42,7 @@ pub fn new(opts: Opts) !Server {
     const conf = managed_config.config;
     errdefer managed_config.deinit();
 
-    var logger = @import("root").logger;
-    logger.log_settings = conf.log;
+    @import("root").logger.log_settings = conf.log;
 
     // Scan ACL directory for allowed UIDs (username → UID resolution)
     var acl_manager = AclScanner.init(allocator, conf.acl_dir);
