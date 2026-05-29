@@ -42,9 +42,10 @@ fn setCNIPluginDir(self: *Config, io: std.Io) void {
         return;
     }
     for (cni_plugin_search_paths) |path| blk: {
-        _ = std.Io.Dir.cwd().openDir(io, path, .{}) catch {
+        var dir = std.Io.Dir.cwd().openDir(io, path, .{}) catch {
             break :blk;
         };
+        defer dir.close(io);
         self.cni_plugin_dir = path;
         return;
     }

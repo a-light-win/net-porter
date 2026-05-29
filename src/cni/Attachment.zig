@@ -105,6 +105,7 @@ pub const Attachment = struct {
     /// Stores each plugin's config and its result (if executed).
     pub fn serializeState(self: Attachment, allocator: Allocator) ![]const u8 {
         var configs = try std.ArrayList(json.Value).initCapacity(allocator, self.exec_configs.items.len);
+        errdefer configs.deinit(allocator);
 
         for (self.exec_configs.items) |exec_config| {
             const entry_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
