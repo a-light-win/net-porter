@@ -201,10 +201,14 @@ pub fn run(self: *Worker) !void {
 
     while (true) {
         var conn_stream = self.server.accept(io) catch |err| {
-            log.err("Failed to accept connection: {s}", .{@errorName(err)});
-            const req = linux.timespec{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
-            _ = linux.nanosleep(&req, null);
-            continue;
+            if (isTransientAcceptError(err)) {
+                log.warn("Transient accept error: {s}", .{@errorName(err)});
+                const req = linux.timespec{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
+                _ = linux.nanosleep(&req, null);
+                continue;
+            }
+            log.err("Fatal accept error, shutting down worker: {s}", .{@errorName(err)});
+            break;
         };
 
         // Limit concurrent handlers to prevent resource exhaustion
@@ -295,6 +299,15 @@ fn aclWatchLoop(self: *Worker) void {
             self.acl_manager.reload();
         }
     }
+}
+
+fn isTransientAcceptError(err: std.Io.net.Server.AcceptError) bool {
+    return switch (err) {
+        error.WouldBlock,
+        error.ConnectionAborted,
+        => true,
+        else => false,
+    };
 }
 
 fn handleRequests(handler: *Handler, active_handlers: *std.atomic.Value(usize), allocator: std.mem.Allocator) !void {
