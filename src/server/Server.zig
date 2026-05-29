@@ -104,7 +104,6 @@ pub fn run(self: *Server) !void {
         const has_acl_watch = self.acl_watcher.getInotifyFd() != null;
         const fixed_fds: usize = 1 + @intFromBool(has_acl_watch);
         const total_fds = fixed_fds + wm_fds.len;
-        log.debug("poll: total_fds={d}, fixed_fds={d}, wm_fds={d}", .{ total_fds, fixed_fds, wm_fds.len });
 
         // Stack buffer: 256 entries = 2 inotify + worker pidfds
         var poll_buf: [256]std.posix.pollfd = undefined;
