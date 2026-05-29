@@ -189,8 +189,7 @@ pub const PluginConf = struct {
     }
 
     /// Replace template addresses in the ipam config with actual IPs.
-    /// If no template addresses exist, creates addresses directly from static IPs
-    /// using /24 (IPv4) or /64 (IPv6) LAN prefixes with no gateway.
+    /// Requires an addresses array with CIDR templates in the CNI config.
     /// Routes, DNS, and other ipam fields are preserved from the CNI config as-is.
     pub fn patchAddresses(self: *PluginConf, ips: []const []const u8) !void {
         const allocator = self.arena.?.allocator();
@@ -218,34 +217,12 @@ pub const PluginConf = struct {
         }
 
         // Check for template addresses in the CNI config's ipam
-        const maybe_template = ipam_obj.get("addresses");
-        if (maybe_template == null) {
-            // No template addresses — create addresses directly from static IPs
-            if (ips.len == 0) {
-                log.debug("no template addresses and no static IPs to inject", .{});
-                return;
-            }
-            log.debug("no template addresses in ipam config, creating {d} address(es) from static IPs", .{ips.len});
-
-            var new_addrs = try json.Array.initCapacity(allocator, ips.len);
-            for (ips) |ip| {
-                const prefix: []const u8 = if (isIpv6(ip)) "64" else "24";
-                const actual_addr = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ip, prefix });
-
-                var addr_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
-                try addr_obj.put(allocator, "address", .{ .string = actual_addr });
-                new_addrs.appendAssumeCapacity(.{ .object = addr_obj });
-            }
-
-            var new_ipam = try shadowCopy(allocator, ipam_obj);
-            try new_ipam.put(allocator, "addresses", .{ .array = new_addrs });
-            try self.conf.put(allocator, "ipam", .{ .object = new_ipam });
-
-            log.info("patched {d} address(es) into ipam config", .{new_addrs.items.len});
+        const maybe_template = ipam_obj.get("addresses") orelse {
+            log.warn("ipam.addresses is missing in CNI config; static IPAM requires an addresses array with CIDR template", .{});
             return;
-        }
+        };
 
-        const template_addrs = switch (maybe_template.?) {
+        const template_addrs = switch (maybe_template) {
             .array => |a| a.items,
             else => {
                 log.debug("ipam.addresses is not an array, skipping", .{});
@@ -672,7 +649,7 @@ test "patchAddresses preserves multiple routes via shadowCopy" {
     try std.testing.expectEqualSlices(u8, "10.0.0.0/8", result_routes.items[1].object.get("dst").?.string);
 }
 
-test "patchAddresses creates addresses from static IPs when no template exists" {
+test "patchAddresses with empty template addresses does nothing" {
     const allocator = std.testing.allocator;
     var arena = try ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -680,7 +657,7 @@ test "patchAddresses creates addresses from static IPs when no template exists" 
 
     var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
-    // No addresses key — should create from static IPs
+    // No addresses key — should warn and return without creating anything
 
     var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
     try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
@@ -694,39 +671,8 @@ test "patchAddresses creates addresses from static IPs when no template exists" 
     try plugin_conf.patchAddresses(ips);
 
     const result_ipam = plugin_conf.conf.get("ipam").?.object;
-    const addresses = result_ipam.get("addresses").?.array;
-    try std.testing.expectEqual(@as(usize, 1), addresses.items.len);
-    try std.testing.expectEqualSlices(u8, "192.168.1.50/24", addresses.items[0].object.get("address").?.string);
-    // No gateway when created without template
-    try std.testing.expect(addresses.items[0].object.get("gateway") == null);
-}
-
-test "patchAddresses creates IPv6 address from static IPs when no template exists" {
-    const allocator = std.testing.allocator;
-    var arena = try ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const arena_alloc = arena.allocator();
-
-    var ipam_obj = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
-    try ipam_obj.put(arena_alloc, "type", .{ .string = "static" });
-    // No addresses key — should create from static IPs
-
-    var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
-    try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
-    try conf.put(arena_alloc, "name", .{ .string = "test" });
-    try conf.put(arena_alloc, "cniVersion", .{ .string = "1.0.0" });
-    try conf.put(arena_alloc, "ipam", .{ .object = ipam_obj });
-
-    var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
-
-    const ips = &[_][]const u8{"2001:db8::42"};
-    try plugin_conf.patchAddresses(ips);
-
-    const result_ipam = plugin_conf.conf.get("ipam").?.object;
-    const addresses = result_ipam.get("addresses").?.array;
-    try std.testing.expectEqual(@as(usize, 1), addresses.items.len);
-    try std.testing.expectEqualSlices(u8, "2001:db8::42/64", addresses.items[0].object.get("address").?.string);
-    try std.testing.expect(addresses.items[0].object.get("gateway") == null);
+    // addresses should remain null — nothing was created
+    try std.testing.expect(result_ipam.get("addresses") == null);
 }
 
 test "patchAddresses with dual-stack IPv4 and IPv6" {
