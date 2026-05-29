@@ -614,7 +614,6 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
     self.workers.put(uid, entry) catch {
         if (worker_pidfd >= 0) _ = linux.close(worker_pidfd);
         if (catatonit_pidfd >= 0) _ = linux.close(catatonit_pidfd);
-        self.allocator.free(username);
         return error.OutOfMemory;
     };
     self.rebuildMonitoredFds();
@@ -720,7 +719,6 @@ fn tryAdoptExistingService(self: *WorkerManager, uid: u32, catatonit_pid: std.po
         if (catatonit_pidfd >= 0) _ = linux.close(catatonit_pidfd);
         return false;
     };
-    errdefer self.allocator.free(username);
 
     // Validate username to prevent path traversal
     if (!user_mod.isValidUsername(username)) {
