@@ -267,6 +267,95 @@ pub fn teardown(self: *Cni, tentative_allocator: Allocator, request: plugin.Requ
     log.info("Teardown {s} for uid={d} is complete", .{ request.request.exec.container_name, caller_uid });
 }
 
+test "isStaticIpam returns true when first plugin ipam type is static" {
+    const allocator = std.testing.allocator;
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ipam_obj = try json.ObjectMap.init(a, &.{}, &.{});
+    try ipam_obj.put(a, "type", json.Value{ .string = "static" });
+
+    var plugin_obj = try json.ObjectMap.init(a, &.{}, &.{});
+    try plugin_obj.put(a, "type", json.Value{ .string = "macvlan" });
+    try plugin_obj.put(a, "ipam", json.Value{ .object = ipam_obj });
+
+    var plugins_arr = try json.Array.initCapacity(a, 1);
+    plugins_arr.appendAssumeCapacity(json.Value{ .object = plugin_obj });
+
+    const config = CniConfig{
+        .cniVersion = "1.0.0",
+        .name = "test-static",
+        .plugins = json.Value{ .array = plugins_arr },
+    };
+
+    const cni = Cni{
+        .arena = arena,
+        .io = std.testing.io,
+        .cni_plugin_dir = "/tmp",
+        .config = config,
+    };
+
+    try std.testing.expect(cni.isStaticIpam());
+}
+
+test "isStaticIpam returns false when first plugin ipam type is dhcp" {
+    const allocator = std.testing.allocator;
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ipam_obj = try json.ObjectMap.init(a, &.{}, &.{});
+    try ipam_obj.put(a, "type", json.Value{ .string = "dhcp" });
+
+    var plugin_obj = try json.ObjectMap.init(a, &.{}, &.{});
+    try plugin_obj.put(a, "type", json.Value{ .string = "macvlan" });
+    try plugin_obj.put(a, "ipam", json.Value{ .object = ipam_obj });
+
+    var plugins_arr = try json.Array.initCapacity(a, 1);
+    plugins_arr.appendAssumeCapacity(json.Value{ .object = plugin_obj });
+
+    const config = CniConfig{
+        .cniVersion = "1.0.0",
+        .name = "test-dhcp",
+        .plugins = json.Value{ .array = plugins_arr },
+    };
+
+    const cni = Cni{
+        .arena = arena,
+        .io = std.testing.io,
+        .cni_plugin_dir = "/tmp",
+        .config = config,
+    };
+
+    try std.testing.expect(!cni.isStaticIpam());
+}
+
+test "isStaticIpam returns false when first plugin is not an object" {
+    const allocator = std.testing.allocator;
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var plugins_arr = try json.Array.initCapacity(a, 1);
+    plugins_arr.appendAssumeCapacity(json.Value{ .string = "not-an-object" });
+
+    const config = CniConfig{
+        .cniVersion = "1.0.0",
+        .name = "test-invalid",
+        .plugins = json.Value{ .array = plugins_arr },
+    };
+
+    const cni = Cni{
+        .arena = arena,
+        .io = std.testing.io,
+        .cni_plugin_dir = "/tmp",
+        .config = config,
+    };
+
+    try std.testing.expect(!cni.isStaticIpam());
+}
+
 test {
     _ = CniConfig;
     _ = Attachment;
