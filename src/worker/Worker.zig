@@ -43,6 +43,10 @@ pub const Opts = struct {
     username: ?[]const u8 = null,
     catatonit_pid: ?std.posix.pid_t = null,
     config_path: ?[]const u8 = null,
+    /// Root allocator for all worker-owned allocations. When null, falls back
+    /// to std.heap.page_allocator (no leak detection). Callers should pass a
+    /// DebugAllocator in Debug/ReleaseSafe builds for memory safety checks.
+    allocator: ?std.mem.Allocator = null,
 };
 
 const max_concurrent_handlers: usize = 64;
@@ -70,7 +74,9 @@ pub fn new(opts: Opts) !Worker {
     const uid = opts.uid orelse return error.MissingUid;
     const username = opts.username orelse return error.MissingUsername;
     const catatonit_pid = opts.catatonit_pid orelse return error.MissingCatatonitPid;
-    const page_alloc = std.heap.page_allocator;
+    // Use caller-provided allocator (typically DebugAllocator for leak detection),
+    // falling back to page_allocator when unset (e.g., legacy callers).
+    const page_alloc = opts.allocator orelse std.heap.page_allocator;
 
     // 1. Load config
     var managed_config = config_mod.ManagedConfig.load(io, page_alloc, opts.config_path) catch |e| {
