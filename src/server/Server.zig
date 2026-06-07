@@ -21,11 +21,17 @@ managed_config: config_mod.ManagedConfig,
 pub const Opts = struct {
     config_path: ?[]const u8 = null,
     io: ?std.Io = null,
+    /// Root allocator for all server-owned allocations. When null, falls back
+    /// to std.heap.page_allocator (no leak detection). Callers should pass a
+    /// DebugAllocator in Debug/ReleaseSafe builds for memory safety checks.
+    allocator: ?std.mem.Allocator = null,
 };
 
 pub fn new(opts: Opts) !Server {
     const io = opts.io orelse return error.IoNotInitialized;
-    const allocator = std.heap.page_allocator;
+    // Use caller-provided allocator (typically DebugAllocator for leak detection),
+    // falling back to page_allocator when unset (e.g., legacy callers).
+    const allocator = opts.allocator orelse std.heap.page_allocator;
 
     var managed_config = config_mod.ManagedConfig.load(
         io,
