@@ -58,6 +58,11 @@ const FdMeta = struct {
 const initial_backoff_ms: u32 = 1000;
 const max_backoff_ms: u32 = 60000;
 
+/// Maximum bytes to read from systemctl stdout/stderr. Normal output is < 1KB;
+/// the limit guards against a compromised or malfunctioning systemd exhausting
+/// memory by writing unbounded output.
+const SYSTEMCTL_OUTPUT_LIMIT: usize = 64 * 1024;
+
 allocator: Allocator,
 io: std.Io,
 config_path: ?[]const u8,
@@ -442,6 +447,27 @@ fn serviceInstanceName(allocator: Allocator, uid: u32) ![]const u8 {
     return std.fmt.allocPrint(allocator, "net-porter-worker@{d}.service", .{uid});
 }
 
+/// Run a systemctl command with bounded stdout/stderr allocation.
+///
+/// Wraps `std.process.run` so all three call sites share the same output limit
+/// (SYSTEMCTL_OUTPUT_LIMIT). Without an explicit limit, `std.process.run` will
+/// allocate unbounded heap for the child's streams — a compromised or
+/// malfunctioning systemd could exhaust memory. The 64 KiB cap is generous:
+/// real systemctl output is well under 1 KiB.
+///
+/// Caller owns the returned `RunResult.stdout` and `RunResult.stderr` and must
+/// free them with `self.allocator`.
+fn runSystemctl(
+    self: *WorkerManager,
+    argv: []const []const u8,
+) !std.process.RunResult {
+    return std.process.run(self.allocator, self.io, .{
+        .argv = argv,
+        .stdout_limit = std.Io.Limit.limited(SYSTEMCTL_OUTPUT_LIMIT),
+        .stderr_limit = std.Io.Limit.limited(SYSTEMCTL_OUTPUT_LIMIT),
+    });
+}
+
 /// Write the environment file for a worker instance.
 /// The template service file (net-porter-worker@.service) reads this via EnvironmentFile=.
 fn writeEnvFile(io: std.Io, allocator: Allocator, uid: u32, username: []const u8, catatonit_pid: std.posix.pid_t, config_path: ?[]const u8) !void {
@@ -555,9 +581,7 @@ fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !
     const svc_name = serviceInstanceName(self.allocator, uid) catch return error.OutOfMemory;
     defer self.allocator.free(svc_name);
 
-    const result = std.process.run(self.allocator, self.io, .{
-        .argv = &[_][]const u8{ "systemctl", "start", svc_name },
-    }) catch |err| {
+    const result = self.runSystemctl(&[_][]const u8{ "systemctl", "start", svc_name }) catch |err| {
         log.err("Failed to start {s}: {s}", .{ svc_name, @errorName(err) });
         return err;
     };
@@ -638,9 +662,7 @@ fn stopService(self: *WorkerManager, uid: u32) void {
     const svc_name = std.fmt.allocPrint(self.allocator, "net-porter-worker@{d}.service", .{uid}) catch return;
     defer self.allocator.free(svc_name);
 
-    const result = std.process.run(self.allocator, self.io, .{
-        .argv = &[_][]const u8{ "systemctl", "stop", svc_name },
-    }) catch |err| {
+    const result = self.runSystemctl(&[_][]const u8{ "systemctl", "stop", svc_name }) catch |err| {
         log.warn("Failed to stop service {s}: {s}", .{ svc_name, @errorName(err) });
         return;
     };
@@ -771,9 +793,7 @@ fn findServiceWorkerPid(self: *WorkerManager, uid: u32) !std.posix.pid_t {
 /// Query systemd for a service's MainPID via `systemctl show`.
 /// Returns null if the PID is not yet available or on any error.
 fn queryServiceMainPid(self: *WorkerManager, svc_name: []const u8) ?std.posix.pid_t {
-    const result = std.process.run(self.allocator, self.io, .{
-        .argv = &[_][]const u8{ "systemctl", "show", svc_name, "--property=MainPID", "--value" },
-    }) catch return null;
+    const result = self.runSystemctl(&[_][]const u8{ "systemctl", "show", svc_name, "--property=MainPID", "--value" }) catch return null;
     defer self.allocator.free(result.stdout);
     defer self.allocator.free(result.stderr);
 
