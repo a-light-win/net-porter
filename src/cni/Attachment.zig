@@ -12,6 +12,7 @@ const shadowCopy = @import("PluginConf.zig").shadowCopy;
 const CniCommand = @import("Cni.zig").CniCommand;
 const responseError = @import("Cni.zig").responseError;
 const responseResult = @import("Cni.zig").responseResult;
+const isValidPluginType = @import("CniLoader.zig").isValidPluginType;
 
 /// Transient attachment — created per request, not stored in memory.
 /// State is persisted to disk via StateFile.
@@ -318,9 +319,8 @@ pub const Attachment = struct {
     }
 
     fn cni_plugin_binary(self: Attachment, allocator: Allocator, plugin_type: []const u8) ![]const u8 {
-        // Reject path traversal characters in plugin type
-        if (std.mem.indexOf(u8, plugin_type, "/") != null) return error.InvalidPluginType;
-        if (std.mem.indexOf(u8, plugin_type, "..") != null) return error.InvalidPluginType;
+        // Validate plugin type identifier (whitelist + length + prefix)
+        if (!isValidPluginType(plugin_type)) return error.InvalidPluginType;
         const total_len = self.cni_plugin_dir.len + 1 + plugin_type.len;
         var bin = try allocator.alloc(u8, total_len);
         @memcpy(bin[0..self.cni_plugin_dir.len], self.cni_plugin_dir);

@@ -112,11 +112,9 @@ pub const CniLoader = struct {
             const plugin_type = plugin_obj.get("type") orelse return error.MissingPluginType;
             if (plugin_type != .string) return error.InvalidPluginType;
 
-            // Check plugin binary exists (reject path traversal in type name)
-            if (std.mem.indexOf(u8, plugin_type.string, "/") != null or
-                std.mem.indexOf(u8, plugin_type.string, "..") != null)
-            {
-                log.err("Invalid plugin type '{s}' (path traversal characters)", .{plugin_type.string});
+            // Validate plugin type identifier (whitelist + length + prefix)
+            if (!isValidPluginType(plugin_type.string)) {
+                log.err("Invalid plugin type '{s}' (must be alphanumeric, dash, underscore, dot; max 64 chars; cannot start with - or .)", .{plugin_type.string});
                 return error.InvalidPluginType;
             }
 
@@ -141,6 +139,21 @@ pub const CniLoader = struct {
         return config;
     }
 };
+
+/// Validate CNI plugin type identifier against a safe whitelist.
+/// Allows: [a-zA-Z0-9\-_.], max 64 chars, must not start with '-' or '.'.
+/// Rejects path traversal, leading-dash flag injection, whitespace, and oversized names.
+pub fn isValidPluginType(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64) return false;
+    if (name[0] == '-' or name[0] == '.') return false;
+    for (name) |c| {
+        switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.' => {},
+            else => return false,
+        }
+    }
+    return true;
+}
 
 // ============================================================
 // Tests
@@ -380,4 +393,52 @@ test "CniLoader skips duplicate network name and keeps first" {
     // Only one config should be loaded (first wins)
     try std.testing.expectEqual(@as(usize, 1), configs.count());
     try std.testing.expect(configs.contains("dup-net"));
+}
+
+test "isValidPluginType accepts valid names" {
+    try std.testing.expect(isValidPluginType("bridge"));
+    try std.testing.expect(isValidPluginType("firewall"));
+    try std.testing.expect(isValidPluginType("dhcp-cni"));
+    try std.testing.expect(isValidPluginType("my_plugin"));
+    try std.testing.expect(isValidPluginType("plugin.v2"));
+    try std.testing.expect(isValidPluginType("a"));
+    try std.testing.expect(isValidPluginType("0leading-digit"));
+    try std.testing.expect(isValidPluginType("ABC123"));
+}
+
+test "isValidPluginType rejects empty and oversized names" {
+    try std.testing.expect(!isValidPluginType(""));
+    // 65 chars — one beyond the 64-char limit
+    const long_name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    try std.testing.expect(!isValidPluginType(long_name));
+    // 64 chars — boundary, should pass
+    const max_name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    try std.testing.expect(isValidPluginType(max_name));
+}
+
+test "isValidPluginType rejects path traversal characters" {
+    try std.testing.expect(!isValidPluginType("/etc/passwd"));
+    try std.testing.expect(!isValidPluginType(".."));
+    try std.testing.expect(!isValidPluginType("foo/bar"));
+    try std.testing.expect(!isValidPluginType("a/.."));
+    try std.testing.expect(!isValidPluginType("."));
+}
+
+test "isValidPluginType rejects leading dash and dot" {
+    try std.testing.expect(!isValidPluginType("-flag"));
+    try std.testing.expect(!isValidPluginType("--verbose"));
+    try std.testing.expect(!isValidPluginType(".hidden"));
+    try std.testing.expect(!isValidPluginType(".config"));
+}
+
+test "isValidPluginType rejects whitespace and special characters" {
+    try std.testing.expect(!isValidPluginType("name with spaces"));
+    try std.testing.expect(!isValidPluginType("tab\there"));
+    try std.testing.expect(!isValidPluginType("newline\n"));
+    try std.testing.expect(!isValidPluginType("null\x00byte"));
+    try std.testing.expect(!isValidPluginType("semi;colon"));
+    try std.testing.expect(!isValidPluginType("pipe|char"));
+    try std.testing.expect(!isValidPluginType("shell$(cmd)"));
+    try std.testing.expect(!isValidPluginType("back\\tick"));
+    try std.testing.expect(!isValidPluginType("quote\"char"));
 }
