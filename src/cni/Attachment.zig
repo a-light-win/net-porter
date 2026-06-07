@@ -235,7 +235,7 @@ pub const Attachment = struct {
                 },
                 else => return err,
             };
-            if (result.exited != 0) {
+            if (result != .exited or result.exited != 0) {
                 log.warn("Setup {s} failed", .{request.request.exec.container_name});
                 try responseError(tentative_allocator, responser, exec_config.result.?);
                 return error.UnexpectedError;
@@ -283,7 +283,7 @@ pub const Attachment = struct {
                 else => return err,
             };
 
-            if (result.exited != 0) {
+            if (result != .exited or result.exited != 0) {
                 log.warn(
                     "Teardown {s} failed on step {s}, ignore it. the detail error is {s}",
                     .{

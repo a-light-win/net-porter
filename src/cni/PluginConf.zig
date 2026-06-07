@@ -418,10 +418,13 @@ pub const PluginConf = struct {
     /// Execute the CNI plugin binary, bounded by `timeout_ms`.
     ///
     /// On Linux >= 5.3, the child is monitored via a pidfd so that a hanging
-    /// plugin can be detected and killed without blocking the caller. On older
-    /// kernels `pidfd_open` is unavailable and the wait is unbounded (matches
-    /// the prior behavior). Either way, `process.wait` is always invoked so
-    /// the child is reaped and never becomes a zombie.
+    /// plugin can be detected and killed without blocking the caller. Either
+    /// way, `process.wait` is always invoked so the child is reaped and never
+    /// becomes a zombie.
+    ///
+    /// Note: on Linux < 5.3 where pidfd_open is unavailable, both the pipe
+    /// reads (allocRemaining on stdout/stderr) and process.wait() block
+    /// indefinitely. The timeout protection is only effective on Linux >= 5.3.
     ///
     /// Errors: returns `error.CniPluginTimeout` when the child has not exited
     /// within `timeout_ms` (child is killed and reaped before returning). All
@@ -877,6 +880,19 @@ test "exec returns CniPluginTimeout when plugin hangs" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
+    // Skip on kernels without pidfd_open (Linux < 5.3, or restricted by
+    // seccomp/yama). On those kernels the fallback path performs a blocking
+    // wait and the timeout is ineffective, so this test would hang for the
+    // full sleep duration and then fail.
+    {
+        const self_pid = std.os.linux.getpid();
+        const pidfd_raw = std.os.linux.pidfd_open(self_pid, 0);
+        if (std.posix.errno(pidfd_raw) != .SUCCESS) {
+            return error.SkipZigTest;
+        }
+        _ = std.os.linux.close(@intCast(pidfd_raw));
+    }
+
     var arena = try ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -891,8 +907,9 @@ test "exec returns CniPluginTimeout when plugin hangs" {
         .conf = conf,
     };
 
-    // Create a temp shell script that sleeps for 60s — long enough to exceed
-    // any reasonable test timeout, short enough to be obviously a "hang".
+    // Create a temp shell script that sleeps for 10s — long enough to exceed
+    // any reasonable test timeout, short enough to limit orphan risk if the
+    // test runner is killed before exec()'s SIGKILL reaches the child.
     // Embedding the PID in the path keeps parallel test runs from colliding.
     const script_path = try std.fmt.allocPrint(
         allocator,
@@ -907,7 +924,7 @@ test "exec returns CniPluginTimeout when plugin hangs" {
             .permissions = @enumFromInt(0o755),
         });
         defer file.close(io);
-        try file.writeStreamingAll(io, "#!/bin/sh\nexec sleep 60\n");
+        try file.writeStreamingAll(io, "#!/bin/sh\nexec sleep 10\n");
     }
 
     var env_map = std.process.Environ.Map.init(allocator);
