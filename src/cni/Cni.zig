@@ -387,6 +387,41 @@ test "isStaticIpam returns false when plugins array is empty" {
     try std.testing.expect(!cni.isStaticIpam());
 }
 
+test "deinit does not double-free the Cni struct" {
+    // Regression test for REL-001: deinit() previously called
+    // allocator.destroy(self) after self.arena.deinit(), which is a
+    // double-free because the Cni struct is allocated inside the arena.
+    // With std.testing.allocator (backed by GeneralPurposeAllocator), the
+    // buggy version would panic on invalid free.
+    const allocator = std.testing.allocator;
+
+    // JSON config lives in a separate std.heap.ArenaAllocator so cleanup is
+    // trivial and does not interfere with Cni's own arena.
+    var config_arena = std.heap.ArenaAllocator.init(allocator);
+    defer config_arena.deinit();
+    const a = config_arena.allocator();
+
+    var ipam_obj = try json.ObjectMap.init(a, &.{}, &.{});
+    try ipam_obj.put(a, "type", json.Value{ .string = "static" });
+
+    var plugin_obj = try json.ObjectMap.init(a, &.{}, &.{});
+    try plugin_obj.put(a, "type", json.Value{ .string = "macvlan" });
+    try plugin_obj.put(a, "ipam", json.Value{ .object = ipam_obj });
+
+    var plugins_arr = try json.Array.initCapacity(a, 1);
+    plugins_arr.appendAssumeCapacity(json.Value{ .object = plugin_obj });
+
+    const config = CniConfig{
+        .cniVersion = "1.0.0",
+        .name = "test-deinit",
+        .plugins = json.Value{ .array = plugins_arr },
+    };
+
+    const cni = try Cni.initFromConfig(std.testing.io, allocator, config, "/tmp");
+    // Must not panic or trigger double-free detection.
+    cni.deinit();
+}
+
 test {
     _ = CniConfig;
     _ = Attachment;
