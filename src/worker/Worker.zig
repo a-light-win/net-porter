@@ -64,6 +64,7 @@ server: std.Io.net.Server,
 socket_path: [:0]const u8,
 managed_config: config_mod.ManagedConfig,
 active_handlers: std.atomic.Value(usize) = .init(0),
+shutting_down: std.atomic.Value(bool) = .init(false),
 acl_thread: ?std.Thread = null,
 shutdown_pipe: [2]std.posix.fd_t = .{ -1, -1 },
 
@@ -170,6 +171,15 @@ pub fn deinit(self: *Worker) void {
         self.acl_thread = null;
     }
 
+    // Wait for all active handlers to drain before cleaning up shared resources.
+    // After the accept loop exits, shutting_down is set so newly-spawned
+    // handler threads skip processing. We still must wait for handlers that
+    // were already past the early-return check and are mid-request.
+    while (self.active_handlers.load(.acquire) > 0) {
+        const req = linux.timespec{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = linux.nanosleep(&req, null);
+    }
+
     // Stop DHCP service first
     self.dhcp_service.deinit();
 
@@ -257,7 +267,7 @@ pub fn run(self: *Worker) !void {
             },
         };
 
-        const thread = std.Thread.spawn(.{}, handleRequests, .{ handler, &self.active_handlers, self.allocator }) catch |e| {
+        const thread = std.Thread.spawn(.{}, handleRequests, .{ handler, &self.active_handlers, &self.shutting_down, self.allocator }) catch |e| {
             _ = self.active_handlers.fetchSub(1, .release);
             log.warn("Failed to spawn handler thread: {s}", .{@errorName(e)});
             handler.deinit();
@@ -266,6 +276,11 @@ pub fn run(self: *Worker) !void {
         };
         thread.detach();
     }
+
+    // Accept loop has exited (server socket no longer accepting). Signal
+    // in-flight handlers to skip processing, and wait for them to drain
+    // before deinit() tears down shared resources (e.g. dhcp_service).
+    self.shutting_down.store(true, .release);
 }
 
 /// Background thread: watches ACL directory for changes and triggers reload.
@@ -317,11 +332,21 @@ fn isTransientAcceptError(err: std.Io.net.Server.AcceptError) bool {
     };
 }
 
-fn handleRequests(handler: *Handler, active_handlers: *std.atomic.Value(usize), allocator: std.mem.Allocator) !void {
+fn handleRequests(
+    handler: *Handler,
+    active_handlers: *std.atomic.Value(usize),
+    shutting_down: *std.atomic.Value(bool),
+    allocator: std.mem.Allocator,
+) !void {
     defer {
         handler.deinit();
         allocator.destroy(handler);
         _ = active_handlers.fetchSub(1, .release);
     }
+    // If the worker is shutting down, skip processing — the request was
+    // accepted before the accept loop exited, but shared resources (e.g.
+    // dhcp_service) may be torn down concurrently. The defer above still
+    // runs to release the slot and free the handler.
+    if (shutting_down.load(.acquire)) return;
     try handler.handle();
 }
