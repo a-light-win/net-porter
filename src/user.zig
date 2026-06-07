@@ -41,7 +41,7 @@ pub fn isValidUsername(name: []const u8) bool {
     return true;
 }
 
-pub fn getUsername(allocator: std.mem.Allocator, uid: std.posix.uid_t) ?[:0]const u8 {
+pub fn getUsername(allocator: std.mem.Allocator, uid: std.posix.uid_t) !?[:0]const u8 {
     var buf: [1024]u8 = undefined;
     var pwd: c.struct_passwd = undefined;
     var result: ?*c.struct_passwd = null;
@@ -50,7 +50,7 @@ pub fn getUsername(allocator: std.mem.Allocator, uid: std.posix.uid_t) ?[:0]cons
     if (ret != 0 or result == null) return null;
 
     const name = std.mem.sliceTo(pwd.pw_name, 0);
-    return allocator.dupeZ(u8, name) catch null;
+    return try allocator.dupeZ(u8, name);
 }
 
 test {

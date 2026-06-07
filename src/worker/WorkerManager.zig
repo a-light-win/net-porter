@@ -560,7 +560,7 @@ fn removeEnvFile(io: std.Io, allocator: Allocator, uid: u32) void {
 
 fn spawnWorker(self: *WorkerManager, uid: u32, catatonit_pid: std.posix.pid_t) !void {
     // Resolve UID to username for worker ACL loading
-    const username = user_mod.getUsername(self.allocator, uid) orelse {
+    const username = try user_mod.getUsername(self.allocator, uid) orelse {
         log.err("Failed to resolve uid={d} to username, cannot spawn worker", .{uid});
         return error.UserNotFound;
     };
@@ -734,7 +734,12 @@ fn tryAdoptExistingService(self: *WorkerManager, uid: u32, catatonit_pid: std.po
     // catatonit_pidfd failure is non-fatal — we can still detect worker exit
 
     // Resolve UID to username for tracking (detect UID reuse)
-    const username = user_mod.getUsername(self.allocator, uid) orelse {
+    const username = user_mod.getUsername(self.allocator, uid) catch {
+        log.warn("Failed to resolve uid={d} to username for adoption (allocator error), skipping", .{uid});
+        _ = linux.close(worker_pidfd);
+        if (catatonit_pidfd >= 0) _ = linux.close(catatonit_pidfd);
+        return false;
+    } orelse {
         log.warn("Failed to resolve uid={d} to username for adoption, skipping", .{uid});
         _ = linux.close(worker_pidfd);
         if (catatonit_pidfd >= 0) _ = linux.close(catatonit_pidfd);

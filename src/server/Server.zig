@@ -219,7 +219,7 @@ fn handleAclChange(self: *Server) void {
         if (is_added) continue;
 
         const stored_username = self.worker_manager.getWorkerUsername(uid) orelse continue;
-        const current_username = user_mod.getUsername(self.uid_tracker.allocator, uid) orelse continue;
+        const current_username = user_mod.getUsername(self.uid_tracker.allocator, uid) catch continue orelse continue;
 
         if (!user_mod.isValidUsername(current_username)) {
             log.warn("Username '{s}' for uid={d} failed validation, skipping", .{ current_username, uid });
