@@ -89,6 +89,9 @@ fn deinitAcls(self: *WorkerAclManager) void {
 /// between disk read and watch registration (standard load-after-watch pattern).
 pub fn load(self: *WorkerAclManager) void {
     self.setupInotify();
+    if (self.inotify_fd == null) {
+        log.warn("ACL hot-reload unavailable for uid={d} (inotify setup failed), ACL changes will require worker restart", .{self.uid});
+    }
     self.doLoad();
 }
 
