@@ -58,9 +58,20 @@ fn run() !void {
     defer {
         if (use_gpa) _ = gpa.deinit();
     }
-    worker_opts.allocator = if (use_gpa) gpa.allocator() else std.heap.page_allocator;
 
-    var worker = try Worker.new(worker_opts);
+    // Build a local Opts instead of mutating the global worker_opts. The GPA's
+    // allocator() returns a pointer into the stack-local gpa, so storing it in
+    // the global would leave a dangling pointer after run() returns.
+    const opts = Worker.Opts{
+        .io = worker_opts.io,
+        .uid = worker_opts.uid,
+        .username = worker_opts.username,
+        .catatonit_pid = worker_opts.catatonit_pid,
+        .config_path = worker_opts.config_path,
+        .allocator = if (use_gpa) gpa.allocator() else std.heap.page_allocator,
+    };
+
+    var worker = try Worker.new(opts);
     defer worker.deinit();
 
     try worker.run();

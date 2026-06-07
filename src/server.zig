@@ -43,9 +43,17 @@ fn run() !void {
     defer {
         if (use_gpa) _ = gpa.deinit();
     }
-    server_opts.allocator = if (use_gpa) gpa.allocator() else std.heap.page_allocator;
 
-    var server = try Server.new(server_opts);
+    // Build a local Opts instead of mutating the global server_opts. The GPA's
+    // allocator() returns a pointer into the stack-local gpa, so storing it in
+    // the global would leave a dangling pointer after run() returns.
+    const opts = Server.Opts{
+        .io = server_opts.io,
+        .config_path = server_opts.config_path,
+        .allocator = if (use_gpa) gpa.allocator() else std.heap.page_allocator,
+    };
+
+    var server = try Server.new(opts);
     defer server.deinit();
 
     try server.run();
