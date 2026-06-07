@@ -186,7 +186,7 @@ pub fn injectTestWorker(self: *WorkerManager, uid: u32, username: []const u8) !v
 pub fn processPollEvents(self: *WorkerManager, poll_results: []const std.posix.pollfd) void {
     if (poll_results.len == 0) return;
 
-    const interesting = std.posix.POLL.IN | std.posix.POLL.ERR | std.posix.POLL.HUP;
+    const interesting = std.posix.POLL.IN | std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL;
     for (poll_results, 0..) |pfd, i| {
         if (pfd.revents & interesting != 0) {
             const meta = self.monitored_metas.items[i];
