@@ -66,7 +66,6 @@ shutdown_pipe: [2]std.posix.fd_t = .{ -1, -1 },
 /// Initialize the worker. Performs all setup in the correct order:
 /// load config → create socket → namespace setup → init subsystems.
 pub fn new(opts: Opts) !Worker {
-    log.info("Worker initializing: uid={?d} username={s} catatonit_pid={?d} config={s}", .{ opts.uid, opts.username orelse "(null)", opts.catatonit_pid, opts.config_path orelse "(default)" });
     const io = opts.io orelse return error.IoNotInitialized;
     const uid = opts.uid orelse return error.MissingUid;
     const username = opts.username orelse return error.MissingUsername;
@@ -81,6 +80,8 @@ pub fn new(opts: Opts) !Worker {
     const conf = managed_config.config;
     @import("root").logger.log_settings = conf.log;
     errdefer managed_config.deinit();
+
+    log.info("Worker initializing: uid={?d} username={s} catatonit_pid={?d} config={s}", .{ opts.uid, opts.username orelse "(null)", opts.catatonit_pid, opts.config_path orelse "(default)" });
 
     // 2. Load ACL for this user (loads <username>.json + groups)
     var acl_manager = AclManager.init(page_alloc, io, conf.acl_dir, username, uid) catch |e| {
