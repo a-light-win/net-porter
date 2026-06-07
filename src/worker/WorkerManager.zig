@@ -380,44 +380,50 @@ fn scheduleRetry(self: *WorkerManager) void {
 }
 
 /// Rebuild monitored fd lists from workers map.
+///
+/// Pre-allocates capacity up front so all appends are infallible. This is
+/// critical: a previous version used `catch continue`, which on allocation
+/// failure would silently drop worker/catatonit pidfds from the monitored
+/// set, causing worker deaths to go undetected (REL-006).
 fn rebuildMonitoredFds(self: *WorkerManager) void {
     self.monitored_pollfds.clearRetainingCapacity();
     self.monitored_metas.clearRetainingCapacity();
+
+    // Each worker can contribute at most two entries (catatonit pidfd + worker pidfd).
+    // If pre-allocation fails we cannot safely monitor anything — leave the lists
+    // empty rather than risking a partial, out-of-sync rebuild.
+    const max_entries = self.workers.count() * 2;
+    self.monitored_pollfds.ensureTotalCapacity(self.allocator, max_entries) catch return;
+    self.monitored_metas.ensureTotalCapacity(self.allocator, max_entries) catch return;
 
     var it = self.workers.iterator();
     while (it.next()) |entry| {
         const e = entry.value_ptr;
 
-        // Catatonit pidfd — append to both arrays atomically to keep them in sync
+        // Catatonit pidfd — append to both arrays; capacity is reserved above.
         if (e.catatonit_pidfd >= 0) {
-            self.monitored_pollfds.append(self.allocator, .{
+            self.monitored_pollfds.appendAssumeCapacity(.{
                 .fd = e.catatonit_pidfd,
                 .events = std.posix.POLL.IN,
                 .revents = 0,
-            }) catch continue;
-            self.monitored_metas.append(self.allocator, .{
+            });
+            self.monitored_metas.appendAssumeCapacity(.{
                 .uid = e.uid,
                 .kind = .catatonit,
-            }) catch {
-                _ = self.monitored_pollfds.pop();
-                continue;
-            };
+            });
         }
 
-        // Worker pidfd — append to both arrays atomically to keep them in sync
+        // Worker pidfd — append to both arrays; capacity is reserved above.
         if (e.pidfd >= 0) {
-            self.monitored_pollfds.append(self.allocator, .{
+            self.monitored_pollfds.appendAssumeCapacity(.{
                 .fd = e.pidfd,
                 .events = std.posix.POLL.IN,
                 .revents = 0,
-            }) catch continue;
-            self.monitored_metas.append(self.allocator, .{
+            });
+            self.monitored_metas.appendAssumeCapacity(.{
                 .uid = e.uid,
                 .kind = .worker,
-            }) catch {
-                _ = self.monitored_pollfds.pop();
-                continue;
-            };
+            });
         }
     }
 }
