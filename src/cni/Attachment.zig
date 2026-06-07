@@ -7,6 +7,7 @@ const plugin = @import("../plugin.zig");
 const Responser = @import("../common/Responser.zig");
 const CniConfig = @import("CniConfig.zig").CniConfig;
 const PluginConf = @import("PluginConf.zig").PluginConf;
+const CNI_PLUGIN_TIMEOUT_MS = @import("PluginConf.zig").CNI_PLUGIN_TIMEOUT_MS;
 const shadowCopy = @import("PluginConf.zig").shadowCopy;
 const CniCommand = @import("Cni.zig").CniCommand;
 const responseError = @import("Cni.zig").responseError;
@@ -223,7 +224,17 @@ pub const Attachment = struct {
                 }
             }
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
-            const result = try exec_config.exec(io, tentative_allocator, cmd, env_map);
+            const result = exec_config.exec(io, tentative_allocator, cmd, env_map, CNI_PLUGIN_TIMEOUT_MS) catch |err| switch (err) {
+                error.CniPluginTimeout => {
+                    log.warn(
+                        "Setup {s} timed out after {d}ms on plugin {s}",
+                        .{ request.request.exec.container_name, CNI_PLUGIN_TIMEOUT_MS, exec_config.getType() },
+                    );
+                    responser.writeError("CNI plugin timed out", .{});
+                    return error.UnexpectedError;
+                },
+                else => return err,
+            };
             if (result.exited != 0) {
                 log.warn("Setup {s} failed", .{request.request.exec.container_name});
                 try responseError(tentative_allocator, responser, exec_config.result.?);
@@ -261,7 +272,16 @@ pub const Attachment = struct {
             }
 
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
-            const result = try exec_config.exec(io, tentative_allocator, cmd, env_map);
+            const result = exec_config.exec(io, tentative_allocator, cmd, env_map, CNI_PLUGIN_TIMEOUT_MS) catch |err| switch (err) {
+                error.CniPluginTimeout => {
+                    log.warn(
+                        "Teardown {s} timed out after {d}ms on plugin {s}, ignoring",
+                        .{ request.request.exec.container_name, CNI_PLUGIN_TIMEOUT_MS, exec_config.getType() },
+                    );
+                    continue;
+                },
+                else => return err,
+            };
 
             if (result.exited != 0) {
                 log.warn(

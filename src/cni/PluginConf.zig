@@ -7,6 +7,11 @@ const CniConfig = @import("CniConfig.zig").CniConfig;
 
 const max_plugin_output: usize = 4 * 1024 * 1024; // 4 MB
 
+/// Hard cap on CNI plugin execution time. A hanging plugin would otherwise
+/// block a worker handler thread indefinitely; with max_concurrent_handlers=64,
+/// 64 hanging plugins exhaust the handler pool and cause denial of service.
+pub const CNI_PLUGIN_TIMEOUT_MS: i32 = 60_000;
+
 pub fn shadowCopy(allocator: Allocator, src: json.ObjectMap) !json.ObjectMap {
     var new_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
     var it = src.iterator();
@@ -410,7 +415,26 @@ pub const PluginConf = struct {
         try self.conf.put(allocator, "prevResult", parsed.value);
     }
 
-    pub fn exec(self: *PluginConf, io: std.Io, tentative_allocator: Allocator, cmd: []const u8, env_map: std.process.Environ.Map) !std.process.Child.Term {
+    /// Execute the CNI plugin binary, bounded by `timeout_ms`.
+    ///
+    /// On Linux >= 5.3, the child is monitored via a pidfd so that a hanging
+    /// plugin can be detected and killed without blocking the caller. On older
+    /// kernels `pidfd_open` is unavailable and the wait is unbounded (matches
+    /// the prior behavior). Either way, `process.wait` is always invoked so
+    /// the child is reaped and never becomes a zombie.
+    ///
+    /// Errors: returns `error.CniPluginTimeout` when the child has not exited
+    /// within `timeout_ms` (child is killed and reaped before returning). All
+    /// other errors are propagated from `std.process.spawn`, `std.posix.poll`,
+    /// `std.process.Child.wait`, and pipe I/O.
+    pub fn exec(
+        self: *PluginConf,
+        io: std.Io,
+        tentative_allocator: Allocator,
+        cmd: []const u8,
+        env_map: std.process.Environ.Map,
+        timeout_ms: i32,
+    ) !std.process.Child.Term {
         _ = tentative_allocator;
         const allocator = self.arena.?.allocator();
 
@@ -426,11 +450,15 @@ pub const PluginConf = struct {
         });
         // Ensure child process is cleaned up on any error between spawn and wait.
         // Without this, pipe fds leak and the child becomes a zombie process.
+        // The id-check guards against double-reap when an error path has already
+        // called wait(io) (e.g. timeout).
         errdefer {
             if (process.stdin) |f| f.close(io);
             if (process.stdout) |f| f.close(io);
             if (process.stderr) |f| f.close(io);
-            if (process.wait(io)) |_| {} else |_| {} // reap zombie
+            if (process.id != null) {
+                if (process.wait(io)) |_| {} else |_| {} // reap zombie
+            }
         }
 
         var stdout = std.ArrayListUnmanaged(u8).empty;
@@ -441,6 +469,41 @@ pub const PluginConf = struct {
         try self.stringify(io, process.stdin.?);
         process.stdin.?.close(io);
         process.stdin = null;
+
+        // Bound the wait for the child to exit. pidfd_open gives us a pollable
+        // fd that becomes readable when the child terminates.
+        const pid = process.id.?;
+        const pidfd_raw = std.os.linux.pidfd_open(pid, 0);
+        const have_pidfd = (std.posix.errno(pidfd_raw) == .SUCCESS);
+        if (have_pidfd) {
+            const pidfd: std.posix.fd_t = @intCast(pidfd_raw);
+            defer _ = std.os.linux.close(pidfd);
+
+            var poll_fds = [_]std.posix.pollfd{.{
+                .fd = pidfd,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            const n_ready = std.posix.poll(&poll_fds, timeout_ms) catch |err| {
+                // poll failed — kill the child defensively and propagate.
+                _ = std.os.linux.kill(pid, std.os.linux.SIG.KILL);
+                _ = process.wait(io) catch {};
+                return err;
+            };
+            if (n_ready == 0) {
+                log.warn(
+                    "CNI plugin '{s}' timed out after {d}ms; killing pid={d}",
+                    .{ self.getType(), timeout_ms, pid },
+                );
+                _ = std.os.linux.kill(pid, std.os.linux.SIG.KILL);
+                _ = process.wait(io) catch {};
+                return error.CniPluginTimeout;
+            }
+            // n_ready > 0: pidfd is readable, child has exited. Fall through
+            // to read pipes and reap normally.
+        }
+        // If pidfd_open was unsupported (kernel < 5.3), behave as before:
+        // block in `wait(io)` until the child exits.
 
         // Read stdout and stderr into buffers
         if (process.stdout) |out_file| {
@@ -804,4 +867,112 @@ test "patchAddresses with IPv6 only" {
     try std.testing.expectEqual(@as(usize, 1), addresses.items.len);
     try std.testing.expectEqualSlices(u8, "2001:db8::42/64", addresses.items[0].object.get("address").?.string);
     try std.testing.expectEqualSlices(u8, "2001:db8::1", addresses.items[0].object.get("gateway").?.string);
+}
+
+// -- Tests for exec timeout --
+
+test "exec returns CniPluginTimeout when plugin hangs" {
+    // This test verifies the DoS fix: a hanging CNI plugin must be killed and
+    // exec must return error.CniPluginTimeout rather than blocking forever.
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var conf = try json.ObjectMap.init(a, &.{}, &.{});
+    try conf.put(a, "cniVersion", json.Value{ .string = "1.0.0" });
+    try conf.put(a, "name", json.Value{ .string = "exec-timeout-test" });
+    try conf.put(a, "type", json.Value{ .string = "hang" });
+
+    var plugin_conf = PluginConf{
+        .arena = arena,
+        .conf = conf,
+    };
+
+    // Create a temp shell script that sleeps for 60s — long enough to exceed
+    // any reasonable test timeout, short enough to be obviously a "hang".
+    // Embedding the PID in the path keeps parallel test runs from colliding.
+    const script_path = try std.fmt.allocPrint(
+        allocator,
+        "/tmp/.net-porter-test-hang-{d}.sh",
+        .{std.os.linux.getpid()},
+    );
+    defer allocator.free(script_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, script_path) catch {};
+
+    {
+        const file = try std.Io.Dir.createFileAbsolute(io, script_path, .{
+            .permissions = @enumFromInt(0o755),
+        });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "#!/bin/sh\nexec sleep 60\n");
+    }
+
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+
+    // 500ms timeout — well below the 60s sleep, generous enough to avoid
+    // false positives on slow CI.
+    var ts_before: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts_before);
+    const result = plugin_conf.exec(io, allocator, script_path, env_map, 500);
+    var ts_after: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts_after);
+    const elapsed_ms: i64 =
+        (@as(i64, ts_after.sec) - @as(i64, ts_before.sec)) * std.time.ms_per_s +
+        (@divFloor(@as(i64, ts_after.nsec), std.time.ns_per_ms) -
+            @divFloor(@as(i64, ts_before.nsec), std.time.ns_per_ms));
+
+    try std.testing.expectError(error.CniPluginTimeout, result);
+    // Returned within a few seconds (not 60s) — proves the child was killed
+    // and we did not block waiting for it to exit on its own.
+    try std.testing.expect(elapsed_ms < 5_000);
+}
+
+test "exec succeeds when plugin exits before timeout" {
+    // Sanity check: a plugin that exits quickly must not be falsely flagged
+    // as timed out.
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var conf = try json.ObjectMap.init(a, &.{}, &.{});
+    try conf.put(a, "cniVersion", json.Value{ .string = "1.0.0" });
+    try conf.put(a, "name", json.Value{ .string = "exec-success-test" });
+    try conf.put(a, "type", json.Value{ .string = "true" });
+
+    var plugin_conf = PluginConf{
+        .arena = arena,
+        .conf = conf,
+    };
+
+    // A trivial "exit 0" script.
+    const script_path = try std.fmt.allocPrint(
+        allocator,
+        "/tmp/.net-porter-test-exit-{d}.sh",
+        .{std.os.linux.getpid()},
+    );
+    defer allocator.free(script_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, script_path) catch {};
+
+    {
+        const file = try std.Io.Dir.createFileAbsolute(io, script_path, .{
+            .permissions = @enumFromInt(0o755),
+        });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "#!/bin/sh\nexit 0\n");
+    }
+
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+
+    // 5s timeout — much longer than the script needs; the test should
+    // succeed long before this fires.
+    const term = try plugin_conf.exec(io, allocator, script_path, env_map, 5_000);
+    try std.testing.expectEqual(@as(u8, 0), term.exited);
 }
