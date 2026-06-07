@@ -177,9 +177,10 @@ pub fn initFromConfig(io: std.Io, root_allocator: Allocator, config: CniConfig, 
 }
 
 pub fn deinit(self: *Cni) void {
-    const allocator = self.arena.childAllocator();
+    // The Cni struct itself is allocated inside the arena (see initFromConfig),
+    // so arena.deinit() already releases its memory. Calling destroy(self)
+    // here would be a double-free / use-after-free.
     self.arena.deinit();
-    allocator.destroy(self);
 }
 
 /// Check if the first plugin's IPAM type is "static".
