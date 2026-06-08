@@ -238,7 +238,11 @@ fn testWriteFile(io: std.Io, allocator: Allocator, uid: u32, container_id: []con
     });
     defer allocator.free(final_path);
 
-    var prng = std.Random.DefaultPrng.init(@intCast(std.os.linux.getpid()));
+    var prng = std.Random.DefaultPrng.init(seed: {
+        var seed_bytes: [8]u8 = undefined;
+        io.random(&seed_bytes);
+        break :seed std.mem.readInt(u64, &seed_bytes, .little);
+    });
     const rand = prng.random().int(u32);
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}/.tmp_{s}_{s}_{x:0>8}", .{
         dir_path,

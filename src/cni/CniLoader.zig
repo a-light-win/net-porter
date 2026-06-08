@@ -159,14 +159,14 @@ pub fn isValidPluginType(name: []const u8) bool {
 // Tests
 // ============================================================
 test "CniLoader loads single-plugin config" {
+    const test_utils = @import("../test_utils.zig");
     const allocator = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
     // Create temp directories under /tmp with absolute paths
-    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_test_{d}", .{std.os.linux.getpid()});
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    const cni_dir_path = try test_utils.uniqueTempDir(std.testing.io, arena_alloc, "cni_loader_test_");
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
     const cni_dir = try std.Io.Dir.cwd().openDir(std.testing.io, cni_dir_path, .{});
     defer cni_dir.close(std.testing.io);
@@ -184,8 +184,7 @@ test "CniLoader loads single-plugin config" {
     try cni_dir.writeFile(std.testing.io, .{ .sub_path = "test.conf", .data = test_config });
 
     // Mock plugin directory with dummy executable
-    const plugin_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_plugin_test_{d}", .{std.os.linux.getpid()});
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, plugin_dir_path);
+    const plugin_dir_path = try test_utils.uniqueTempDir(std.testing.io, arena_alloc, "cni_loader_plugin_test_");
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, plugin_dir_path) catch {};
     const plugin_dir = try std.Io.Dir.cwd().openDir(std.testing.io, plugin_dir_path, .{});
     defer plugin_dir.close(std.testing.io);
@@ -208,14 +207,14 @@ test "CniLoader loads single-plugin config" {
 }
 
 test "CniLoader loads multi-plugin conflist" {
+    const test_utils = @import("../test_utils.zig");
     const allocator = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
     // Create temp directories under /tmp with absolute paths
-    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_conflist_test_{d}", .{std.os.linux.getpid()});
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    const cni_dir_path = try test_utils.uniqueTempDir(std.testing.io, arena_alloc, "cni_loader_conflist_test_");
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
     const cni_dir = try std.Io.Dir.cwd().openDir(std.testing.io, cni_dir_path, .{});
     defer cni_dir.close(std.testing.io);
@@ -234,8 +233,7 @@ test "CniLoader loads multi-plugin conflist" {
     try cni_dir.writeFile(std.testing.io, .{ .sub_path = "test.conflist", .data = test_config });
 
     // Mock plugin directory
-    const plugin_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_conflist_plugin_test_{d}", .{std.os.linux.getpid()});
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, plugin_dir_path);
+    const plugin_dir_path = try test_utils.uniqueTempDir(std.testing.io, arena_alloc, "cni_loader_conflist_plugin_test_");
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, plugin_dir_path) catch {};
     const plugin_dir = try std.Io.Dir.cwd().openDir(std.testing.io, plugin_dir_path, .{});
     defer plugin_dir.close(std.testing.io);
@@ -272,12 +270,12 @@ test "CniLoader returns empty map for non-existent directory" {
 }
 
 test "CniLoader returns empty map for directory with no config files" {
+    const test_utils = @import("../test_utils.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_empty_test_{d}", .{std.os.linux.getpid()});
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    const cni_dir_path = try test_utils.uniqueTempDir(std.testing.io, arena_alloc, "cni_loader_empty_test_");
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
 
     // Write a non-config file that should be skipped
@@ -293,12 +291,12 @@ test "CniLoader returns empty map for directory with no config files" {
 }
 
 test "CniLoader skips invalid config and loads valid one" {
+    const test_utils = @import("../test_utils.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_mixed_test_{d}", .{std.os.linux.getpid()});
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    const cni_dir_path = try test_utils.uniqueTempDir(std.testing.io, arena_alloc, "cni_loader_mixed_test_");
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
     const cni_dir = try std.Io.Dir.cwd().openDir(std.testing.io, cni_dir_path, .{});
     defer cni_dir.close(std.testing.io);
@@ -319,8 +317,7 @@ test "CniLoader skips invalid config and loads valid one" {
     try cni_dir.writeFile(std.testing.io, .{ .sub_path = "valid.conf", .data = valid_config });
 
     // Mock plugin directory
-    const plugin_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_mixed_plugin_test_{d}", .{std.os.linux.getpid()});
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, plugin_dir_path);
+    const plugin_dir_path = try test_utils.uniqueTempDir(std.testing.io, arena_alloc, "cni_loader_mixed_plugin_test_");
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, plugin_dir_path) catch {};
     const plugin_dir = try std.Io.Dir.cwd().openDir(std.testing.io, plugin_dir_path, .{});
     defer plugin_dir.close(std.testing.io);
@@ -339,12 +336,12 @@ test "CniLoader skips invalid config and loads valid one" {
 }
 
 test "CniLoader skips duplicate network name and keeps first" {
+    const test_utils = @import("../test_utils.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_dup_test_{d}", .{std.os.linux.getpid()});
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    const cni_dir_path = try test_utils.uniqueTempDir(std.testing.io, arena_alloc, "cni_loader_dup_test_");
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
     const cni_dir = try std.Io.Dir.cwd().openDir(std.testing.io, cni_dir_path, .{});
     defer cni_dir.close(std.testing.io);
@@ -372,8 +369,7 @@ test "CniLoader skips duplicate network name and keeps first" {
     try cni_dir.writeFile(std.testing.io, .{ .sub_path = "b.conf", .data = config_b });
 
     // Mock plugin directory
-    const plugin_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_loader_dup_plugin_test_{d}", .{std.os.linux.getpid()});
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, plugin_dir_path);
+    const plugin_dir_path = try test_utils.uniqueTempDir(std.testing.io, arena_alloc, "cni_loader_dup_plugin_test_");
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, plugin_dir_path) catch {};
     const plugin_dir = try std.Io.Dir.cwd().openDir(std.testing.io, plugin_dir_path, .{});
     defer plugin_dir.close(std.testing.io);

@@ -390,14 +390,13 @@ test "isRelevantFile rejects non-matching patterns" {
 }
 
 test "reload preserves existing ACLs when user file is removed" {
+    const test_utils = @import("../test_utils.zig");
     const testing = std.testing;
     const allocator = testing.allocator;
 
     // Create temp ACL directory
-    var path_buf: [128]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&path_buf, "/tmp/acl_reload_test_{d}", .{std.os.linux.getpid()}) catch return;
-
-    try std.Io.Dir.cwd().createDirPath(testing.io, tmp_path);
+    const tmp_path = try test_utils.uniqueTempDir(testing.io, allocator, "acl_reload_test_");
+    defer allocator.free(tmp_path);
     defer {
         std.Io.Dir.cwd().deleteTree(testing.io, tmp_path) catch {};
     }
@@ -436,13 +435,12 @@ test "reload preserves existing ACLs when user file is removed" {
 }
 
 test "reload swaps to new ACLs when user file changes" {
+    const test_utils = @import("../test_utils.zig");
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var path_buf: [128]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&path_buf, "/tmp/acl_reload_swap_{d}", .{std.os.linux.getpid()}) catch return;
-
-    try std.Io.Dir.cwd().createDirPath(testing.io, tmp_path);
+    const tmp_path = try test_utils.uniqueTempDir(testing.io, allocator, "acl_reload_swap_");
+    defer allocator.free(tmp_path);
     defer {
         std.Io.Dir.cwd().deleteTree(testing.io, tmp_path) catch {};
     }

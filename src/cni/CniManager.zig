@@ -87,12 +87,12 @@ pub fn listNetworks(self: *CniManager) ![]const []const u8 {
 }
 
 test "CniManager: loadCni returns NetworkNotFound for unknown network" {
+    const test_utils = @import("../test_utils.zig");
     const allocator = std.testing.allocator;
 
     // Create temp directory under /tmp with absolute path
-    const cni_dir_path = try std.fmt.allocPrint(allocator, "/tmp/cni_mgr_test_{d}", .{std.os.linux.getpid()});
+    const cni_dir_path = try test_utils.uniqueTempDir(std.testing.io, allocator, "cni_mgr_test_");
     defer allocator.free(cni_dir_path);
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
 
     const config = Config{
@@ -108,14 +108,14 @@ test "CniManager: loadCni returns NetworkNotFound for unknown network" {
 }
 
 test "CniManager: loadCni loads from cni.d and caches instance" {
+    const test_utils = @import("../test_utils.zig");
     const allocator = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
     // Create cni.d with a test config
-    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_mgr_load_test_{d}", .{std.os.linux.getpid()});
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    const cni_dir_path = try test_utils.uniqueTempDir(std.testing.io, arena_alloc, "cni_mgr_load_test_");
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
     const cni_dir = try std.Io.Dir.cwd().openDir(std.testing.io, cni_dir_path, .{});
     defer cni_dir.close(std.testing.io);
@@ -132,8 +132,7 @@ test "CniManager: loadCni loads from cni.d and caches instance" {
     try cni_dir.writeFile(std.testing.io, .{ .sub_path = "test.conf", .data = test_config });
 
     // Mock plugin directory
-    const plugin_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_mgr_load_plugin_test_{d}", .{std.os.linux.getpid()});
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, plugin_dir_path);
+    const plugin_dir_path = try test_utils.uniqueTempDir(std.testing.io, arena_alloc, "cni_mgr_load_plugin_test_");
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, plugin_dir_path) catch {};
     const plugin_dir = try std.Io.Dir.cwd().openDir(std.testing.io, plugin_dir_path, .{});
     defer plugin_dir.close(std.testing.io);
@@ -160,13 +159,13 @@ test "CniManager: loadCni loads from cni.d and caches instance" {
 }
 
 test "CniManager: listNetworks returns all loaded network names" {
+    const test_utils = @import("../test_utils.zig");
     const allocator = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    const cni_dir_path = try std.fmt.allocPrint(arena_alloc, "/tmp/cni_mgr_list_test_{d}", .{std.os.linux.getpid()});
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, cni_dir_path);
+    const cni_dir_path = try test_utils.uniqueTempDir(std.testing.io, arena_alloc, "cni_mgr_list_test_");
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, cni_dir_path) catch {};
 
     const config = Config{

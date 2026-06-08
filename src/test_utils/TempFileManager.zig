@@ -5,6 +5,43 @@ pub const TempFile = struct {
     file: std.Io.File,
 };
 
+/// Build a /tmp path with a random 64-bit suffix drawn from io.random().
+/// Safe for parallel test runs sharing the same PID. Caller owns the
+/// returned slice and must free it via allocator.
+pub fn uniqueTempPath(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    suffix: []const u8,
+) ![]const u8 {
+    const seed: u64 = seed: {
+        var seed_bytes: [8]u8 = undefined;
+        io.random(&seed_bytes);
+        break :seed std.mem.readInt(u64, &seed_bytes, .little);
+    };
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rand = prng.random().int(u64);
+    return std.fmt.allocPrint(
+        allocator,
+        "/tmp/{s}{x:0>16}{s}",
+        .{ prefix, rand, suffix },
+    );
+}
+
+/// Create a unique /tmp directory and return its path. The directory is
+/// created with default permissions; the caller owns the returned slice
+/// (free via allocator) and is responsible for deleting the directory.
+pub fn uniqueTempDir(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+) ![]const u8 {
+    const path = try uniqueTempPath(io, allocator, prefix, "");
+    errdefer allocator.free(path);
+    try std.Io.Dir.cwd().createDirPath(io, path);
+    return path;
+}
+
 const TempFileManager = @This();
 
 allocator: std.mem.Allocator,

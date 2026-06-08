@@ -973,6 +973,7 @@ test "patchAddresses with IPv6 only" {
 test "exec returns CniPluginTimeout when plugin hangs" {
     // This test verifies the DoS fix: a hanging CNI plugin must be killed and
     // exec must return error.CniPluginTimeout rather than blocking forever.
+    const test_utils = @import("../test_utils.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1006,11 +1007,12 @@ test "exec returns CniPluginTimeout when plugin hangs" {
     // Create a temp shell script that sleeps for 10s — long enough to exceed
     // any reasonable test timeout, short enough to limit orphan risk if the
     // test runner is killed before exec()'s SIGKILL reaches the child.
-    // Embedding the PID in the path keeps parallel test runs from colliding.
-    const script_path = try std.fmt.allocPrint(
+    // Random suffix keeps parallel test runs from colliding.
+    const script_path = try test_utils.uniqueTempPath(
+        io,
         allocator,
-        "/tmp/.net-porter-test-hang-{d}.sh",
-        .{std.os.linux.getpid()},
+        ".net-porter-test-hang-",
+        ".sh",
     );
     defer allocator.free(script_path);
     defer std.Io.Dir.deleteFileAbsolute(io, script_path) catch {};
@@ -1047,6 +1049,7 @@ test "exec returns CniPluginTimeout when plugin hangs" {
 test "exec succeeds when plugin exits before timeout" {
     // Sanity check: a plugin that exits quickly must not be falsely flagged
     // as timed out.
+    const test_utils = @import("../test_utils.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1064,11 +1067,13 @@ test "exec succeeds when plugin exits before timeout" {
         .conf = conf,
     };
 
-    // A trivial "exit 0" script.
-    const script_path = try std.fmt.allocPrint(
+    // A trivial "exit 0" script with a random suffix to avoid collisions
+    // between parallel test runs.
+    const script_path = try test_utils.uniqueTempPath(
+        io,
         allocator,
-        "/tmp/.net-porter-test-exit-{d}.sh",
-        .{std.os.linux.getpid()},
+        ".net-porter-test-exit-",
+        ".sh",
     );
     defer allocator.free(script_path);
     defer std.Io.Dir.deleteFileAbsolute(io, script_path) catch {};
