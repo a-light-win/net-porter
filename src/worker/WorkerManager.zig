@@ -149,14 +149,20 @@ pub fn stopWorker(self: *WorkerManager, uid: u32) void {
     }
 }
 
-/// Return monitored poll fds (worker + catatonit pidfds).
-/// The caller merges this with the inotify fd into a combined poll set.
-/// Valid until the next mutation (ensureWorkers, stopWorker, processPollEvents, retryPending).
+/// Returns a slice of pollfds for the server event loop.
+///
+/// Thread safety: MUST be called from the server event loop thread only.
+/// This method does NOT acquire `self.mutex` and is unsafe to call concurrently
+/// with any method that modifies `self.monitored_pollfds`.
 pub fn pollFdSlice(self: *WorkerManager) []const std.posix.pollfd {
     return self.monitored_pollfds.items;
 }
 
-/// Return the stored username for a running worker, or null if no worker exists.
+/// Returns the username for a given worker UID.
+///
+/// Thread safety: MUST be called from the server event loop thread only.
+/// This method does NOT acquire `self.mutex` and is unsafe to call concurrently
+/// with any method that modifies `self.workers`.
 pub fn getWorkerUsername(self: *WorkerManager, uid: u32) ?[]const u8 {
     if (self.workers.get(uid)) |entry| {
         return entry.username;
