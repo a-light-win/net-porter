@@ -92,16 +92,43 @@ pub fn deinit(self: *Server) void {
     self.managed_config.deinit();
 }
 
-pub fn run(self: *Server) !void {
+/// Optional controls for `run()`. All fields default to "disabled".
+pub const RunOpts = struct {
+    /// Atomic flag set by an external signal handler to request graceful
+    /// shutdown. When set, the event loop exits after the current iteration
+    /// and `run()` returns normally so that `defer server.deinit()` runs.
+    /// Null disables graceful shutdown (loop runs forever, matching prior
+    /// behavior).
+    shutdown_flag: ?*const std.atomic.Value(bool) = null,
+    /// Read end of a self-pipe included in the poll set. When the external
+    /// signal handler writes to the pipe, poll() returns immediately instead
+    /// of blocking until the next event. Negative value disables wake-up.
+    wake_fd: std.posix.fd_t = -1,
+};
+
+pub fn run(self: *Server, opts: RunOpts) !void {
     log.info("net-porter {s} started, monitoring /run/user/", .{version});
     self.syncWorkers();
 
     var event_buf: [4096]u8 = undefined;
+    const has_wake = opts.wake_fd >= 0;
 
     while (true) {
+        // Check for shutdown at the top of each iteration so we exit promptly
+        // when the signal handler flips the flag (whether before entering poll
+        // or after being woken up via the self-pipe).
+        if (opts.shutdown_flag) |f| {
+            if (f.load(.acquire)) break;
+        }
+
+        // Build poll set:
+        //   [0]          : wake_fd (optional, for signal-driven wake-up)
+        //   [next]       : uid tracker inotify (always)
+        //   [next]       : acl watcher inotify (optional)
+        //   [rest]       : worker manager pidfds
         const wm_fds = self.worker_manager.pollFdSlice();
         const has_acl_watch = self.acl_watcher.getInotifyFd() != null;
-        const fixed_fds: usize = if (has_acl_watch) 2 else 1;
+        const fixed_fds: usize = 1 + @as(usize, @intFromBool(has_acl_watch)) + @as(usize, @intFromBool(has_wake));
         const total_fds = fixed_fds + wm_fds.len;
 
         var poll_buf: [256]std.posix.pollfd = undefined;
@@ -110,23 +137,44 @@ pub fn run(self: *Server) !void {
             return error.TooManyFds;
         }
 
-        poll_buf[0] = .{
+        var slot: usize = 0;
+
+        // Wake fd at index 0 (if provided) so the drain check below is cheap.
+        if (has_wake) {
+            poll_buf[slot] = .{
+                .fd = opts.wake_fd,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            };
+            slot += 1;
+        }
+
+        poll_buf[slot] = .{
             .fd = self.uid_tracker.inotify_fd,
             .events = std.posix.POLL.IN,
             .revents = 0,
         };
+        const uid_fd_index: usize = slot;
+        slot += 1;
 
-        const acl_fd_index: usize = if (has_acl_watch) 1 else 0;
-        if (has_acl_watch) {
-            poll_buf[1] = .{
-                .fd = self.acl_watcher.getInotifyFd().?,
-                .events = std.posix.POLL.IN,
-                .revents = 0,
-            };
-        }
+        const acl_fd_index: ?usize = blk: {
+            if (has_acl_watch) {
+                poll_buf[slot] = .{
+                    .fd = self.acl_watcher.getInotifyFd().?,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                };
+                const idx = slot;
+                slot += 1;
+                break :blk idx;
+            }
+            break :blk null;
+        };
 
+        // `slot` now equals `fixed_fds`. Append worker pidfds.
+        const wm_start: usize = slot;
         for (wm_fds, 0..) |pfd, i| {
-            poll_buf[fixed_fds + i] = pfd;
+            poll_buf[slot + i] = pfd;
         }
 
         const timeout = self.worker_manager.nextRetryTimeoutMs() orelse -1;
@@ -136,17 +184,31 @@ pub fn run(self: *Server) !void {
             return err;
         };
 
-        if (wm_fds.len > 0) {
-            self.worker_manager.processPollEvents(poll_buf[fixed_fds .. fixed_fds + wm_fds.len]);
-        }
-
-        if (has_acl_watch and poll_buf[acl_fd_index].revents & std.posix.POLL.IN != 0) {
-            if (self.acl_watcher.processInotifyEvents(&event_buf)) {
-                self.handleAclChange();
+        // Drain wake fd if it fired. We don't act on the data — its sole
+        // purpose is to wake poll() so the loop iterates and re-checks the
+        // shutdown flag above.
+        if (has_wake and (poll_buf[0].revents & std.posix.POLL.IN != 0)) {
+            var drain_buf: [64]u8 = undefined;
+            while (true) {
+                const rc = std.os.linux.read(opts.wake_fd, &drain_buf, drain_buf.len);
+                // Negative return means EAGAIN (non-blocking pipe drained) or error.
+                if (@as(isize, @bitCast(rc)) <= 0) break;
             }
         }
 
-        if (poll_buf[0].revents & std.posix.POLL.IN != 0) {
+        if (wm_fds.len > 0) {
+            self.worker_manager.processPollEvents(poll_buf[wm_start .. wm_start + wm_fds.len]);
+        }
+
+        if (acl_fd_index) |idx| {
+            if (poll_buf[idx].revents & std.posix.POLL.IN != 0) {
+                if (self.acl_watcher.processInotifyEvents(&event_buf)) {
+                    self.handleAclChange();
+                }
+            }
+        }
+
+        if (poll_buf[uid_fd_index].revents & std.posix.POLL.IN != 0) {
             var uid_events = self.uid_tracker.processInotifyEvents(&event_buf);
             if (uid_events.created.items.len > 0) {
                 self.worker_manager.ensureWorkers(uid_events.created.items);
@@ -161,6 +223,8 @@ pub fn run(self: *Server) !void {
             self.worker_manager.retryPending();
         }
     }
+
+    log.info("Shutdown requested, exiting event loop", .{});
 }
 
 /// Synchronize workers with current /run/user/ state.
