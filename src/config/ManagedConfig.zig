@@ -17,6 +17,13 @@ pub fn deinit(self: ManagedConfig) void {
 }
 
 pub fn load(io: std.Io, root_allocator: std.mem.Allocator, config_path: ?[]const u8) !ManagedConfig {
+    // Arena ownership contract:
+    //   - On every success path, ownership transfers to the returned
+    //     ManagedConfig (the caller is responsible for calling deinit()).
+    //   - On every error path, the errdefer below releases the arena.
+    // All error returns must propagate via `try`/`return err` so that the
+    // errdefer runs. Do not construct a ManagedConfig until every fallible
+    // step that follows has succeeded.
     var arena = try ArenaAllocator.init(root_allocator);
     errdefer arena.deinit();
 
@@ -25,9 +32,13 @@ pub fn load(io: std.Io, root_allocator: std.mem.Allocator, config_path: ?[]const
 
     const parsed_config = parseConfig(io, allocator, path) catch |err| switch (err) {
         error.FileNotFound => {
-            var managed_config = ManagedConfig{ .config = Config{}, .arena = arena };
-            try managed_config.config.postInit(io, allocator, path);
-            return managed_config;
+            // File missing on disk: fall back to built-in defaults. Construct
+            // the ManagedConfig only after postInit succeeds so the arena is
+            // never jointly tracked by both the errdefer and a partially-built
+            // return value.
+            var config = Config{};
+            try config.postInit(io, allocator, path);
+            return ManagedConfig{ .config = config, .arena = arena };
         },
         else => return err,
     };
