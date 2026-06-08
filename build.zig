@@ -114,22 +114,41 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&exe.step);
 
     // coverage
-    const run_cover = b.addSystemCommand(&.{
-        "kcov",
-        "--clean",
-        "--exclude-path=/usr/",
-        "--exclude-pattern=test.zig",
-        b.pathJoin(&.{ b.install_path, "cover" }),
-    });
-    run_cover.addArtifactArg(exe_unit_tests);
-
-    const clean_coverage = b.addSystemCommand(&.{
-        "rm",
-        "-rf",
-        b.pathJoin(&.{ b.install_path, "cover" }),
-    });
-
     const cover_step = b.step("cover", "Generate test coverage report");
-    cover_step.dependOn(&clean_coverage.step);
-    cover_step.dependOn(&run_cover.step);
+
+    const kcov_path = b.findProgram(&.{"kcov"}, &.{}) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            const fail_msg = b.fmt(
+                "kcov not found. Install kcov to generate coverage reports:" ++
+                    "\n  apt install kcov  # Debian/Ubuntu" ++
+                    "\n  dnf install kcov  # Fedora" ++
+                    "\n  brew install kcov  # macOS" ++
+                    "\n  cargo install kcov  # from source",
+                .{},
+            );
+            const fail_step = b.addFail(fail_msg);
+            cover_step.dependOn(&fail_step.step);
+            break :blk null;
+        },
+    };
+
+    if (kcov_path) |path| {
+        const run_cover = b.addSystemCommand(&.{
+            path,
+            "--clean",
+            "--exclude-path=/usr/",
+            "--exclude-pattern=test.zig",
+            b.pathJoin(&.{ b.install_path, "cover" }),
+        });
+        run_cover.addArtifactArg(exe_unit_tests);
+
+        const clean_coverage = b.addSystemCommand(&.{
+            "rm",
+            "-rf",
+            b.pathJoin(&.{ b.install_path, "cover" }),
+        });
+
+        cover_step.dependOn(&clean_coverage.step);
+        cover_step.dependOn(&run_cover.step);
+    }
 }
