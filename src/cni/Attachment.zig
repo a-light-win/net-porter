@@ -254,6 +254,10 @@ pub const Attachment = struct {
     pub fn teardown(self: *Attachment, io: std.Io, tentative_allocator: Allocator, request: plugin.Request, responser: *Responser) !void {
         _ = responser;
         // Response is sent by Handler.handle() after this returns.
+        // Per netavark semantics, teardown must always report success to
+        // the caller; CNI DEL failures are logged at error level so
+        // operators can detect stale interfaces, leaked IPs, and orphaned
+        // firewall rules that may need manual cleanup.
         const netns: []const u8 = request.netns orelse "/proc/self/ns/net";
 
         var env_map = try self.envMap(tentative_allocator, .DEL, request, netns);
@@ -262,6 +266,7 @@ pub const Attachment = struct {
         // Inject prevResult into ALL plugins (CNI spec: final ADD result)
         const final_add_result = self.finalResult(.last);
 
+        var any_del_failed = false;
         var i: usize = 0;
         const len = self.exec_configs.items.len;
         while (i < len) : (i += 1) {
@@ -275,9 +280,10 @@ pub const Attachment = struct {
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
             const result = exec_config.exec(io, tentative_allocator, cmd, env_map, CNI_PLUGIN_TIMEOUT_MS) catch |err| switch (err) {
                 error.CniPluginTimeout => {
-                    log.warn(
-                        "Teardown {s} timed out after {d}ms on plugin {s}, ignoring",
-                        .{ request.request.exec.container_name, CNI_PLUGIN_TIMEOUT_MS, exec_config.getType() },
+                    any_del_failed = true;
+                    log.err(
+                        "Teardown of plugin '{s}' timed out after {d}ms for container '{s}'; resources may need manual cleanup",
+                        .{ exec_config.getType(), CNI_PLUGIN_TIMEOUT_MS, request.request.exec.container_name },
                     );
                     continue;
                 },
@@ -285,15 +291,23 @@ pub const Attachment = struct {
             };
 
             if (result != .exited or result.exited != 0) {
-                log.warn(
-                    "Teardown {s} failed on step {s}, ignore it. the detail error is {s}",
+                any_del_failed = true;
+                log.err(
+                    "Teardown of plugin '{s}' failed for container '{s}'; resources may need manual cleanup. detail: {s}",
                     .{
-                        request.request.exec.container_name,
                         exec_config.getType(),
+                        request.request.exec.container_name,
                         exec_config.result.?.items,
                     },
                 );
             }
+        }
+
+        if (any_del_failed) {
+            log.warn(
+                "Teardown completed with partial failures for container '{s}'; some network resources may need manual cleanup",
+                .{request.request.exec.container_name},
+            );
         }
     }
 
