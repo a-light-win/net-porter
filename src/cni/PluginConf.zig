@@ -84,28 +84,28 @@ pub const PluginConf = struct {
         }
     }
 
-    pub fn getName(self: PluginConf) []const u8 {
-        const name = self.conf.get("name");
-        return if (name) |v| switch (v) {
-            .string => |v_str| v_str,
-            else => unreachable,
-        } else unreachable;
+    pub fn getName(self: PluginConf) ?[]const u8 {
+        const name = self.conf.get("name") orelse return null;
+        return switch (name) {
+            .string => |s| s,
+            else => null,
+        };
     }
 
-    pub fn getCniVersion(self: PluginConf) []const u8 {
-        const version = self.conf.get("cniVersion");
-        return if (version) |v| switch (v) {
-            .string => |v_str| v_str,
-            else => unreachable,
-        } else unreachable;
+    pub fn getCniVersion(self: PluginConf) ?[]const u8 {
+        const version = self.conf.get("cniVersion") orelse return null;
+        return switch (version) {
+            .string => |s| s,
+            else => null,
+        };
     }
 
-    pub fn getType(self: PluginConf) []const u8 {
-        const plugin_type = self.conf.get("type");
-        return if (plugin_type) |v| switch (v) {
-            .string => |v_str| v_str,
-            else => unreachable,
-        } else unreachable;
+    pub fn getType(self: PluginConf) ?[]const u8 {
+        const plugin_type = self.conf.get("type") orelse return null;
+        return switch (plugin_type) {
+            .string => |s| s,
+            else => null,
+        };
     }
 
     fn getIpamType(self: PluginConf) ?[]const u8 {
@@ -276,6 +276,102 @@ pub const PluginConf = struct {
         try self.conf.put(allocator, "ipam", .{ .object = new_ipam });
 
         log.info("patched {d} address(es) into ipam config", .{new_addrs.items.len});
+    }
+
+    test "getName() returns null when field is missing" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try std.testing.expect(plugin_conf.getName() == null);
+    }
+
+    test "getName() returns null when field is not a string" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try plugin_conf.conf.put(allocator, "name", json.Value{ .integer = 42 });
+        try std.testing.expect(plugin_conf.getName() == null);
+    }
+
+    test "getName() returns the string when valid" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try plugin_conf.conf.put(allocator, "name", json.Value{ .string = "net1" });
+        try std.testing.expectEqualSlices(u8, "net1", plugin_conf.getName().?);
+    }
+
+    test "getCniVersion() returns null when field is missing" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try std.testing.expect(plugin_conf.getCniVersion() == null);
+    }
+
+    test "getCniVersion() returns null when field is not a string" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try plugin_conf.conf.put(allocator, "cniVersion", json.Value{ .bool = true });
+        try std.testing.expect(plugin_conf.getCniVersion() == null);
+    }
+
+    test "getCniVersion() returns the string when valid" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try plugin_conf.conf.put(allocator, "cniVersion", json.Value{ .string = "1.0.0" });
+        try std.testing.expectEqualSlices(u8, "1.0.0", plugin_conf.getCniVersion().?);
+    }
+
+    test "getType() returns null when field is missing" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try std.testing.expect(plugin_conf.getType() == null);
+    }
+
+    test "getType() returns null when field is not a string" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try plugin_conf.conf.put(allocator, "type", json.Value{ .integer = 42 });
+        try std.testing.expect(plugin_conf.getType() == null);
+    }
+
+    test "getType() returns the string when valid" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try plugin_conf.conf.put(allocator, "type", json.Value{ .string = "macvlan" });
+        try std.testing.expectEqualSlices(u8, "macvlan", plugin_conf.getType().?);
     }
 
     test "isDhcp() will return false if the ipam type is not dhcp" {
@@ -496,7 +592,7 @@ pub const PluginConf = struct {
             if (n_ready == 0) {
                 log.warn(
                     "CNI plugin '{s}' timed out after {d}ms; killing pid={d}",
-                    .{ self.getType(), timeout_ms, pid },
+                    .{ self.getType() orelse "unknown", timeout_ms, pid },
                 );
                 _ = std.os.linux.kill(pid, std.os.linux.SIG.KILL);
                 _ = process.wait(io) catch {};

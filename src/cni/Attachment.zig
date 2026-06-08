@@ -73,9 +73,9 @@ pub const Attachment = struct {
         try std.testing.expect(attachment.exec_configs.items.len == 1);
 
         const exec_config = attachment.exec_configs.items[0];
-        try std.testing.expectEqualSlices(u8, "test", exec_config.getName());
-        try std.testing.expectEqualSlices(u8, "0.3.1", exec_config.getCniVersion());
-        try std.testing.expectEqualSlices(u8, "macvlan", exec_config.getType());
+        try std.testing.expectEqualSlices(u8, "test", exec_config.getName().?);
+        try std.testing.expectEqualSlices(u8, "0.3.1", exec_config.getCniVersion().?);
+        try std.testing.expectEqualSlices(u8, "macvlan", exec_config.getType().?);
     }
 
     fn initExecConfig(self: *Attachment, cni_config: CniConfig) !void {
@@ -224,12 +224,12 @@ pub const Attachment = struct {
                     }
                 }
             }
-            const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
+            const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType() orelse return error.InvalidConfig);
             const result = exec_config.exec(io, tentative_allocator, cmd, env_map, CNI_PLUGIN_TIMEOUT_MS) catch |err| switch (err) {
                 error.CniPluginTimeout => {
                     log.warn(
                         "Setup {s} timed out after {d}ms on plugin {s}",
-                        .{ request.request.exec.container_name, CNI_PLUGIN_TIMEOUT_MS, exec_config.getType() },
+                        .{ request.request.exec.container_name, CNI_PLUGIN_TIMEOUT_MS, exec_config.getType() orelse "unknown" },
                     );
                     responser.writeError("CNI plugin timed out", .{});
                     return error.UnexpectedError;
@@ -277,13 +277,13 @@ pub const Attachment = struct {
                 try exec_config.setPrevResult(prev_result.items);
             }
 
-            const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType());
+            const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType() orelse return error.InvalidConfig);
             const result = exec_config.exec(io, tentative_allocator, cmd, env_map, CNI_PLUGIN_TIMEOUT_MS) catch |err| switch (err) {
                 error.CniPluginTimeout => {
                     any_del_failed = true;
                     log.err(
                         "Teardown of plugin '{s}' timed out after {d}ms for container '{s}'; resources may need manual cleanup",
-                        .{ exec_config.getType(), CNI_PLUGIN_TIMEOUT_MS, request.request.exec.container_name },
+                        .{ exec_config.getType() orelse "unknown", CNI_PLUGIN_TIMEOUT_MS, request.request.exec.container_name },
                     );
                     continue;
                 },
@@ -295,7 +295,7 @@ pub const Attachment = struct {
                 log.err(
                     "Teardown of plugin '{s}' failed for container '{s}'; resources may need manual cleanup. detail: {s}",
                     .{
-                        exec_config.getType(),
+                        exec_config.getType() orelse "unknown",
                         request.request.exec.container_name,
                         exec_config.result.?.items,
                     },
