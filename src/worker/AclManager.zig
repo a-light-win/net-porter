@@ -259,7 +259,10 @@ pub fn processInotifyEvents(self: *WorkerAclManager, event_buf: []u8) bool {
     while (true) {
         const n = std.posix.read(fd, event_buf) catch |err| switch (err) {
             error.WouldBlock => return changed,
-            else => return changed,
+            else => {
+                log.warn("Failed to read inotify events: {s}", .{@errorName(err)});
+                return changed;
+            },
         };
         if (n == 0) return changed;
 
