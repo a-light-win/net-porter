@@ -21,7 +21,6 @@ pub fn format(comptime err_format: []const u8, args: anytype) ErrorMessage {
     var buf: [max_message_size]u8 = undefined;
     const err = std.fmt.bufPrint(&buf, err_format, args) catch |e| switch (e) {
         error.NoSpaceLeft => "Can't generate error message: Error message too long",
-        else => unreachable,
     };
     return ErrorMessage.init(err);
 }
