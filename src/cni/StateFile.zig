@@ -156,9 +156,12 @@ fn ensureDir(io: std.Io, dir_path: []const u8) !void {
 
 /// Check if a file exists using statx.
 fn statExists(path: []const u8) bool {
-    // statx requires [*:0]const u8 — use a small stack buffer for the sentinel
-    var buf: [4096:0]u8 = undefined;
-    if (path.len >= buf.len) return false;
+    // Reject paths exceeding the platform maximum. Such paths cannot reference
+    // a valid file in our state directory and would overflow the stack buffer
+    // used to null-terminate the path for statx.
+    if (path.len >= std.Io.Dir.max_path_bytes) return false;
+    // statx requires [*:0]const u8 — use a stack buffer sized to the platform max.
+    var buf: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
     var statx_buf: std.os.linux.Statx = undefined;
@@ -436,4 +439,13 @@ test "atomic write — no temp files left behind on success" {
 
     // Clean up
     testRemoveFile(io, allocator, "atomic-test", "eth0") catch {};
+}
+
+test "statExists returns false for path exceeding max_path_bytes" {
+    // Regression: an oversized path must not overflow the stack buffer used to
+    // null-terminate the path for statx. It should return false immediately.
+    const oversized = try std.testing.allocator.alloc(u8, std.Io.Dir.max_path_bytes + 1);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, 'a');
+    try std.testing.expect(!statExists(oversized));
 }
