@@ -2,6 +2,12 @@ const std = @import("std");
 const LogSettings = @import("../utils.zig").LogSettings;
 const Config = @This();
 
+/// Hardcoded default config directory used when the config path has no
+/// directory component (e.g. a bare filename like "config.json") or when the
+/// path cannot be otherwise resolved. Keeps fresh installs running with
+/// built-in defaults instead of failing to start.
+const default_config_dir = "/etc/net-porter";
+
 config_dir: []const u8 = "",
 config_path: []const u8 = "",
 // CNI plugin directory (auto-detected if not set)
@@ -23,8 +29,11 @@ pub fn postInit(self: *Config, io: std.Io, allocator: std.mem.Allocator, path: [
     if (std.Io.Dir.path.dirname(path)) |dir| {
         self.config_dir = dir;
     } else {
-        std.log.warn("Can not get config directory from path: {s}", .{path});
-        return error.InvalidPath;
+        // Fallback for fresh installs where the config path might be relative
+        // or the directory doesn't exist yet. Returning an error here would
+        // prevent the server from starting with built-in defaults.
+        self.config_dir = default_config_dir;
+        std.log.warn("Could not derive config directory from path '{s}', using default: {s}", .{ path, self.config_dir });
     }
 
     self.setCNIPluginDir(io);
@@ -105,6 +114,20 @@ test "postInit sets config_dir and config_path" {
 
     try std.testing.expectEqualSlices(u8, "/etc/net-porter", config.config_dir);
     try std.testing.expectEqualSlices(u8, "/etc/net-porter/config.json", config.config_path);
+    allocator.free(config.acl_dir);
+    allocator.free(config.cni_dir);
+}
+
+test "postInit falls back to default config_dir when dirname returns null" {
+    const allocator = std.testing.allocator;
+    var config = Config{};
+    // Bare filename has no directory component, so dirname() returns null.
+    try config.postInit(std.testing.io, allocator, "config.json");
+
+    try std.testing.expectEqualSlices(u8, default_config_dir, config.config_dir);
+    try std.testing.expectEqualSlices(u8, "config.json", config.config_path);
+    try std.testing.expectEqualSlices(u8, "/etc/net-porter/acl.d", config.acl_dir);
+    try std.testing.expectEqualSlices(u8, "/etc/net-porter/cni.d", config.cni_dir);
     allocator.free(config.acl_dir);
     allocator.free(config.cni_dir);
 }

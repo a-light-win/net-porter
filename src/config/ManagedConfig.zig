@@ -42,13 +42,17 @@ pub fn load(io: std.Io, root_allocator: std.mem.Allocator, config_path: ?[]const
     };
 }
 
-test "load() should return InvalidPath if the config path is invalid" {
+test "load() should fall back to default config_dir when path has no directory component" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    _ = ManagedConfig.load(io, allocator, "config.json") catch |err| switch (err) {
-        error.InvalidPath => ManagedConfig{ .config = Config{} },
-        else => unreachable,
-    };
+    // A bare filename has no directory component, so postInit() must fall
+    // back to the built-in default instead of returning an error. This
+    // allows the server to start on fresh installs.
+    const managed_config = try ManagedConfig.load(io, allocator, "config.json");
+    defer managed_config.deinit();
+
+    try std.testing.expectEqualSlices(u8, "/etc/net-porter", managed_config.config.config_dir);
+    try std.testing.expectEqualSlices(u8, "config.json", managed_config.config.config_path);
 }
 
 test "load() should return error if the config file is invalid" {
