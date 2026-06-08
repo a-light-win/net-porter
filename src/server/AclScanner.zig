@@ -94,7 +94,12 @@ pub const TestAclDir = struct {
     dir_path: []const u8,
 
     pub fn create(io: std.Io, allocator: std.mem.Allocator) !TestAclDir {
-        var prng = std.Random.DefaultPrng.init(@intCast(std.os.linux.getpid()));
+        const seed: u64 = seed: {
+            var seed_bytes: [8]u8 = undefined;
+            io.random(&seed_bytes);
+            break :seed std.mem.readInt(u64, &seed_bytes, .little);
+        };
+        var prng = std.Random.DefaultPrng.init(seed);
         const rand = prng.random().int(u64);
         const dir_path = try std.fmt.allocPrint(allocator, "/tmp/acl-scan-test-{x:0>16}", .{rand});
         try std.Io.Dir.cwd().createDirPath(io, dir_path);

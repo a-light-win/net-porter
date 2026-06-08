@@ -41,7 +41,12 @@ pub fn deinit(self: *TempFileManager) void {
 }
 
 pub fn tempFile(self: *TempFileManager, prefix: []const u8, subfix: []const u8) ![]const u8 {
-    var prng = std.Random.DefaultPrng.init(@intCast(std.os.linux.getpid()));
+    const seed: u64 = seed: {
+        var seed_bytes: [8]u8 = undefined;
+        self.io.random(&seed_bytes);
+        break :seed std.mem.readInt(u64, &seed_bytes, .little);
+    };
+    var prng = std.Random.DefaultPrng.init(seed);
     const rand = prng.random().int(u32);
     const file_path = try std.fmt.allocPrint(
         self.allocator,
@@ -62,7 +67,12 @@ pub fn openedFile(self: *TempFileManager, prefix: []const u8, subfix: []const u8
 }
 
 pub fn newTempFileManager(io: std.Io, allocator: std.mem.Allocator, dir_prefix: []const u8) !TempFileManager {
-    var prng = std.Random.DefaultPrng.init(@intCast(std.os.linux.getpid()));
+    const seed: u64 = seed: {
+        var seed_bytes: [8]u8 = undefined;
+        io.random(&seed_bytes);
+        break :seed std.mem.readInt(u64, &seed_bytes, .little);
+    };
+    var prng = std.Random.DefaultPrng.init(seed);
     const rand = prng.random().int(u64);
     const temp_dir_path = try std.fmt.allocPrint(
         allocator,
