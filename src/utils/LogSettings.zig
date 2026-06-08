@@ -12,6 +12,12 @@ scope_levels: []const ScopeLog = &[_]ScopeLog{
     .{ .scope = "traffic", .level = .warn },
 },
 
+/// Opt-in flag for verbose netns topology diagnostics (inodes, fs magic numbers,
+/// owning user namespace). Disabled by default because these logs can leak
+/// sensitive host/container topology information if debug logging is enabled
+/// in production (SEV-004).
+diagnostics: bool = false,
+
 pub inline fn logEnabled(
     settings: LogSettings,
     comptime message_level: std.log.Level,
@@ -23,4 +29,18 @@ pub inline fn logEnabled(
         }
     }
     return @intFromEnum(message_level) <= @intFromEnum(settings.level);
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+test "LogSettings defaults diagnostics to false" {
+    const settings = LogSettings{};
+    try std.testing.expectEqual(false, settings.diagnostics);
+}
+
+test "LogSettings accepts explicit diagnostics = true" {
+    const settings = LogSettings{ .diagnostics = true };
+    try std.testing.expectEqual(true, settings.diagnostics);
 }

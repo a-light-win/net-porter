@@ -210,7 +210,15 @@ pub fn handle(self: *Handler) !void {
             return;
         };
 
-        logNetnsDiagnostics(self.io, netns, resolved, client_info.pid, self.catatonit_pid, client_info.uid);
+        logNetnsDiagnostics(
+            self.io,
+            netns,
+            resolved,
+            client_info.pid,
+            self.catatonit_pid,
+            client_info.uid,
+            self.config.log.diagnostics,
+        );
 
         request.netns = resolved;
     }
@@ -596,6 +604,11 @@ fn diagStatfs(path: []const u8, label: []const u8) void {
 /// This function NEVER returns errors and NEVER affects the request flow.
 /// All syscalls are wrapped to silently swallow failures; results are logged only.
 ///
+/// Gated behind an explicit `enabled` flag (sourced from `config.log.diagnostics`)
+/// because the emitted data — namespace inodes, fs magic numbers, owning user
+/// namespace inodes — reveals host and container topology. Defaulting to off
+/// prevents leakage if debug logging is enabled in production (SEV-004).
+///
 /// Uses raw linux.* syscalls intentionally: diagnostic code must work even when
 /// the std.Io instance is in an error state, and must not depend on std.Io
 /// allocations that could fail. This is a deliberate deviation from Rule 1.
@@ -606,7 +619,9 @@ fn logNetnsDiagnostics(
     client_pid: std.posix.pid_t,
     catatonit_pid: std.posix.pid_t,
     uid: u32,
+    enabled: bool,
 ) void {
+    if (!enabled) return;
     _ = io;
     _ = catatonit_pid;
     _ = uid;
@@ -850,6 +865,23 @@ test "verifyNetnsNsfs accepts nsfs file" {
     // Accept both success and error — the test validates the function runs
     // without crashing, the actual result depends on the environment
     _ = result catch {};
+}
+
+// ─── logNetnsDiagnostics tests ─────────────────────────────────────────
+
+test "logNetnsDiagnostics is a no-op when disabled" {
+    // When `enabled` is false, the function must bail out before touching any
+    // file descriptors or invoking syscalls. Passing intentionally bogus paths
+    // and PIDs ensures no code path beyond the gate runs (SEV-004).
+    logNetnsDiagnostics(
+        std.testing.io,
+        "/nonexistent/netns/path",
+        "/proc/99999999/root/nonexistent",
+        99999999,
+        99999999,
+        std.math.maxInt(u32),
+        false,
+    );
 }
 
 // ─── Action/Request consistency tests ──────────────────────────────────
