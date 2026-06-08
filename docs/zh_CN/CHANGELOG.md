@@ -5,6 +5,44 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.0] - 2026-06-08
+
+### 安全
+
+- **限制 systemctl 输出分配大小**：`WorkerManager` 此前为 systemctl 的 stdout/stderr 分配无界堆内存。异常的 `systemd` 可能借此耗尽服务端内存。三处调用点现在共享同一个 64 KiB 上限的辅助函数。
+- **启动时立即应用日志设置**：在初始启动日志和后期配置加载之间存在一个时间窗口，此期间日志级别未生效，安全相关事件可能被无视配置地输出（或丢弃）。服务端和 Worker 现在都在配置可用后第一时间应用日志设置。
+- **网络命名空间诊断改为显式开启**：Worker 日志默认输出 netns 诊断信息。该输出现在仅在显式请求时才产生，减少向 systemd-journal 或 stdout 的信息泄露。
+- **`getUsername` 正确传播内存不足错误**：用户名解析期间的 OOM 错误此前被掩盖为 null 结果，可能静默跳过授权检查。错误现在正确传播给调用方。
+- **CNI 插件类型采用白名单校验**：插件类型校验现在使用严格白名单，防止通过畸形 CNI 配置使用预期外的插件类型。
+- **ACL 监听器失败可见化**：`setupInotify()` 和 inotify 读取错误此前被静默吞掉，运维人员在 hot-reload 被禁用且 ACL 状态陈旧时收不到任何警告。两类失败现在都会输出明确的警告日志。
+- **`unreachable` 路径采用安全回退**：多个 CNI 访问器和 utils 辅助函数此前对意外输入使用 `unreachable`（例如绕过 `init()` 校验的损坏状态文件），在 release 构建中是未定义行为。这些位置现在返回 null 或安全回退值，避免内存损坏。
+
+### 新增
+
+- **SIGTERM/SIGINT 优雅关闭**：服务端现在捕获 SIGTERM 和 SIGINT 并执行干净关闭，而不是被强制杀死，提升系统升级和容器重启期间的可靠性。
+
+### 修复
+
+- **CNI `deinit` 中的 double-free**：`Cni` 结构体在其 arena 内分配，但 `deinit()` 在 `arena.deinit()` 之后又调用了 `allocator.destroy(self)`，释放了已经归还的内存。该缺陷在 `page_allocator` 下被掩盖，但在 `DebugAllocator`/`GeneralPurposeAllocator` 下会触发 invalid-free panic。
+- **CNI 插件执行时间受限**：卡住的 CNI 插件二进制文件此前会无限阻塞 `process.wait`。在默认 64 个 handler 槽位下，64 个卡住的插件会耗尽 Worker 池并造成拒绝服务。插件执行现在通过 `pidfd_open` + poll 在 Linux >= 5.3 上设置 60 秒超时上限。
+- **关闭期间同步 handler 排空**：`Worker.deinit()` 此前未等待进行中的 handler 线程就销毁 DHCP 服务，与请求处理中调用 `dhcp_service.ensureStarted()` / `stop()` 的 handler 竞态。新增 `shutting_down` 标志和 `active_handlers` 计数器，确保共享资源在 handler 完成后才被释放。
+- **路径派生失败时使用默认 `config_dir`**：当配置路径没有目录部分（例如全新安装时的裸文件名 `config.json`），`postInit()` 此前返回 `InvalidPath` 中止启动。现在改用 `/etc/net-porter` 作为安全回退。
+- **预分配受监控的文件描述符**：高负载下，文件描述符监控可能在容量超限时静默丢失事件。容量现在预先按最大值分配。
+- **通过 `POLL.NVAL` 检测陈旧文件描述符**：poll 事件掩码此前缺少 `POLL.NVAL`，导致陈旧文件描述符无法被检测，Worker 在已关闭 fd 上空转。掩码现已包含 `NVAL`，无效 fd 会被正确处理。
+- **加固 `ManagedConfig.load` 中的 arena 所有权**：arena 所有权契约现已文档化，`FileNotFound` 回退分支将 `ManagedConfig` 构造延迟到 `postInit()` 成功之后，消除此前 arena 可能被双重清理的脆弱双轨窗口。
+- **CNI teardown 部分失败可见化**：CNI teardown 期间的部分失败此前被静默丢弃，掩盖了真实的配置或权限问题。错误现在会带完整上下文被记录。
+- **`put` 失败时的 arena key 泄漏**：在 `workers.put` 失败之前插入到 arena 的 key 未被清理，在持续分配压力下缓慢泄漏内存。插入顺序现已调整以避免失败时的浪费。
+- **`StateFile.statExists` 处理超长路径**：超过 `PATH_MAX` 的文件路径此前在底层 syscall 中触发未定义行为。超长路径现在会以明确的错误被拒绝。
+
+### 内部优化
+
+- **Debug 构建启用 DebugAllocator**：服务端和 Worker 现在在 `Debug`/`ReleaseSafe` 构建中使用 `std.heap.DebugAllocator`，可在运行时捕获内存泄漏和 double-free。`ReleaseFast`/`ReleaseSmall` 构建仍使用 `page_allocator` 以保证性能。GPA 由调用方持有并通过 `Opts.allocator` 传入，确保其生命周期长于所有子对象。
+- **测试基础设施改用密码学随机源**：`AclScanner.zig` 和 `TempFileManager.zig` 中的测试辅助函数此前仅使用 PID 作为 `DefaultPrng` 种子，导致 `/tmp` 路径可预测且在并发 CI 运行中易冲突。已替换为 `io.random()`，与生产代码保持一致。
+- **文档化 Worker 非锁定读取方法的线程安全契约**：依赖外部锁定的方法现已添加明确文档，防止未来的贡献者误用。
+- **构建步骤检查 `kcov` 可用性**：`cover` 步骤现在在调用前检测 `kcov` 是否已安装，给出更清晰的错误信息，而不是令人困惑的构建失败。
+
+---
+
 ## [1.3.0] - 2026-05-29
 
 ### 安全
@@ -296,8 +334,9 @@
 
 _初始公开发布，采用每用户服务架构。_
 
+[1.4.0]: https://github.com/a-light-win/net-porter/compare/1.3.0...1.4.0
 [1.3.0]: https://github.com/a-light-win/net-porter/compare/1.2.0...1.3.0
-[1.2.0]: https://github.com/a-light-win/net-porter/compare/1.3.0...1.2.0
+[1.2.0]: https://github.com/a-light-win/net-porter/compare/1.1.0...1.2.0
 [1.1.0]: https://github.com/a-light-win/net-porter/compare/1.0.0...1.1.0
 [1.0.0]: https://github.com/a-light-win/net-porter/compare/0.6.0...1.0.0
 [0.6.0]: https://github.com/a-light-win/net-porter/compare/0.5.0...0.6.0

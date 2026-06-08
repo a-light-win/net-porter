@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-06-08
+
+### Security
+
+- **Bounded systemctl output allocation**: `WorkerManager` previously allocated unbounded heap for systemctl stdout/stderr. A misbehaving `systemd` could exhaust server memory. All three call sites now share a single helper capped at 64 KiB.
+- **Log settings applied immediately at startup**: A window existed between the initial boot log and the late-stage config load where log level was not enforced, allowing security-relevant events to be emitted (or dropped) regardless of configuration. Log settings are now applied as the first action after config becomes available, in both server and worker.
+- **Network namespace diagnostics gated behind explicit opt-in**: Worker logs previously emitted diagnostic netns information by default. This output is now produced only when explicitly requested, reducing information disclosure to systemd-journal or stdout.
+- **OOM propagation in `getUsername`**: Out-of-memory errors during username resolution were masked as a null result, which could silently skip authorization checks. Errors now propagate correctly to the caller.
+- **CNI plugin type validated against whitelist**: Plugin type validation now uses a strict whitelist, preventing use of unexpected plugin types via malformed CNI configurations.
+- **Visibility into ACL watcher failures**: `setupInotify()` and inotify read errors were silently swallowed, leaving operators running with stale ACL state and no warning that hot-reload was disabled. Both classes of failure now emit explicit warnings.
+- **Safe fallbacks for `unreachable` code paths**: Several CNI accessors and utils helpers previously used `unreachable` for unexpected inputs (e.g. corrupted state files bypassing `init()` validation), which is undefined behavior in release builds. These now return null or a safe fallback to avoid memory corruption.
+
+### Added
+
+- **Graceful shutdown on SIGTERM/SIGINT**: The server now catches SIGTERM and SIGINT and performs a clean shutdown instead of being forcibly killed, improving reliability during system updates and container restarts.
+
+### Fixed
+
+- **CNI double-free in `Cni.deinit`**: The `Cni` struct is allocated inside its arena, but `deinit()` additionally called `allocator.destroy(self)` after `arena.deinit()`, freeing already-released memory. The bug was masked under `page_allocator` but caused invalid-free panics under `DebugAllocator`/`GeneralPurposeAllocator`.
+- **CNI plugin execution time bounded**: A hanging CNI plugin binary would block `process.wait` indefinitely. With the default 64 handler slots, 64 stuck plugins exhausted the worker pool and caused denial of service. Plugin execution is now bounded by a 60-second timeout via `pidfd_open` + poll on Linux >= 5.3.
+- **Handler drain synchronized during shutdown**: `Worker.deinit()` previously tore down the DHCP service without waiting for in-flight handler threads, racing with handlers that call `dhcp_service.ensureStarted()` / `stop()` mid-request. A `shutting_down` flag and `active_handlers` counter now ensure handlers complete before shared resources are freed.
+- **Default `config_dir` used when path derivation fails**: When the configured path had no directory component (e.g. a bare `config.json` on fresh installs), `postInit()` returned `InvalidPath`, aborting startup. The default `/etc/net-porter` is now used as a safe fallback.
+- **Pre-allocated monitored file descriptors**: Under high load, file descriptor monitoring could silently lose events when capacity was exceeded. Capacity is now pre-allocated to the maximum up front.
+- **Stale file descriptor detection via `POLL.NVAL`**: The poll event mask was missing `POLL.NVAL`, leaving stale file descriptors undetected and causing the worker to spin on closed fds. The mask now includes `NVAL` and invalid fds are properly handled.
+- **Arena ownership hardened in `ManagedConfig.load`**: The arena ownership contract is now documented and the `FileNotFound` fallback defers `ManagedConfig` construction until after `postInit()` succeeds, eliminating a fragile dual-tracking window where the arena could be cleaned up twice.
+- **CNI teardown partial failure visibility**: Partial failures during CNI teardown were silently dropped, hiding real configuration or permission problems. Errors are now logged with full context.
+- **Arena key waste on `put` failure**: Keys inserted into the arena before a failed `workers.put` were not cleaned up, slowly leaking memory under sustained allocation pressure. The insert is now ordered to avoid waste on failure.
+- **Oversized path handling in `StateFile.statExists`**: File paths exceeding `PATH_MAX` previously triggered undefined behavior in the underlying syscall. Oversized paths are now rejected with a clear error.
+
+### Internal
+
+- **DebugAllocator enabled in debug builds**: Both server and worker now use `std.heap.DebugAllocator` in `Debug`/`ReleaseSafe` builds, catching leaks and double-frees at runtime. `page_allocator` is still used in `ReleaseFast`/`ReleaseSmall` for performance. The GPA lives in the caller and is passed via `Opts.allocator` so it outlives all sub-objects.
+- **Test infrastructure uses cryptographic randomness**: Test helpers in `AclScanner.zig` and `TempFileManager.zig` previously seeded `DefaultPrng` from PID alone, making `/tmp` paths predictable and prone to collision in concurrent CI runs. Replaced with `io.random()` to match production code.
+- **Thread-safety contract documented for unlocked worker read methods**: Methods that rely on external locking now carry explicit documentation, preventing accidental misuse from future contributors.
+- **Build step checks for `kcov` availability**: The `cover` step now detects whether `kcov` is installed before invoking it, producing a clearer error instead of a confusing build failure.
+
+---
+
 ## [1.3.0] - 2026-05-29
 
 ### Security
@@ -297,8 +335,9 @@ See the [Migration Guide (0.4 → 0.5)](migration-guide-0.4-to-0.5.md) for step-
 
 _Initial public release with per-user service architecture._
 
+[1.4.0]: https://github.com/a-light-win/net-porter/compare/1.3.0...1.4.0
 [1.3.0]: https://github.com/a-light-win/net-porter/compare/1.2.0...1.3.0
-[1.2.0]: https://github.com/a-light-win/net-porter/compare/1.3.0...1.2.0
+[1.2.0]: https://github.com/a-light-win/net-porter/compare/1.1.0...1.2.0
 [1.1.0]: https://github.com/a-light-win/net-porter/compare/1.0.0...1.1.0
 [1.0.0]: https://github.com/a-light-win/net-porter/compare/0.6.0...1.0.0
 [0.6.0]: https://github.com/a-light-win/net-porter/compare/0.5.0...0.6.0
