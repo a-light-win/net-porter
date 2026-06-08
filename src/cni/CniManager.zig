@@ -69,7 +69,11 @@ pub fn loadCni(self: *CniManager, name: []const u8) !*Cni {
     const cni = try Cni.initFromConfig(self.io, self.arena.childAllocator(), cni_config, self.cni_plugin_dir);
     errdefer cni.deinit();
 
-    try self.cni_plugins.put(try allocator.dupe(u8, name), cni);
+    // Duplicate key on arena; on put failure the arena still reclaims it on
+    // deinit, but errdefer keeps the pattern safe if the allocator changes.
+    const duped_key = try allocator.dupe(u8, name);
+    errdefer allocator.free(duped_key);
+    try self.cni_plugins.put(duped_key, cni);
     return cni;
 }
 
