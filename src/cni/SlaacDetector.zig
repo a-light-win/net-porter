@@ -91,8 +91,8 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8, deadline
     const pipe_rc = linux.pipe2(&pipe_fds, .{ .CLOEXEC = true });
     if (std.posix.errno(pipe_rc) != .SUCCESS) return error.PipeFailed;
     errdefer {
-        _ = linux.close(pipe_fds[0]);
-        _ = linux.close(pipe_fds[1]);
+        if (pipe_fds[0] != -1) _ = linux.close(pipe_fds[0]);
+        if (pipe_fds[1] != -1) _ = linux.close(pipe_fds[1]);
     }
 
     const pid_raw = linux.fork();
@@ -108,62 +108,146 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8, deadline
 
     // Parent: close write end of pipe
     _ = linux.close(pipe_fds[1]);
-    errdefer _ = linux.close(pipe_fds[0]);
+    pipe_fds[1] = -1;
 
-    // Compute remaining time for poll timeout
+    // Compute remaining time for poll timeout (check clock_gettime return)
     var now_ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.MONOTONIC, &now_ts);
+    if (std.posix.errno(linux.clock_gettime(.MONOTONIC, &now_ts)) != .SUCCESS)
+        return error.ReadFailed;
     const now_ns: i64 = @as(i64, @intCast(now_ts.sec)) * std.time.ns_per_s +
         @as(i64, @intCast(now_ts.nsec));
-    const remaining_ms: i64 = @divFloor(deadline_ns - now_ns, std.time.ns_per_ms);
+    var remaining_ms: i64 = @divFloor(deadline_ns - now_ns, std.time.ns_per_ms);
     if (remaining_ms <= 0) {
         _ = linux.close(pipe_fds[0]);
+        pipe_fds[0] = -1;
         _ = linux.kill(@intCast(pid_signed), .KILL);
         var dummy: u32 = 0;
         _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
         return error.Timeout;
     }
 
-    // Poll the pipe fd with a timeout so we don't block forever
-    var pfds = [1]linux.pollfd{.{
-        .fd = pipe_fds[0],
-        .events = linux.POLL.IN,
-        .revents = 0,
-    }};
-    const poll_timeout: i32 = if (remaining_ms > std.math.maxInt(i32))
-        std.math.maxInt(i32)
-    else
-        @intCast(remaining_ms);
-    const poll_rc = linux.poll(&pfds, 1, poll_timeout);
-    const poll_n: isize = @bitCast(poll_rc);
-    if (poll_n <= 0) {
-        _ = linux.close(pipe_fds[0]);
-        _ = linux.kill(@intCast(pid_signed), .KILL);
-        var dummy: u32 = 0;
-        _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
-        return error.Timeout;
+    // Poll the pipe fd with a timeout so we don't block forever.
+    // Retry on EINTR with recomputed timeout; distinguish errors from timeout.
+    var initial_poll_done = false;
+    while (!initial_poll_done) {
+        var pfds = [1]linux.pollfd{.{
+            .fd = pipe_fds[0],
+            .events = linux.POLL.IN,
+            .revents = 0,
+        }};
+        const poll_timeout: i32 = if (remaining_ms > std.math.maxInt(i32))
+            std.math.maxInt(i32)
+        else
+            @intCast(remaining_ms);
+        const poll_rc = linux.poll(&pfds, 1, poll_timeout);
+        const poll_n: isize = @bitCast(poll_rc);
+        if (poll_n < 0) {
+            if (linux.errno(poll_rc) == .INTR) {
+                // Recompute remaining time and retry
+                var retry_ts: linux.timespec = undefined;
+                if (std.posix.errno(linux.clock_gettime(.MONOTONIC, &retry_ts)) != .SUCCESS)
+                    return error.ReadFailed;
+                const retry_ns: i64 = @as(i64, @intCast(retry_ts.sec)) * std.time.ns_per_s +
+                    @as(i64, @intCast(retry_ts.nsec));
+                remaining_ms = @divFloor(deadline_ns - retry_ns, std.time.ns_per_ms);
+                if (remaining_ms <= 0) {
+                    _ = linux.close(pipe_fds[0]);
+                    pipe_fds[0] = -1;
+                    _ = linux.kill(@intCast(pid_signed), .KILL);
+                    var dummy: u32 = 0;
+                    _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
+                    return error.Timeout;
+                }
+                continue;
+            }
+            // Other poll error
+            _ = linux.close(pipe_fds[0]);
+            pipe_fds[0] = -1;
+            _ = linux.kill(@intCast(pid_signed), .KILL);
+            var dummy: u32 = 0;
+            _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
+            return error.ReadFailed;
+        }
+        if (poll_n == 0) {
+            _ = linux.close(pipe_fds[0]);
+            pipe_fds[0] = -1;
+            _ = linux.kill(@intCast(pid_signed), .KILL);
+            var dummy: u32 = 0;
+            _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
+            return error.Timeout;
+        }
+        initial_poll_done = true;
     }
 
-    // Read child output into a dynamically-sized buffer
+    // Read child output into a dynamically-sized buffer.
+    // Each read is guarded by a poll with the remaining deadline so a
+    // stalled child cannot hang the parent mid-transfer.
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
     var tmp: [4096]u8 = undefined;
+    var read_error = false;
     while (true) {
+        // Poll before each read to enforce transfer deadline
+        while (true) {
+            var poll_ts: linux.timespec = undefined;
+            if (std.posix.errno(linux.clock_gettime(.MONOTONIC, &poll_ts)) != .SUCCESS) {
+                read_error = true;
+                break;
+            }
+            const poll_ns: i64 = @as(i64, @intCast(poll_ts.sec)) * std.time.ns_per_s +
+                @as(i64, @intCast(poll_ts.nsec));
+            const poll_rem_ms: i64 = @divFloor(deadline_ns - poll_ns, std.time.ns_per_ms);
+            if (poll_rem_ms <= 0) {
+                read_error = true;
+                break;
+            }
+            var rpfds = [1]linux.pollfd{.{
+                .fd = pipe_fds[0],
+                .events = linux.POLL.IN,
+                .revents = 0,
+            }};
+            const rpt: i32 = if (poll_rem_ms > std.math.maxInt(i32))
+                std.math.maxInt(i32)
+            else
+                @intCast(poll_rem_ms);
+            const rprc = linux.poll(&rpfds, 1, rpt);
+            const rpn: isize = @bitCast(rprc);
+            if (rpn < 0) {
+                if (linux.errno(rprc) == .INTR) continue;
+                read_error = true;
+                break;
+            }
+            if (rpn == 0) {
+                read_error = true;
+                break;
+            }
+            break; // data available
+        }
+        if (read_error) break;
+
         const n_raw = linux.read(pipe_fds[0], &tmp, tmp.len);
         const n: isize = @bitCast(n_raw);
         if (n > 0) {
             buf.appendSlice(allocator, tmp[0..@as(usize, @intCast(n))]) catch
                 return error.ReadFailed;
         } else if (n == 0) {
-            break;
+            break; // EOF
         } else {
-            // Negative return: check for EINTR via raw syscall value
             if (linux.errno(n_raw) == .INTR) continue;
+            read_error = true;
             break;
         }
     }
     _ = linux.close(pipe_fds[0]);
+    pipe_fds[0] = -1;
+
+    if (read_error) {
+        _ = linux.kill(@intCast(pid_signed), .KILL);
+        var dummy: u32 = 0;
+        _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
+        return error.ReadFailed;
+    }
 
     // Reap the child process and verify it exited cleanly.
     var status: u32 = 0;
@@ -223,35 +307,53 @@ fn childMain(write_fd: i32, netns_path_z: [*:0]const u8) noreturn {
         linux.exit(1);
     }
 
-    // Read the entire file into a stack buffer
+    // Stream /proc/net/if_inet6 to the pipe chunk by chunk so the
+    // total file size is not limited by a fixed stack buffer.
     var buf: [4096]u8 = undefined;
-    var total: usize = 0;
-    while (total < buf.len) {
-        const n_raw = linux.read(@intCast(inet6_fd), buf[total..].ptr, buf.len - total);
-        const n: isize = @bitCast(n_raw);
-        if (n <= 0) break;
-        total += @intCast(n);
-    }
-    _ = linux.close(@intCast(inet6_fd));
+    while (true) {
+        // Read a chunk from the file (retry on EINTR, exit on error)
+        var chunk_len: usize = undefined;
+        while (true) {
+            const r_raw = linux.read(@intCast(inet6_fd), &buf, buf.len);
+            const r: isize = @bitCast(r_raw);
+            if (r > 0) {
+                chunk_len = @intCast(r);
+                break;
+            } else if (r == 0) {
+                // EOF: clean up and exit successfully
+                _ = linux.close(@intCast(inet6_fd));
+                _ = linux.close(write_fd);
+                linux.exit(0);
+            } else {
+                if (linux.errno(r_raw) == .INTR) continue;
+                // Read error
+                _ = linux.close(@intCast(inet6_fd));
+                _ = linux.close(write_fd);
+                linux.exit(1);
+            }
+        }
 
-    // Write raw content to the pipe for the parent to parse
-    var written: usize = 0;
-    while (written < total) {
-        const n_raw = linux.write(write_fd, buf[written..total].ptr, total - written);
-        const n: isize = @bitCast(n_raw);
-        if (n > 0) {
-            written += @intCast(n);
-        } else if (n < 0 and linux.errno(n_raw) == .PIPE) {
-            // Parent closed the read end — exit with failure
-            _ = linux.close(write_fd);
-            linux.exit(1);
-        } else {
-            break;
+        // Write the chunk to the pipe (retry on EINTR, exit on error)
+        var written: usize = 0;
+        while (written < chunk_len) {
+            const w_raw = linux.write(write_fd, buf[written..chunk_len].ptr, chunk_len - written);
+            const w: isize = @bitCast(w_raw);
+            if (w > 0) {
+                written += @intCast(w);
+            } else if (w < 0) {
+                if (linux.errno(w_raw) == .INTR) continue;
+                // Write error (EPIPE, EIO, etc.)
+                _ = linux.close(@intCast(inet6_fd));
+                _ = linux.close(write_fd);
+                linux.exit(1);
+            } else {
+                // w == 0: unexpected for non-zero length
+                _ = linux.close(@intCast(inet6_fd));
+                _ = linux.close(write_fd);
+                linux.exit(1);
+            }
         }
     }
-
-    _ = linux.close(write_fd);
-    linux.exit(0);
 }
 
 /// Close all file descriptors inherited from the parent except for
