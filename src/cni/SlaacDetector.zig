@@ -83,6 +83,20 @@ pub fn detect(
     return &[_]Ipv6Addr{};
 }
 
+/// Best-effort cleanup: send SIGKILL to the child and reap with waitpid.
+/// Retries waitpid on EINTR. All errors are silently ignored.
+fn reapChild(pid: i32) void {
+    _ = linux.kill(pid, .KILL);
+    var status: u32 = 0;
+    while (true) {
+        const rc = linux.waitpid(pid, &status, 0);
+        const n: isize = @bitCast(rc);
+        if (n > 0) break;
+        if (n < 0 and linux.errno(rc) == .INTR) continue;
+        break;
+    }
+}
+
 /// Fork a child to read /proc/net/if_inet6 inside the target netns.
 /// Returns null if the child fails or produces no data.
 /// deadline_ns is the absolute monotonic deadline in nanoseconds.
@@ -120,9 +134,7 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8, deadline
     if (remaining_ms <= 0) {
         _ = linux.close(pipe_fds[0]);
         pipe_fds[0] = -1;
-        _ = linux.kill(@intCast(pid_signed), .KILL);
-        var dummy: u32 = 0;
-        _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
+        reapChild(@intCast(pid_signed));
         return error.Timeout;
     }
 
@@ -153,9 +165,7 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8, deadline
                 if (remaining_ms <= 0) {
                     _ = linux.close(pipe_fds[0]);
                     pipe_fds[0] = -1;
-                    _ = linux.kill(@intCast(pid_signed), .KILL);
-                    var dummy: u32 = 0;
-                    _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
+                    reapChild(@intCast(pid_signed));
                     return error.Timeout;
                 }
                 continue;
@@ -163,17 +173,13 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8, deadline
             // Other poll error
             _ = linux.close(pipe_fds[0]);
             pipe_fds[0] = -1;
-            _ = linux.kill(@intCast(pid_signed), .KILL);
-            var dummy: u32 = 0;
-            _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
+            reapChild(@intCast(pid_signed));
             return error.ReadFailed;
         }
         if (poll_n == 0) {
             _ = linux.close(pipe_fds[0]);
             pipe_fds[0] = -1;
-            _ = linux.kill(@intCast(pid_signed), .KILL);
-            var dummy: u32 = 0;
-            _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
+            reapChild(@intCast(pid_signed));
             return error.Timeout;
         }
         initial_poll_done = true;
@@ -243,9 +249,7 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8, deadline
     pipe_fds[0] = -1;
 
     if (read_error) {
-        _ = linux.kill(@intCast(pid_signed), .KILL);
-        var dummy: u32 = 0;
-        _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
+        reapChild(@intCast(pid_signed));
         return error.ReadFailed;
     }
 
