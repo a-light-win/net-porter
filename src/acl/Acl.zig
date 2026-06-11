@@ -219,6 +219,7 @@ fn parseMacToInt(mac: []const u8) !u64 {
     var count: u32 = 0;
     while (parts.next()) |part| : (count += 1) {
         if (count >= 6) return error.InvalidMac;
+        if (part.len != 2) return error.InvalidMac;
         const byte = std.fmt.parseUnsigned(u8, part, 16) catch return error.InvalidMac;
         result = (result << 8) | @as(u64, byte);
     }
@@ -495,6 +496,12 @@ test "parseMacToInt rejects invalid MAC" {
     try std.testing.expectError(error.InvalidMac, parseMacToInt("02:42:c0:a8:01:64:extra"));
     try std.testing.expectError(error.InvalidMac, parseMacToInt("02:42:c0:a8:01:gg"));
     try std.testing.expectError(error.InvalidMac, parseMacToInt("not-a-mac"));
+}
+
+test "parseMacToInt rejects non-canonical octets" {
+    try std.testing.expectError(error.InvalidMac, parseMacToInt("02:42:c0:a8:01:064"));
+    try std.testing.expectError(error.InvalidMac, parseMacToInt("02:42:c0:a8:1:64"));
+    try std.testing.expectError(error.InvalidMac, parseMacToInt("2:42:c0:a8:01:64"));
 }
 
 test "parseMacRange with range" {
