@@ -27,7 +27,14 @@ pub fn detect(
     const netns_path_z = allocator.dupeZ(u8, netns_path) catch return &[_]Ipv6Addr{};
     defer allocator.free(netns_path_z);
 
-    var elapsed_ms: u32 = 0;
+    // Use a monotonic clock deadline so signal-interrupted nanosleep
+    // does not shorten the total polling window.
+    var start_ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &start_ts);
+    const deadline_ns: i64 = @as(i64, @intCast(start_ts.sec)) * std.time.ns_per_s +
+        @as(i64, @intCast(start_ts.nsec)) +
+        @as(i64, max_wait_ms) * std.time.ns_per_ms;
+
     while (true) {
         if (queryOnce(allocator, netns_path_z)) |maybe_content| {
             if (maybe_content) |content| {
@@ -41,12 +48,22 @@ pub fn detect(
             return &[_]Ipv6Addr{};
         }
 
-        if (elapsed_ms >= max_wait_ms) break;
+        var now_ts: linux.timespec = undefined;
+        _ = linux.clock_gettime(.MONOTONIC, &now_ts);
+        const now_ns: i64 = @as(i64, @intCast(now_ts.sec)) * std.time.ns_per_s +
+            @as(i64, @intCast(now_ts.nsec));
+        if (now_ns >= deadline_ns) break;
 
-        const sleep_ms = @min(poll_interval_ms, max_wait_ms - elapsed_ms);
-        const req = linux.timespec{ .sec = 0, .nsec = @intCast(sleep_ms * 1_000_000) };
+        const remaining_ns = deadline_ns - now_ns;
+        const poll_ns = @min(
+            @as(i64, poll_interval_ms) * std.time.ns_per_ms,
+            remaining_ns,
+        );
+        const req = linux.timespec{
+            .sec = @intCast(@divTrunc(poll_ns, std.time.ns_per_s)),
+            .nsec = @intCast(@rem(poll_ns, std.time.ns_per_s)),
+        };
         _ = linux.nanosleep(&req, null);
-        elapsed_ms += sleep_ms;
     }
 
     log.warn("SLAAC detection timed out after {d}ms for {s}", .{ max_wait_ms, ifname });
@@ -57,8 +74,8 @@ pub fn detect(
 /// Returns null if the child fails or produces no data.
 fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8) DetectError!?[]const u8 {
     var pipe_fds: [2]i32 = undefined;
-    const pipe_rc = linux.pipe(&pipe_fds);
-    if (pipe_rc != 0) return error.PipeFailed;
+    const pipe_rc = linux.pipe2(&pipe_fds, .{ .CLOEXEC = true });
+    if (std.posix.errno(pipe_rc) != .SUCCESS) return error.PipeFailed;
     errdefer {
         _ = linux.close(pipe_fds[0]);
         _ = linux.close(pipe_fds[1]);
@@ -69,6 +86,9 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8) DetectEr
     if (pid_signed < 0) return error.ForkFailed;
 
     if (pid_signed == 0) {
+        // Child: close read end — write end has CLOEXEC so future
+        // open() calls from childMain won't leak it either.
+        _ = linux.close(pipe_fds[0]);
         childMain(pipe_fds[1], netns_path_z);
     }
 
@@ -86,9 +106,12 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8) DetectEr
     }
     _ = linux.close(pipe_fds[0]);
 
-    // Reap the child process
+    // Reap the child process and verify it exited cleanly.
     var status: u32 = 0;
     _ = linux.waitpid(@intCast(pid_signed), &status, 0);
+    const wifexited = (status & 0x7f) == 0;
+    const wexitstatus: u32 = (status >> 8) & 0xff;
+    if (!wifexited or wexitstatus != 0) return null;
 
     if (total == 0) return null;
     return allocator.dupe(u8, buf[0..total]) catch null;
@@ -184,8 +207,9 @@ pub fn parseIfInet6(allocator: std.mem.Allocator, content: []const u8, ifname: [
         // Validate: address must be exactly 32 hex chars
         if (hex_addr.len != 32) continue;
 
-        // Parse prefix length from hex
+        // Parse prefix length from hex, reject out-of-range values
         const prefix_len = std.fmt.parseInt(u8, prefix_hex, 16) catch continue;
+        if (prefix_len > 128) continue;
 
         const formatted = formatIpv6Cidr(allocator, hex_addr, prefix_len) catch continue;
         try addrs.append(allocator, .{ .address = formatted });
@@ -194,41 +218,95 @@ pub fn parseIfInet6(allocator: std.mem.Allocator, content: []const u8, ifname: [
     return addrs.toOwnedSlice(allocator);
 }
 
-/// Format a 32-hex-char IPv6 address and prefix length into "addr/prefix" CIDR notation.
-/// Output format: "2001:0db8:0000:0000:0000:0000:0000:0001/64"
+/// Format a 32-hex-char IPv6 address and prefix length into canonical
+/// "addr/prefix" CIDR notation per RFC 5952. Collapses the longest run
+/// of all-zero 16-bit groups to "::" and strips leading zeros in each group.
 pub fn formatIpv6Cidr(allocator: std.mem.Allocator, hex32: []const u8, prefix_len: u8) ![]const u8 {
     if (hex32.len != 32) return error.InvalidInput;
+    if (prefix_len > 128) return error.InvalidInput;
 
-    // Max output: 8 groups * 4 chars + 7 colons + 1 slash + 3 digit prefix = 43
+    // Parse 32 hex chars into 8 u16 groups
+    var groups: [8]u16 = undefined;
+    for (0..8) |i| {
+        const start = i * 4;
+        groups[i] = std.fmt.parseInt(u16, hex32[start..][0..4], 16) catch return error.InvalidInput;
+    }
+
+    // Find the longest run of consecutive all-zero groups (>= 2 per RFC 5952 §4.2.2).
+    // On equal length, the first run wins (§4.2.3).
+    var best_start: usize = 0;
+    var best_len: usize = 0;
+    {
+        var run_start: usize = 0;
+        var run_len: usize = 0;
+        for (groups, 0..) |g, i| {
+            if (g == 0) {
+                if (run_len == 0) run_start = i;
+                run_len += 1;
+                if (run_len > best_len) {
+                    best_start = run_start;
+                    best_len = run_len;
+                }
+            } else {
+                run_len = 0;
+            }
+        }
+    }
+    // RFC 5952 §4.2.2: do not compress a single zero group
+    const compress = best_len >= 2;
+    const c_start = best_start;
+    const c_len = best_len;
+
+    // Build output — max 8*4 + 7 colons + 2 for :: + 1 slash + 3 prefix digits = 45
     var buf: [48]u8 = undefined;
     var pos: usize = 0;
 
-    for (0..8) |i| {
-        if (i > 0) {
-            buf[pos] = ':';
-            pos += 1;
+    if (compress) {
+        const c_end = c_start + c_len;
+
+        // Groups before the compressed run
+        for (0..c_start) |i| {
+            if (i > 0) {
+                buf[pos] = ':';
+                pos += 1;
+            }
+            const s = std.fmt.bufPrint(buf[pos..], "{x}", .{groups[i]}) catch unreachable;
+            pos += s.len;
         }
-        @memcpy(buf[pos..][0..4], hex32[i * 4 ..][0..4]);
-        pos += 4;
+
+        // The compressed run — "::"
+        buf[pos] = ':';
+        pos += 1;
+        buf[pos] = ':';
+        pos += 1;
+
+        // Groups after the compressed run
+        for (c_end..8) |i| {
+            if (i > c_end) {
+                buf[pos] = ':';
+                pos += 1;
+            }
+            const s = std.fmt.bufPrint(buf[pos..], "{x}", .{groups[i]}) catch unreachable;
+            pos += s.len;
+        }
+    } else {
+        // No compression — emit all groups
+        for (0..8) |i| {
+            if (i > 0) {
+                buf[pos] = ':';
+                pos += 1;
+            }
+            const s = std.fmt.bufPrint(buf[pos..], "{x}", .{groups[i]}) catch unreachable;
+            pos += s.len;
+        }
     }
 
     buf[pos] = '/';
     pos += 1;
-    const prefix_str = try std.fmt.bufPrint(buf[pos..], "{d}", .{prefix_len});
+    const prefix_str = std.fmt.bufPrint(buf[pos..], "{d}", .{prefix_len}) catch unreachable;
     pos += prefix_str.len;
 
     return allocator.dupe(u8, buf[0..pos]);
-}
-
-/// Convert a 32-hex-char IPv6 address to a u128 for comparison.
-pub fn hex32ToU128(hex: []const u8) ?u128 {
-    if (hex.len != 32) return null;
-    var result: u128 = 0;
-    for (hex) |c| {
-        const d = std.fmt.charToDigit(c, 16) catch return null;
-        result = result * 16 + @as(u128, @intCast(d));
-    }
-    return result;
 }
 
 /// Parse an IPv6 address string (with optional /prefix suffix) to u128.
@@ -330,7 +408,7 @@ test "parseIfInet6 returns global IPv6 for matching interface" {
     }
 
     try std.testing.expectEqual(@as(usize, 1), addrs.len);
-    try std.testing.expectEqualStrings("2001:0db8:0000:0000:0000:0000:0000:0001/64", addrs[0].address);
+    try std.testing.expectEqualStrings("2001:db8::1/64", addrs[0].address);
 }
 
 test "parseIfInet6 excludes link-local addresses" {
@@ -395,20 +473,62 @@ test "parseIfInet6 handles empty content" {
     try std.testing.expectEqual(@as(usize, 0), addrs.len);
 }
 
-test "formatIpv6Cidr produces correct expanded notation" {
+test "parseIfInet6 rejects prefix_len > 128" {
+    const allocator = std.testing.allocator;
+
+    // prefix_len = 0x81 = 129 — out of range
+    const content =
+        \\20010db8000000000000000000000001 02 81 00 80 eth0
+        \\
+    ;
+
+    const addrs = try parseIfInet6(allocator, content, "eth0");
+    defer allocator.free(addrs);
+
+    try std.testing.expectEqual(@as(usize, 0), addrs.len);
+}
+
+test "formatIpv6Cidr produces RFC 5952 canonical notation" {
     const allocator = std.testing.allocator;
 
     const result = try formatIpv6Cidr(allocator, "20010db8000000000000000000000001", 64);
     defer allocator.free(result);
-    try std.testing.expectEqualStrings("2001:0db8:0000:0000:0000:0000:0000:0001/64", result);
+    try std.testing.expectEqualStrings("2001:db8::1/64", result);
 }
 
-test "formatIpv6Cidr handles prefix length 128" {
+test "formatIpv6Cidr handles all-zeros address" {
+    const allocator = std.testing.allocator;
+
+    const result = try formatIpv6Cidr(allocator, "00000000000000000000000000000000", 0);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("::/0", result);
+}
+
+test "formatIpv6Cidr handles loopback with prefix 128" {
     const allocator = std.testing.allocator;
 
     const result = try formatIpv6Cidr(allocator, "00000000000000000000000000000001", 128);
     defer allocator.free(result);
-    try std.testing.expectEqualStrings("0000:0000:0000:0000:0000:0000:0000:0001/128", result);
+    try std.testing.expectEqualStrings("::1/128", result);
+}
+
+test "formatIpv6Cidr compresses first run on equal length" {
+    const allocator = std.testing.allocator;
+
+    // Two runs of length 2: groups 2-3 and groups 5-6
+    // 2001:db8:0:0:1:0:0:1 -> first run compressed
+    const result = try formatIpv6Cidr(allocator, "20010db8000000000001000000000001", 64);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("2001:db8::1:0:0:1/64", result);
+}
+
+test "formatIpv6Cidr no compression with single zero group" {
+    const allocator = std.testing.allocator;
+
+    // Only a single zero group at index 2 — should NOT compress
+    const result = try formatIpv6Cidr(allocator, "20010db8000000010002000300040001", 64);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("2001:db8:0:1:2:3:4:1/64", result);
 }
 
 test "formatIpv6Cidr rejects invalid hex length" {
@@ -418,19 +538,11 @@ test "formatIpv6Cidr rejects invalid hex length" {
     try std.testing.expectError(error.InvalidInput, result);
 }
 
-test "hex32ToU128 parses 32 hex chars to u128" {
-    const val = hex32ToU128("20010db8000000000000000000000001");
-    try std.testing.expect(val != null);
-    try std.testing.expectEqual(@as(u128, 0x20010db8000000000000000000000001), val.?);
-}
+test "formatIpv6Cidr rejects prefix_len > 128" {
+    const allocator = std.testing.allocator;
 
-test "hex32ToU128 returns null for wrong length" {
-    try std.testing.expect(hex32ToU128("short") == null);
-    try std.testing.expect(hex32ToU128("") == null);
-}
-
-test "hex32ToU128 returns null for non-hex chars" {
-    try std.testing.expect(hex32ToU128("20010db80000000000000000000000zz") == null);
+    const result = formatIpv6Cidr(allocator, "20010db8000000000000000000000001", 200);
+    try std.testing.expectError(error.InvalidInput, result);
 }
 
 test "ipv6ToU128 parses standard IPv6 with ::" {

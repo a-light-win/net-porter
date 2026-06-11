@@ -257,16 +257,18 @@ pub const Attachment = struct {
         // SLAAC IPv6 detection: when macvlan with a static MAC is used,
         // the kernel may auto-assign an IPv6 address via SLAAC that is
         // NOT reported by the CNI macvlan plugin's ADD response.
-        const exec_request = try request.requestExec();
-        const first_config = self.exec_configs.items[0];
-        if (first_config.isMacvlan() and exec_request.network_options.static_mac != null) {
-            self.detectAndInjectSlaacIpv6(
-                tentative_allocator,
-                netns,
-                exec_request.network_options.interface_name,
-            ) catch |err| {
-                log.warn("SLAAC detection failed: {s}", .{@errorName(err)});
-            };
+        if (self.exec_configs.items.len > 0) {
+            const exec_request = try request.requestExec();
+            const first_config = self.exec_configs.items[0];
+            if (first_config.isMacvlan() and exec_request.network_options.static_mac != null) {
+                self.detectAndInjectSlaacIpv6(
+                    tentative_allocator,
+                    netns,
+                    exec_request.network_options.interface_name,
+                ) catch |err| {
+                    log.warn("SLAAC detection failed: {s}", .{@errorName(err)});
+                };
+            }
         }
 
         log.info("Setup {s} success", .{request.request.exec.container_name});
@@ -362,7 +364,17 @@ pub const Attachment = struct {
         }
 
         if (slaac_addrs.len == 0) return;
+        try self.injectSlaacIpv6(allocator, slaac_addrs, ifname);
+    }
 
+    /// Inject pre-detected SLAAC IPv6 addresses into the last CNI plugin result.
+    /// Skips addresses already present (dedup). Non-fatal on parse/serialize errors.
+    fn injectSlaacIpv6(
+        self: *Attachment,
+        allocator: std.mem.Allocator,
+        slaac_addrs: []const SlaacDetector.Ipv6Addr,
+        ifname: []const u8,
+    ) !void {
         const last_config = &self.exec_configs.items[self.exec_configs.items.len - 1];
         const last_result = last_config.result orelse return;
 
@@ -437,6 +449,7 @@ pub const Attachment = struct {
 
             if (!is_duplicate) {
                 var ip_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
+                try ip_obj.put(allocator, "version", json.Value{ .string = "6" });
                 try ip_obj.put(allocator, "interface", json.Value{ .integer = @intCast(iface_index) });
                 try ip_obj.put(allocator, "address", json.Value{ .string = slaac_addr.address });
                 try new_ips.append(allocator, .{ .object = ip_obj });
@@ -444,7 +457,10 @@ pub const Attachment = struct {
             }
         }
 
-        if (added_count == 0) return;
+        if (added_count == 0) {
+            new_ips.deinit(allocator);
+            return;
+        }
 
         // Replace the ips array in the parsed result
         try result_obj.put(allocator, "ips", json.Value{ .array = json.Array.fromOwnedSlice(allocator, new_ips.items) });
@@ -545,5 +561,192 @@ pub const Attachment = struct {
 
         const cni_args = env_map.get("CNI_ARGS").?;
         try std.testing.expect(std.mem.indexOf(u8, cni_args, "MAC=") == null);
+    }
+
+    // --- injectSlaacIpv6 tests ---
+
+    /// Helper: build an Attachment with one PluginConf carrying a given CNI result string.
+    /// Each PluginConf gets its own arena, mirroring the real PluginConf.init() behavior.
+    fn initTestAttachment(allocator: std.mem.Allocator, cni_result: []const u8) !Attachment {
+        var arena = try ArenaAllocator.init(allocator);
+        const arena_alloc = arena.allocator();
+
+        var plugin_arena = try ArenaAllocator.init(allocator);
+        const plugin_alloc = plugin_arena.allocator();
+
+        var conf = try json.ObjectMap.init(plugin_alloc, &.{}, &.{});
+        try conf.put(plugin_alloc, "type", json.Value{ .string = "macvlan" });
+        try conf.put(plugin_alloc, "name", json.Value{ .string = "test" });
+        try conf.put(plugin_alloc, "cniVersion", json.Value{ .string = "0.3.1" });
+
+        const result_copy = try plugin_alloc.dupe(u8, cni_result);
+
+        const plugin_conf = PluginConf{
+            .arena = plugin_arena,
+            .conf = conf,
+            .result = std.ArrayList(u8).fromOwnedSlice(result_copy),
+        };
+
+        var attachment = Attachment{
+            .arena = arena,
+            .cni_plugin_dir = "/cni/bin",
+            .exec_configs = std.ArrayList(PluginConf).empty,
+        };
+        try attachment.exec_configs.append(arena_alloc, plugin_conf);
+        return attachment;
+    }
+
+    /// Helper: read the result JSON from the last exec_config and parse it.
+    fn getLastResultJson(attachment: Attachment, allocator: std.mem.Allocator) ?json.Parsed(json.Value) {
+        const last = attachment.exec_configs.items[attachment.exec_configs.items.len - 1];
+        const result = last.result orelse return null;
+        return json.parseFromSlice(json.Value, allocator, result.items, .{}) catch return null;
+    }
+
+    test "injectSlaacIpv6 adds new SLAAC addresses to CNI result" {
+        const allocator = std.testing.allocator;
+
+        const cni_result =
+            \\{"interfaces":[{"name":"eth0"}],"ips":[{"version":"4","address":"10.0.0.1/24","interface":0}]}
+        ;
+
+        var attachment = try initTestAttachment(allocator, cni_result);
+        defer attachment.deinit();
+
+        // injectSlaacIpv6 allocates intermediates on the given allocator.
+        // Use an arena so they are freed in bulk, matching production where
+        // the tentative_allocator is freed after the request.
+        var inject_arena = std.heap.ArenaAllocator.init(allocator);
+        defer inject_arena.deinit();
+
+        const addr_copy = try allocator.dupe(u8, "2001:db8::1/64");
+        defer allocator.free(addr_copy);
+        const slaac_addrs = [_]SlaacDetector.Ipv6Addr{
+            .{ .address = addr_copy },
+        };
+
+        try attachment.injectSlaacIpv6(inject_arena.allocator(), &slaac_addrs, "eth0");
+
+        const parsed = getLastResultJson(attachment, allocator) orelse unreachable;
+        defer parsed.deinit();
+
+        const ips = parsed.value.object.get("ips").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), ips.len);
+
+        // Original IPv4 entry
+        try std.testing.expectEqualStrings("4", ips[0].object.get("version").?.string);
+
+        // Injected SLAAC entry
+        try std.testing.expectEqualStrings("6", ips[1].object.get("version").?.string);
+        try std.testing.expectEqualStrings("2001:db8::1/64", ips[1].object.get("address").?.string);
+        try std.testing.expectEqual(@as(i64, 0), ips[1].object.get("interface").?.integer);
+    }
+
+    test "injectSlaacIpv6 suppresses duplicate addresses" {
+        const allocator = std.testing.allocator;
+
+        const cni_result =
+            \\{"interfaces":[{"name":"eth0"}],"ips":[{"version":"6","address":"2001:db8::1/64","interface":0}]}
+        ;
+
+        var attachment = try initTestAttachment(allocator, cni_result);
+        defer attachment.deinit();
+
+        var inject_arena = std.heap.ArenaAllocator.init(allocator);
+        defer inject_arena.deinit();
+
+        // Same address in expanded form — dedup should match by u128 value
+        const addr_copy = try allocator.dupe(u8, "2001:0db8:0000:0000:0000:0000:0000:0001/64");
+        defer allocator.free(addr_copy);
+        const slaac_addrs = [_]SlaacDetector.Ipv6Addr{
+            .{ .address = addr_copy },
+        };
+
+        try attachment.injectSlaacIpv6(inject_arena.allocator(), &slaac_addrs, "eth0");
+
+        const last = attachment.exec_configs.items[0];
+        const parsed = try json.parseFromSlice(json.Value, allocator, last.result.?.items, .{});
+        defer parsed.deinit();
+
+        const ips = parsed.value.object.get("ips").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), ips.len);
+    }
+
+    test "injectSlaacIpv6 skips gracefully when interfaces array missing" {
+        const allocator = std.testing.allocator;
+
+        const cni_result =
+            \\{"ips":[]}
+        ;
+
+        var attachment = try initTestAttachment(allocator, cni_result);
+        defer attachment.deinit();
+
+        var inject_arena = std.heap.ArenaAllocator.init(allocator);
+        defer inject_arena.deinit();
+
+        const addr_copy = try allocator.dupe(u8, "2001:db8::1/64");
+        defer allocator.free(addr_copy);
+        const slaac_addrs = [_]SlaacDetector.Ipv6Addr{
+            .{ .address = addr_copy },
+        };
+
+        try attachment.injectSlaacIpv6(inject_arena.allocator(), &slaac_addrs, "eth0");
+
+        const last = attachment.exec_configs.items[0];
+        const parsed = try json.parseFromSlice(json.Value, allocator, last.result.?.items, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("interfaces") == null);
+    }
+
+    test "injectSlaacIpv6 skips gracefully when ips array missing" {
+        const allocator = std.testing.allocator;
+
+        const cni_result =
+            \\{"interfaces":[{"name":"eth0"}]}
+        ;
+
+        var attachment = try initTestAttachment(allocator, cni_result);
+        defer attachment.deinit();
+
+        var inject_arena = std.heap.ArenaAllocator.init(allocator);
+        defer inject_arena.deinit();
+
+        const addr_copy = try allocator.dupe(u8, "2001:db8::1/64");
+        defer allocator.free(addr_copy);
+        const slaac_addrs = [_]SlaacDetector.Ipv6Addr{
+            .{ .address = addr_copy },
+        };
+
+        try attachment.injectSlaacIpv6(inject_arena.allocator(), &slaac_addrs, "eth0");
+
+        const last = attachment.exec_configs.items[0];
+        const parsed = try json.parseFromSlice(json.Value, allocator, last.result.?.items, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("ips") == null);
+    }
+
+    test "injectSlaacIpv6 is no-op with empty SLAAC list" {
+        const allocator = std.testing.allocator;
+
+        const cni_result =
+            \\{"interfaces":[{"name":"eth0"}],"ips":[{"version":"4","address":"10.0.0.1/24","interface":0}]}
+        ;
+
+        var attachment = try initTestAttachment(allocator, cni_result);
+        defer attachment.deinit();
+
+        var inject_arena = std.heap.ArenaAllocator.init(allocator);
+        defer inject_arena.deinit();
+
+        const slaac_addrs = [_]SlaacDetector.Ipv6Addr{};
+        try attachment.injectSlaacIpv6(inject_arena.allocator(), &slaac_addrs, "eth0");
+
+        const last = attachment.exec_configs.items[0];
+        const parsed = try json.parseFromSlice(json.Value, allocator, last.result.?.items, .{});
+        defer parsed.deinit();
+
+        const ips = parsed.value.object.get("ips").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), ips.len);
     }
 };
