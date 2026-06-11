@@ -2,10 +2,12 @@ pub const Cni = @import("cni/Cni.zig");
 pub const CniManager = @import("cni/CniManager.zig");
 pub const DhcpService = @import("cni/DhcpService.zig");
 pub const StateFile = @import("cni/StateFile.zig");
+pub const SlaacDetector = @import("cni/SlaacDetector.zig");
 
 test {
     _ = @import("cni/Cni.zig");
     _ = @import("cni/CniManager.zig");
     _ = @import("cni/DhcpService.zig");
     _ = @import("cni/StateFile.zig");
+    _ = @import("cni/SlaacDetector.zig");
 }
