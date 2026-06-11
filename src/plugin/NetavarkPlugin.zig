@@ -149,6 +149,7 @@ test "DriverOptions parses deprecated field names from JSON" {
 const NetworkOptions = struct {
     interface_name: []const u8, // CNI_IFNAME
     static_ips: ?[]const []const u8 = null,
+    static_mac: ?[]const u8 = null,
 };
 
 pub const NetworkPluginExec = struct {
@@ -227,6 +228,27 @@ test "Request can stringify and parsed" {
     defer parsed.deinit();
     try std.testing.expectEqualSlices(u8, "test-resource", try parsed.value.resource());
     try std.testing.expectEqualSlices(u8, "test-container", (try parsed.value.requestExec()).container_name);
+}
+
+test "NetworkOptions parses static_mac from JSON" {
+    const allocator = std.testing.allocator;
+    const json_str =
+        \\{"interface_name":"eth0","static_mac":"02:42:c0:a8:01:64"}
+    ;
+    const parsed = try json.parseFromSlice(NetworkOptions, allocator, json_str, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.static_mac != null);
+    try std.testing.expectEqualStrings("02:42:c0:a8:01:64", parsed.value.static_mac.?);
+}
+
+test "NetworkOptions without static_mac is null" {
+    const allocator = std.testing.allocator;
+    const json_str =
+        \\{"interface_name":"eth0"}
+    ;
+    const parsed = try json.parseFromSlice(NetworkOptions, allocator, json_str, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.static_mac == null);
 }
 
 pub const Response = struct {
