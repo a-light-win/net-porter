@@ -504,3 +504,113 @@ test "reload swaps to new ACLs when user file changes" {
     try testing.expect(!mgr.isAllowed("tenant-old"));
     try testing.expect(mgr.isAllowed("tenant-new"));
 }
+
+test "isMacAllowed with loaded mac grants" {
+    const test_utils = @import("../test_utils.zig");
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const tmp_path = try test_utils.uniqueTempDir(testing.io, allocator, "acl_mac_test_");
+    defer allocator.free(tmp_path);
+    defer {
+        std.Io.Dir.cwd().deleteTree(testing.io, tmp_path) catch {};
+    }
+
+    var file_buf: [256]u8 = undefined;
+    const user_file = std.fmt.bufPrint(&file_buf, "{s}/macuser.json", .{tmp_path}) catch return;
+    const user_json =
+        \\{"grants":[{"resource":"mac-net","macs":["02:42:c0:a8:01:64-02:42:c0:a8:01:c8"]}]}
+    ;
+    {
+        var file = std.Io.Dir.cwd().createFile(testing.io, user_file, .{}) catch return;
+        defer file.close(testing.io);
+        var write_buf: [4096]u8 = undefined;
+        var file_writer = file.writer(testing.io, &write_buf);
+        file_writer.interface.writeAll(user_json) catch return;
+        file_writer.end() catch return;
+    }
+
+    var mgr = try init(allocator, testing.io, tmp_path, "macuser", 1000);
+    defer mgr.deinit();
+    mgr.load();
+
+    try testing.expect(mgr.isMacAllowed("mac-net", 1000, "02:42:c0:a8:01:96"));
+    try testing.expect(!mgr.isMacAllowed("mac-net", 1000, "02:42:c0:a8:02:00"));
+    try testing.expect(!mgr.isMacAllowed("mac-net", 1001, "02:42:c0:a8:01:96"));
+}
+
+test "isMacAllowed deny-by-default when grant has no macs" {
+    const test_utils = @import("../test_utils.zig");
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const tmp_path = try test_utils.uniqueTempDir(testing.io, allocator, "acl_mac_deny_test_");
+    defer allocator.free(tmp_path);
+    defer {
+        std.Io.Dir.cwd().deleteTree(testing.io, tmp_path) catch {};
+    }
+
+    var file_buf: [256]u8 = undefined;
+    const user_file = std.fmt.bufPrint(&file_buf, "{s}/denyuser.json", .{tmp_path}) catch return;
+    const user_json =
+        \\{"grants":[{"resource":"open-net"}]}
+    ;
+    {
+        var file = std.Io.Dir.cwd().createFile(testing.io, user_file, .{}) catch return;
+        defer file.close(testing.io);
+        var write_buf: [4096]u8 = undefined;
+        var file_writer = file.writer(testing.io, &write_buf);
+        file_writer.interface.writeAll(user_json) catch return;
+        file_writer.end() catch return;
+    }
+
+    var mgr = try init(allocator, testing.io, tmp_path, "denyuser", 1000);
+    defer mgr.deinit();
+    mgr.load();
+
+    // Resource is allowed, but MAC is denied-by-default
+    try testing.expect(mgr.isAllowed("open-net"));
+    try testing.expect(!mgr.isMacAllowed("open-net", 1000, "02:42:c0:a8:01:64"));
+}
+
+test "isMacAllowed and isIpAllowed are independent" {
+    const test_utils = @import("../test_utils.zig");
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const tmp_path = try test_utils.uniqueTempDir(testing.io, allocator, "acl_mac_ip_test_");
+    defer allocator.free(tmp_path);
+    defer {
+        std.Io.Dir.cwd().deleteTree(testing.io, tmp_path) catch {};
+    }
+
+    var file_buf: [256]u8 = undefined;
+    const user_file = std.fmt.bufPrint(&file_buf, "{s}/mixeduser.json", .{tmp_path}) catch return;
+    const user_json =
+        \\{"grants":[{"resource":"mixed-net","ips":["192.168.1.10-192.168.1.20"],"macs":["02:42:c0:a8:01:64-02:42:c0:a8:01:c8"]}]}
+    ;
+    {
+        var file = std.Io.Dir.cwd().createFile(testing.io, user_file, .{}) catch return;
+        defer file.close(testing.io);
+        var write_buf: [4096]u8 = undefined;
+        var file_writer = file.writer(testing.io, &write_buf);
+        file_writer.interface.writeAll(user_json) catch return;
+        file_writer.end() catch return;
+    }
+
+    var mgr = try init(allocator, testing.io, tmp_path, "mixeduser", 1000);
+    defer mgr.deinit();
+    mgr.load();
+
+    // Both IP and MAC in range → allowed
+    try testing.expect(mgr.isIpAllowed("mixed-net", 1000, "192.168.1.15"));
+    try testing.expect(mgr.isMacAllowed("mixed-net", 1000, "02:42:c0:a8:01:96"));
+
+    // IP allowed, MAC not → MAC denied
+    try testing.expect(mgr.isIpAllowed("mixed-net", 1000, "192.168.1.15"));
+    try testing.expect(!mgr.isMacAllowed("mixed-net", 1000, "02:42:c0:a8:02:00"));
+
+    // MAC allowed, IP not → IP denied
+    try testing.expect(!mgr.isIpAllowed("mixed-net", 1000, "192.168.1.30"));
+    try testing.expect(mgr.isMacAllowed("mixed-net", 1000, "02:42:c0:a8:01:96"));
+}
