@@ -126,8 +126,12 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8, deadline
 
     // Compute remaining time for poll timeout (check clock_gettime return)
     var now_ts: linux.timespec = undefined;
-    if (std.posix.errno(linux.clock_gettime(.MONOTONIC, &now_ts)) != .SUCCESS)
+    if (std.posix.errno(linux.clock_gettime(.MONOTONIC, &now_ts)) != .SUCCESS) {
+        _ = linux.close(pipe_fds[0]);
+        pipe_fds[0] = -1;
+        reapChild(@intCast(pid_signed));
         return error.ReadFailed;
+    }
     const now_ns: i64 = @as(i64, @intCast(now_ts.sec)) * std.time.ns_per_s +
         @as(i64, @intCast(now_ts.nsec));
     var remaining_ms: i64 = @divFloor(deadline_ns - now_ns, std.time.ns_per_ms);
@@ -157,8 +161,12 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8, deadline
             if (linux.errno(poll_rc) == .INTR) {
                 // Recompute remaining time and retry
                 var retry_ts: linux.timespec = undefined;
-                if (std.posix.errno(linux.clock_gettime(.MONOTONIC, &retry_ts)) != .SUCCESS)
+                if (std.posix.errno(linux.clock_gettime(.MONOTONIC, &retry_ts)) != .SUCCESS) {
+                    _ = linux.close(pipe_fds[0]);
+                    pipe_fds[0] = -1;
+                    reapChild(@intCast(pid_signed));
                     return error.ReadFailed;
+                }
                 const retry_ns: i64 = @as(i64, @intCast(retry_ts.sec)) * std.time.ns_per_s +
                     @as(i64, @intCast(retry_ts.nsec));
                 remaining_ms = @divFloor(deadline_ns - retry_ns, std.time.ns_per_ms);
