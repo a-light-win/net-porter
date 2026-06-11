@@ -8,6 +8,7 @@ const AclFile = @This();
 pub const Grant = struct {
     resource: []const u8,
     ips: ?[]const [:0]const u8 = null,
+    macs: ?[]const [:0]const u8 = null,
 };
 
 /// Represents a single ACL file's contents.
@@ -175,4 +176,66 @@ test "AclFile: unknown fields are ignored" {
 
     try std.testing.expectEqual(@as(usize, 1), parsed.value.grants.len);
     try std.testing.expectEqualSlices(u8, "test", parsed.value.grants[0].resource);
+}
+
+test "AclFile: grant with macs field" {
+    const allocator = std.testing.allocator;
+    const data =
+        \\{
+        \\  "grants": [
+        \\    {
+        \\      "resource": "macvlan-dhcp",
+        \\      "macs": ["02:42:c0:a8:01:64-02:42:c0:a8:01:c8"]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    const parsed = try parseFromSlice(allocator, data);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.grants.len);
+    try std.testing.expect(parsed.value.grants[0].macs != null);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.grants[0].macs.?.len);
+    try std.testing.expectEqualSlices(u8, "02:42:c0:a8:01:64-02:42:c0:a8:01:c8", parsed.value.grants[0].macs.?[0]);
+}
+
+test "AclFile: grant with both ips and macs" {
+    const allocator = std.testing.allocator;
+    const data =
+        \\{
+        \\  "grants": [
+        \\    {
+        \\      "resource": "macvlan-dhcp",
+        \\      "ips": ["192.168.1.100-192.168.1.110"],
+        \\      "macs": ["02:42:c0:a8:01:64", "02:42:c0:a8:02:00-02:42:c0:a8:02:ff"]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    const parsed = try parseFromSlice(allocator, data);
+    defer parsed.deinit();
+
+    const grant = parsed.value.grants[0];
+    try std.testing.expect(grant.ips != null);
+    try std.testing.expectEqual(@as(usize, 1), grant.ips.?.len);
+    try std.testing.expect(grant.macs != null);
+    try std.testing.expectEqual(@as(usize, 2), grant.macs.?.len);
+}
+
+test "AclFile: grant without macs is null" {
+    const allocator = std.testing.allocator;
+    const data =
+        \\{
+        \\  "grants": [
+        \\    { "resource": "macvlan-dhcp" }
+        \\  ]
+        \\}
+    ;
+
+    const parsed = try parseFromSlice(allocator, data);
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value.grants[0].macs == null);
 }

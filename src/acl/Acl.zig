@@ -9,12 +9,20 @@ name: []const u8,
 /// IP ranges per uid (parsed from grants with ips).
 /// In per-user daemon mode, this is keyed by the worker's UID.
 ip_ranges: IpRangeMap,
+/// MAC ranges per uid (parsed from grants with macs).
+mac_ranges: MacRangeMap,
 
 const IpRangeMap = std.AutoHashMap(u32, std.ArrayList(IpRange));
+const MacRangeMap = std.AutoHashMap(u32, std.ArrayList(MacRange));
 
 pub const IpRange = struct {
     start: u128,
     end: u128,
+};
+
+pub const MacRange = struct {
+    start: u64,
+    end: u64,
 };
 
 /// Create an empty Acl for the given resource name.
@@ -23,6 +31,7 @@ pub fn init(allocator: Allocator, name: []const u8) Acl {
         .allocator = allocator,
         .name = name,
         .ip_ranges = IpRangeMap.init(allocator),
+        .mac_ranges = MacRangeMap.init(allocator),
     };
 }
 
@@ -32,6 +41,12 @@ pub fn deinit(self: *Acl) void {
         list.*.deinit(self.allocator);
     }
     self.ip_ranges.deinit();
+
+    var mac_it = self.mac_ranges.valueIterator();
+    while (mac_it.next()) |list| {
+        list.*.deinit(self.allocator);
+    }
+    self.mac_ranges.deinit();
 }
 
 /// Whether this resource has IP constraints (static IP resource).
@@ -52,12 +67,35 @@ pub fn isIpAllowed(self: Acl, uid: u32, ip: []const u8) bool {
     return false;
 }
 
+/// Check if a uid is allowed to use the given MAC address.
+/// The MAC should be in xx:xx:xx:xx:xx:xx format.
+pub fn isMacAllowed(self: Acl, uid: u32, mac: []const u8) bool {
+    const ranges = self.mac_ranges.get(uid) orelse return false;
+    const mac_int = parseMacToInt(mac) catch return false;
+    for (ranges.items) |range| {
+        if (mac_int >= range.start and mac_int <= range.end) {
+            return true;
+        }
+    }
+    return false;
+}
+
 pub fn parseIpRanges(allocator: Allocator, ips: []const [:0]const u8) !std.ArrayList(IpRange) {
     var ranges = std.ArrayList(IpRange).empty;
     errdefer ranges.deinit(allocator);
 
     for (ips) |ip_spec| {
         try ranges.append(allocator, try parseIpRange(ip_spec));
+    }
+    return ranges;
+}
+
+pub fn parseMacRanges(allocator: Allocator, macs: []const [:0]const u8) !std.ArrayList(MacRange) {
+    var ranges = std.ArrayList(MacRange).empty;
+    errdefer ranges.deinit(allocator);
+
+    for (macs) |mac_spec| {
+        try ranges.append(allocator, try parseMacRange(mac_spec));
     }
     return ranges;
 }
@@ -73,6 +111,20 @@ fn parseIpRange(ip_spec: []const u8) !IpRange {
     } else {
         const ip_int = try parseIpToInt(ip_spec);
         return IpRange{ .start = ip_int, .end = ip_int };
+    }
+}
+
+fn parseMacRange(mac_spec: []const u8) !MacRange {
+    if (std.mem.indexOf(u8, mac_spec, "-")) |dash_pos| {
+        const start_str = std.mem.trim(u8, mac_spec[0..dash_pos], " ");
+        const end_str = std.mem.trim(u8, mac_spec[dash_pos + 1 ..], " ");
+        const start = try parseMacToInt(start_str);
+        const end = try parseMacToInt(end_str);
+        if (start > end) return error.InvalidMacRange;
+        return MacRange{ .start = start, .end = end };
+    } else {
+        const mac_int = try parseMacToInt(mac_spec);
+        return MacRange{ .start = mac_int, .end = mac_int };
     }
 }
 
@@ -158,6 +210,19 @@ fn parseIpv6ToInt(ip: []const u8) !u128 {
     }
 
     if (groups != 8) return error.InvalidIp;
+    return result;
+}
+
+fn parseMacToInt(mac: []const u8) !u64 {
+    var parts = std.mem.splitScalar(u8, mac, ':');
+    var result: u64 = 0;
+    var count: u32 = 0;
+    while (parts.next()) |part| : (count += 1) {
+        if (count >= 6) return error.InvalidMac;
+        const byte = std.fmt.parseUnsigned(u8, part, 16) catch return error.InvalidMac;
+        result = (result << 8) | @as(u64, byte);
+    }
+    if (count != 6) return error.InvalidMac;
     return result;
 }
 
@@ -403,4 +468,132 @@ test "parseIpRange with single IPv6" {
     const range = try parseIpRange("::1");
     try std.testing.expectEqual(@as(u128, 0x00000000000000000000000000000001), range.start);
     try std.testing.expectEqual(@as(u128, 0x00000000000000000000000000000001), range.end);
+}
+
+// ============================================================
+// MAC tests
+// ============================================================
+
+test "parseMacToInt parses valid MAC" {
+    const mac = try parseMacToInt("02:42:c0:a8:01:64");
+    try std.testing.expectEqual(@as(u64, 0x0242c0a80164), mac);
+}
+
+test "parseMacToInt parses broadcast MAC" {
+    const mac = try parseMacToInt("ff:ff:ff:ff:ff:ff");
+    try std.testing.expectEqual(@as(u64, 0xFFFFFFFFFFFF), mac);
+}
+
+test "parseMacToInt parses zero MAC" {
+    const mac = try parseMacToInt("00:00:00:00:00:00");
+    try std.testing.expectEqual(@as(u64, 0), mac);
+}
+
+test "parseMacToInt rejects invalid MAC" {
+    try std.testing.expectError(error.InvalidMac, parseMacToInt(""));
+    try std.testing.expectError(error.InvalidMac, parseMacToInt("02:42:c0:a8:01"));
+    try std.testing.expectError(error.InvalidMac, parseMacToInt("02:42:c0:a8:01:64:extra"));
+    try std.testing.expectError(error.InvalidMac, parseMacToInt("02:42:c0:a8:01:gg"));
+    try std.testing.expectError(error.InvalidMac, parseMacToInt("not-a-mac"));
+}
+
+test "parseMacRange with range" {
+    const range = try parseMacRange("02:42:c0:a8:01:64-02:42:c0:a8:01:c8");
+    try std.testing.expectEqual(@as(u64, 0x0242c0a80164), range.start);
+    try std.testing.expectEqual(@as(u64, 0x0242c0a801c8), range.end);
+}
+
+test "parseMacRange with single MAC" {
+    const range = try parseMacRange("02:42:c0:a8:01:64");
+    try std.testing.expectEqual(@as(u64, 0x0242c0a80164), range.start);
+    try std.testing.expectEqual(@as(u64, 0x0242c0a80164), range.end);
+}
+
+test "parseMacRange rejects invalid range" {
+    try std.testing.expectError(error.InvalidMac, parseMacRange("invalid-02:42:c0:a8:01:c8"));
+    try std.testing.expectError(error.InvalidMac, parseMacRange("02:42:c0:a8:01:64-invalid"));
+    try std.testing.expectError(error.InvalidMacRange, parseMacRange("02:42:c0:a8:01:c8-02:42:c0:a8:01:64"));
+}
+
+test "parseMacRanges with multiple entries" {
+    const allocator = std.testing.allocator;
+    const macs = &[_][:0]const u8{
+        "02:42:c0:a8:01:64-02:42:c0:a8:01:c8",
+        "aa:bb:cc:dd:ee:ff",
+    };
+    var ranges = try parseMacRanges(allocator, macs);
+    defer ranges.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 0x0242c0a80164), ranges.items[0].start);
+    try std.testing.expectEqual(@as(u64, 0x0242c0a801c8), ranges.items[0].end);
+    try std.testing.expectEqual(@as(u64, 0xaabbccddeeff), ranges.items[1].start);
+    try std.testing.expectEqual(@as(u64, 0xaabbccddeeff), ranges.items[1].end);
+}
+
+test "isMacAllowed with mac ranges" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    const macs = &[_][:0]const u8{"02:42:c0:a8:01:64-02:42:c0:a8:01:c8"};
+    const ranges = try parseMacRanges(allocator, macs);
+    try acl.mac_ranges.put(1000, ranges);
+
+    try std.testing.expect(acl.isMacAllowed(1000, "02:42:c0:a8:01:64"));
+    try std.testing.expect(acl.isMacAllowed(1000, "02:42:c0:a8:01:96"));
+    try std.testing.expect(acl.isMacAllowed(1000, "02:42:c0:a8:01:c8"));
+    try std.testing.expect(!acl.isMacAllowed(1000, "02:42:c0:a8:01:c9"));
+    try std.testing.expect(!acl.isMacAllowed(1001, "02:42:c0:a8:01:64"));
+}
+
+test "isMacAllowed with single MAC" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    const macs = &[_][:0]const u8{"aa:bb:cc:dd:ee:ff"};
+    const ranges = try parseMacRanges(allocator, macs);
+    try acl.mac_ranges.put(1000, ranges);
+
+    try std.testing.expect(acl.isMacAllowed(1000, "aa:bb:cc:dd:ee:ff"));
+    try std.testing.expect(!acl.isMacAllowed(1000, "aa:bb:cc:dd:ee:fe"));
+}
+
+test "isMacAllowed returns false for invalid MAC" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    const macs = &[_][:0]const u8{"02:42:c0:a8:01:64-02:42:c0:a8:01:c8"};
+    const ranges = try parseMacRanges(allocator, macs);
+    try acl.mac_ranges.put(1000, ranges);
+
+    try std.testing.expect(!acl.isMacAllowed(1000, "not-a-mac"));
+    try std.testing.expect(!acl.isMacAllowed(1000, ""));
+}
+
+test "isMacAllowed returns false when uid has no ranges" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    try std.testing.expect(!acl.isMacAllowed(9999, "02:42:c0:a8:01:64"));
+}
+
+test "isMacAllowed with multiple disjoint ranges for same user" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    const macs = &[_][:0]const u8{
+        "02:42:c0:a8:01:00-02:42:c0:a8:01:ff",
+        "aa:bb:cc:dd:ee:00-aa:bb:cc:dd:ee:ff",
+    };
+    const ranges = try parseMacRanges(allocator, macs);
+    try acl.mac_ranges.put(1000, ranges);
+
+    try std.testing.expect(acl.isMacAllowed(1000, "02:42:c0:a8:01:80"));
+    try std.testing.expect(acl.isMacAllowed(1000, "aa:bb:cc:dd:ee:80"));
+    try std.testing.expect(!acl.isMacAllowed(1000, "02:42:c0:a8:02:00"));
 }
