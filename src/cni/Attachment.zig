@@ -224,6 +224,16 @@ pub const Attachment = struct {
                     }
                 }
             }
+
+            // Inject MAC address into JSON config for macvlan plugin.
+            // MAC is set via config (not CNI_ARGS) so it naturally appears in
+            // prevResult from ADD and is available for teardown.
+            {
+                const exec_request = try request.requestExec();
+                if (exec_request.network_options.static_mac) |mac| {
+                    try exec_config.patchMacAddress(mac);
+                }
+            }
             const cmd = try self.cni_plugin_binary(tentative_allocator, exec_config.getType() orelse return error.InvalidConfig);
             const result = exec_config.exec(io, tentative_allocator, cmd, env_map, CNI_PLUGIN_TIMEOUT_MS) catch |err| switch (err) {
                 error.CniPluginTimeout => {
@@ -327,12 +337,6 @@ pub const Attachment = struct {
         try args.appendSlice(allocator, "IgnoreUnknown=true");
         try args.appendSlice(allocator, ";K8S_POD_NAME=");
         try args.appendSlice(allocator, exec_request.container_name);
-        if (cni_command == .ADD) {
-            if (exec_request.network_options.static_mac) |mac| {
-                try args.appendSlice(allocator, ";MAC=");
-                try args.appendSlice(allocator, mac);
-            }
-        }
         try env_map.put("CNI_ARGS", args.items);
 
         return env_map;
@@ -363,7 +367,7 @@ pub const Attachment = struct {
         try std.testing.expectEqualSlices(u8, "/path/to/cni/plugins/macvlan", bin);
     }
 
-    test "envMap includes MAC in CNI_ARGS when static_mac is set for ADD" {
+    test "envMap omits MAC from CNI_ARGS (MAC is injected via JSON config)" {
         const allocator = std.testing.allocator;
         var test_arena = try ArenaAllocator.init(allocator);
         defer test_arena.deinit();
@@ -388,79 +392,6 @@ pub const Attachment = struct {
                     .network_options = .{
                         .interface_name = "eth0",
                         .static_mac = "02:42:c0:a8:01:64",
-                    },
-                },
-            },
-        };
-
-        var env_map = try attachment.envMap(test_arena.allocator(), .ADD, request, "/proc/self/ns/net");
-        defer env_map.deinit();
-
-        const cni_args = env_map.get("CNI_ARGS").?;
-        try std.testing.expect(std.mem.indexOf(u8, cni_args, ";MAC=02:42:c0:a8:01:64") != null);
-    }
-
-    test "envMap omits MAC in CNI_ARGS for DEL even when static_mac is set" {
-        const allocator = std.testing.allocator;
-        var test_arena = try ArenaAllocator.init(allocator);
-        defer test_arena.deinit();
-
-        var attachment = Attachment{
-            .arena = try ArenaAllocator.init(allocator),
-            .cni_plugin_dir = "/cni/bin",
-            .exec_configs = std.ArrayList(PluginConf).empty,
-        };
-        defer attachment.deinit();
-
-        const request = plugin.Request{
-            .action = .teardown,
-            .request = .{
-                .exec = .{
-                    .container_name = "test-container",
-                    .container_id = "test-id",
-                    .network = .{
-                        .driver = "net-porter",
-                        .options = .{ .socket = "test-socket", .resource = "test-resource" },
-                    },
-                    .network_options = .{
-                        .interface_name = "eth0",
-                        .static_mac = "02:42:c0:a8:01:64",
-                    },
-                },
-            },
-        };
-
-        var env_map = try attachment.envMap(test_arena.allocator(), .DEL, request, "/proc/self/ns/net");
-        defer env_map.deinit();
-
-        const cni_args = env_map.get("CNI_ARGS").?;
-        try std.testing.expect(std.mem.indexOf(u8, cni_args, "MAC=") == null);
-    }
-
-    test "envMap omits MAC in CNI_ARGS when static_mac is null" {
-        const allocator = std.testing.allocator;
-        var test_arena = try ArenaAllocator.init(allocator);
-        defer test_arena.deinit();
-
-        var attachment = Attachment{
-            .arena = try ArenaAllocator.init(allocator),
-            .cni_plugin_dir = "/cni/bin",
-            .exec_configs = std.ArrayList(PluginConf).empty,
-        };
-        defer attachment.deinit();
-
-        const request = plugin.Request{
-            .action = .setup,
-            .request = .{
-                .exec = .{
-                    .container_name = "test-container",
-                    .container_id = "test-id",
-                    .network = .{
-                        .driver = "net-porter",
-                        .options = .{ .socket = "test-socket", .resource = "test-resource" },
-                    },
-                    .network_options = .{
-                        .interface_name = "eth0",
                     },
                 },
             },
