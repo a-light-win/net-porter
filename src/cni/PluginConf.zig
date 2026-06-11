@@ -172,6 +172,11 @@ pub const PluginConf = struct {
         return std.mem.eql(u8, "static", type_str);
     }
 
+    pub fn isMacvlan(self: PluginConf) bool {
+        const plugin_type = self.getType() orelse return false;
+        return std.mem.eql(u8, "macvlan", plugin_type);
+    }
+
     fn isIpv6(addr: []const u8) bool {
         return std.mem.indexOf(u8, addr, ":") != null;
     }
@@ -202,8 +207,9 @@ pub const PluginConf = struct {
     ///   - No string-injection risk from CNI_ARGS concatenation
     pub fn patchMacAddress(self: *PluginConf, mac: []const u8) !void {
         const allocator = self.arena.?.allocator();
-        try self.conf.put(allocator, "mac", .{ .string = mac });
-        log.info("patched mac '{s}' into plugin config", .{mac});
+        const mac_copy = try allocator.dupe(u8, mac);
+        try self.conf.put(allocator, "mac", .{ .string = mac_copy });
+        log.info("patched mac '{s}' into plugin config", .{mac_copy});
     }
 
     /// Replace template addresses in the ipam config with actual IPs.
@@ -451,6 +457,38 @@ pub const PluginConf = struct {
         try plugin_conf.conf.getPtr("ipam").?.object.put(allocator, "type", json.Value{ .string = "dhcp" });
 
         try std.testing.expect(!plugin_conf.isStatic());
+    }
+
+    test "isMacvlan() returns true when plugin type is macvlan" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        const allocator = arena.allocator();
+        defer arena.deinit();
+
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try plugin_conf.conf.put(allocator, "type", json.Value{ .string = "macvlan" });
+        try std.testing.expect(plugin_conf.isMacvlan());
+    }
+
+    test "isMacvlan() returns false when plugin type is not macvlan" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        const allocator = arena.allocator();
+        defer arena.deinit();
+
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try plugin_conf.conf.put(allocator, "type", json.Value{ .string = "firewall" });
+        try std.testing.expect(!plugin_conf.isMacvlan());
+    }
+
+    test "isMacvlan() returns false when type field is missing" {
+        const root_allocator = std.testing.allocator;
+        var arena = try ArenaAllocator.init(root_allocator);
+        const allocator = arena.allocator();
+        defer arena.deinit();
+
+        var plugin_conf = PluginConf{ .conf = try json.ObjectMap.init(allocator, &.{}, &.{}) };
+        try std.testing.expect(!plugin_conf.isMacvlan());
     }
 
     pub fn stringify(self: PluginConf, io: std.Io, stream: std.Io.File) !void {

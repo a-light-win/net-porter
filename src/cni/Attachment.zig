@@ -214,10 +214,11 @@ pub const Attachment = struct {
                 }
             }
 
+            const exec_request = try request.requestExec();
+
             if (exec_config.isDhcp()) {
                 try exec_config.setDhcpSocketPath(request.user_id.?);
             } else if (exec_config.isStatic()) {
-                const exec_request = try request.requestExec();
                 if (exec_request.network_options.static_ips) |static_ips| {
                     if (static_ips.len > 0) {
                         try exec_config.patchAddresses(static_ips);
@@ -225,11 +226,10 @@ pub const Attachment = struct {
                 }
             }
 
-            // Inject MAC address into JSON config for macvlan plugin.
-            // MAC is set via config (not CNI_ARGS) so it naturally appears in
-            // prevResult from ADD and is available for teardown.
-            {
-                const exec_request = try request.requestExec();
+            // Inject MAC address only into macvlan plugin config.
+            // Strict CNI plugins may reject unknown keys; limit injection to
+            // macvlan which natively reads the "mac" key.
+            if (exec_config.isMacvlan()) {
                 if (exec_request.network_options.static_mac) |mac| {
                     try exec_config.patchMacAddress(mac);
                 }
