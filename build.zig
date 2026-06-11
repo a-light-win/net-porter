@@ -31,9 +31,12 @@ pub fn build(b: *std.Build) void {
     });
 
     // Standard optimization options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
-    // set a preferred release mode, allowing the user to decide how to optimize.
-    const optimize = b.standardOptimizeOption(.{});
+    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Default to
+    // ReleaseSafe for production hardening (bounds checks, undefined behavior
+    // detection) while still being optimized.
+    const optimize = b.standardOptimizeOption(.{
+        .preferred_optimize_mode = .ReleaseSafe,
+    });
 
     // Create build_options module so source code can access version via
     // @import("build_options").version
