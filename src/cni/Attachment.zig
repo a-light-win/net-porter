@@ -13,6 +13,7 @@ const CniCommand = @import("Cni.zig").CniCommand;
 const responseError = @import("Cni.zig").responseError;
 const responseResult = @import("Cni.zig").responseResult;
 const isValidPluginType = @import("CniLoader.zig").isValidPluginType;
+const SlaacDetector = @import("SlaacDetector.zig");
 
 /// Transient attachment — created per request, not stored in memory.
 /// State is persisted to disk via StateFile.
@@ -253,6 +254,21 @@ pub const Attachment = struct {
             }
         }
 
+        // SLAAC IPv6 detection: when macvlan with a static MAC is used,
+        // the kernel may auto-assign an IPv6 address via SLAAC that is
+        // NOT reported by the CNI macvlan plugin's ADD response.
+        const exec_request = try request.requestExec();
+        const first_config = self.exec_configs.items[0];
+        if (first_config.isMacvlan() and exec_request.network_options.static_mac != null) {
+            self.detectAndInjectSlaacIpv6(
+                tentative_allocator,
+                netns,
+                exec_request.network_options.interface_name,
+            ) catch |err| {
+                log.warn("SLAAC detection failed: {s}", .{@errorName(err)});
+            };
+        }
+
         log.info("Setup {s} success", .{request.request.exec.container_name});
         try responseResult(
             tentative_allocator,
@@ -319,6 +335,133 @@ pub const Attachment = struct {
                 .{request.request.exec.container_name},
             );
         }
+    }
+
+    /// Detect SLAAC IPv6 addresses on a macvlan interface and inject them
+    /// into the last CNI plugin result. Non-fatal: failures are logged but
+    /// do not prevent the setup from succeeding.
+    fn detectAndInjectSlaacIpv6(
+        self: *Attachment,
+        allocator: std.mem.Allocator,
+        netns: []const u8,
+        ifname: []const u8,
+    ) !void {
+        const slaac_addrs = SlaacDetector.detect(
+            allocator,
+            netns,
+            ifname,
+            SlaacDetector.SLAAC_POLL_INTERVAL_MS,
+            SlaacDetector.SLAAC_MAX_WAIT_MS,
+        ) catch |err| {
+            log.warn("SLAAC detect: {s}", .{@errorName(err)});
+            return;
+        };
+        defer {
+            for (slaac_addrs) |addr| allocator.free(addr.address);
+            allocator.free(slaac_addrs);
+        }
+
+        if (slaac_addrs.len == 0) return;
+
+        const last_config = &self.exec_configs.items[self.exec_configs.items.len - 1];
+        const last_result = last_config.result orelse return;
+
+        var parsed = json.parseFromSlice(json.Value, allocator, last_result.items, .{}) catch |err| {
+            log.warn("SLAAC: failed to parse CNI result: {s}", .{@errorName(err)});
+            return;
+        };
+        defer parsed.deinit();
+
+        var result_obj = switch (parsed.value) {
+            .object => |obj| obj,
+            else => return,
+        };
+
+        // Find the interface index for the target ifname
+        const interfaces_val = result_obj.get("interfaces") orelse return;
+        const interfaces = switch (interfaces_val) {
+            .array => |arr| arr.items,
+            else => return,
+        };
+
+        var iface_index: u32 = 0;
+        var found_iface = false;
+        for (interfaces, 0..) |iface, i| {
+            if (iface == .object) {
+                if (iface.object.get("name")) |name| {
+                    if (name == .string and std.mem.eql(u8, name.string, ifname)) {
+                        iface_index = @intCast(i);
+                        found_iface = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!found_iface) return;
+
+        // Collect existing IP addresses for deduplication
+        const ips_val = result_obj.get("ips") orelse return;
+        const existing_ips = switch (ips_val) {
+            .array => |arr| arr.items,
+            else => &[_]json.Value{},
+        };
+
+        // Build the new ips array with SLAAC addresses appended
+        var new_ips = try std.ArrayList(json.Value).initCapacity(allocator, existing_ips.len + slaac_addrs.len);
+        for (existing_ips) |ip| {
+            try new_ips.append(allocator, ip);
+        }
+
+        var added_count: usize = 0;
+        for (slaac_addrs) |slaac_addr| {
+            const slaac_u128 = SlaacDetector.ipv6ToU128(slaac_addr.address);
+
+            // Check for duplicates against existing IPs
+            var is_duplicate = false;
+            if (slaac_u128) |target| {
+                for (existing_ips) |existing_ip| {
+                    if (existing_ip == .object) {
+                        if (existing_ip.object.get("address")) |addr_val| {
+                            if (addr_val == .string) {
+                                if (SlaacDetector.ipv6ToU128(addr_val.string)) |existing_u128| {
+                                    if (existing_u128 == target) {
+                                        is_duplicate = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!is_duplicate) {
+                var ip_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
+                try ip_obj.put(allocator, "interface", json.Value{ .integer = @intCast(iface_index) });
+                try ip_obj.put(allocator, "address", json.Value{ .string = slaac_addr.address });
+                try new_ips.append(allocator, .{ .object = ip_obj });
+                added_count += 1;
+            }
+        }
+
+        if (added_count == 0) return;
+
+        // Replace the ips array in the parsed result
+        try result_obj.put(allocator, "ips", json.Value{ .array = json.Array.fromOwnedSlice(allocator, new_ips.items) });
+
+        // Re-serialize using the plugin's arena allocator
+        const plugin_alloc = last_config.arena.?.allocator();
+        const new_result_str = json.Stringify.valueAlloc(plugin_alloc, parsed.value, .{}) catch |err| {
+            log.warn("SLAAC: failed to serialize result: {s}", .{@errorName(err)});
+            return;
+        };
+
+        // Free the old result and replace
+        if (last_config.result) |*old| {
+            old.deinit(plugin_alloc);
+        }
+        last_config.result = std.ArrayList(u8).fromOwnedSlice(new_result_str);
+        log.info("Injected {d} SLAAC IPv6 address(es) into CNI result", .{added_count});
     }
 
     /// Build the CNI environment map for plugin execution.
