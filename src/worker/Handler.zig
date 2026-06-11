@@ -253,6 +253,15 @@ pub fn handle(self: *Handler) !void {
                 return;
             };
         }
+        // MAC ACL validation for setup action (deny-by-default)
+        self.validateStaticMac(client_info.uid, &request) catch |err| {
+            log.err("Static MAC validation failed for uid={d}, resource={s}: {s}", .{
+                client_info.uid,
+                request.resource() catch "<unknown>",
+                @errorName(err),
+            });
+            return;
+        };
     }
 
     self.execAction(tentative_allocator, cni, request, client_info.uid) catch |err| {
@@ -387,6 +396,22 @@ fn validateStaticIp(self: *Handler, uid: u32, request: *const plugin.Request) !v
             self.responser.writeError("IP address not allowed: {s}", .{requested_ip});
             return error.IpNotAllowed;
         }
+    }
+}
+
+fn validateStaticMac(self: *Handler, uid: u32, request: *const plugin.Request) !void {
+    const exec_request = try request.requestExec();
+    const static_mac = exec_request.network_options.static_mac orelse return;
+
+    const resource = request.resource() catch |err| {
+        log.err("Failed to resolve resource: {s}", .{@errorName(err)});
+        self.responser.writeError("Internal error", .{});
+        return err;
+    };
+
+    if (!self.acl_manager.isMacAllowed(resource, uid, static_mac)) {
+        self.responser.writeError("MAC address not allowed: {s}", .{static_mac});
+        return error.MacNotAllowed;
     }
 }
 
