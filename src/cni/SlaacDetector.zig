@@ -218,87 +218,23 @@ pub fn parseIfInet6(allocator: std.mem.Allocator, content: []const u8, ifname: [
     return addrs.toOwnedSlice(allocator);
 }
 
-/// Format a 32-hex-char IPv6 address and prefix length into canonical
-/// "addr/prefix" CIDR notation per RFC 5952. Collapses the longest run
-/// of all-zero 16-bit groups to "::" and strips leading zeros in each group.
+/// Format a 32-hex-char IPv6 address and prefix length into expanded
+/// "addr/prefix" CIDR notation. Inserts a colon every 4 hex characters.
 pub fn formatIpv6Cidr(allocator: std.mem.Allocator, hex32: []const u8, prefix_len: u8) ![]const u8 {
     if (hex32.len != 32) return error.InvalidInput;
     if (prefix_len > 128) return error.InvalidInput;
 
-    // Parse 32 hex chars into 8 u16 groups
-    var groups: [8]u16 = undefined;
-    for (0..8) |i| {
-        const start = i * 4;
-        groups[i] = std.fmt.parseInt(u16, hex32[start..][0..4], 16) catch return error.InvalidInput;
-    }
-
-    // Find the longest run of consecutive all-zero groups (>= 2 per RFC 5952 §4.2.2).
-    // On equal length, the first run wins (§4.2.3).
-    var best_start: usize = 0;
-    var best_len: usize = 0;
-    {
-        var run_start: usize = 0;
-        var run_len: usize = 0;
-        for (groups, 0..) |g, i| {
-            if (g == 0) {
-                if (run_len == 0) run_start = i;
-                run_len += 1;
-                if (run_len > best_len) {
-                    best_start = run_start;
-                    best_len = run_len;
-                }
-            } else {
-                run_len = 0;
-            }
-        }
-    }
-    // RFC 5952 §4.2.2: do not compress a single zero group
-    const compress = best_len >= 2;
-    const c_start = best_start;
-    const c_len = best_len;
-
-    // Build output — max 8*4 + 7 colons + 2 for :: + 1 slash + 3 prefix digits = 45
-    var buf: [48]u8 = undefined;
+    // 8 groups of 4 hex chars + 7 colons + 1 slash + up to 3 prefix digits
+    var buf: [44]u8 = undefined;
     var pos: usize = 0;
 
-    if (compress) {
-        const c_end = c_start + c_len;
-
-        // Groups before the compressed run
-        for (0..c_start) |i| {
-            if (i > 0) {
-                buf[pos] = ':';
-                pos += 1;
-            }
-            const s = std.fmt.bufPrint(buf[pos..], "{x}", .{groups[i]}) catch unreachable;
-            pos += s.len;
+    for (0..8) |i| {
+        if (i > 0) {
+            buf[pos] = ':';
+            pos += 1;
         }
-
-        // The compressed run — "::"
-        buf[pos] = ':';
-        pos += 1;
-        buf[pos] = ':';
-        pos += 1;
-
-        // Groups after the compressed run
-        for (c_end..8) |i| {
-            if (i > c_end) {
-                buf[pos] = ':';
-                pos += 1;
-            }
-            const s = std.fmt.bufPrint(buf[pos..], "{x}", .{groups[i]}) catch unreachable;
-            pos += s.len;
-        }
-    } else {
-        // No compression — emit all groups
-        for (0..8) |i| {
-            if (i > 0) {
-                buf[pos] = ':';
-                pos += 1;
-            }
-            const s = std.fmt.bufPrint(buf[pos..], "{x}", .{groups[i]}) catch unreachable;
-            pos += s.len;
-        }
+        @memcpy(buf[pos..][0..4], hex32[i * 4 ..][0..4]);
+        pos += 4;
     }
 
     buf[pos] = '/';
@@ -408,7 +344,7 @@ test "parseIfInet6 returns global IPv6 for matching interface" {
     }
 
     try std.testing.expectEqual(@as(usize, 1), addrs.len);
-    try std.testing.expectEqualStrings("2001:db8::1/64", addrs[0].address);
+    try std.testing.expectEqualStrings("2001:0db8:0000:0000:0000:0000:0000:0001/64", addrs[0].address);
 }
 
 test "parseIfInet6 excludes link-local addresses" {
@@ -488,12 +424,12 @@ test "parseIfInet6 rejects prefix_len > 128" {
     try std.testing.expectEqual(@as(usize, 0), addrs.len);
 }
 
-test "formatIpv6Cidr produces RFC 5952 canonical notation" {
+test "formatIpv6Cidr produces expanded IPv6 notation" {
     const allocator = std.testing.allocator;
 
     const result = try formatIpv6Cidr(allocator, "20010db8000000000000000000000001", 64);
     defer allocator.free(result);
-    try std.testing.expectEqualStrings("2001:db8::1/64", result);
+    try std.testing.expectEqualStrings("2001:0db8:0000:0000:0000:0000:0000:0001/64", result);
 }
 
 test "formatIpv6Cidr handles all-zeros address" {
@@ -501,7 +437,7 @@ test "formatIpv6Cidr handles all-zeros address" {
 
     const result = try formatIpv6Cidr(allocator, "00000000000000000000000000000000", 0);
     defer allocator.free(result);
-    try std.testing.expectEqualStrings("::/0", result);
+    try std.testing.expectEqualStrings("0000:0000:0000:0000:0000:0000:0000:0000/0", result);
 }
 
 test "formatIpv6Cidr handles loopback with prefix 128" {
@@ -509,26 +445,7 @@ test "formatIpv6Cidr handles loopback with prefix 128" {
 
     const result = try formatIpv6Cidr(allocator, "00000000000000000000000000000001", 128);
     defer allocator.free(result);
-    try std.testing.expectEqualStrings("::1/128", result);
-}
-
-test "formatIpv6Cidr compresses first run on equal length" {
-    const allocator = std.testing.allocator;
-
-    // Two runs of length 2: groups 2-3 and groups 5-6
-    // 2001:db8:0:0:1:0:0:1 -> first run compressed
-    const result = try formatIpv6Cidr(allocator, "20010db8000000000001000000000001", 64);
-    defer allocator.free(result);
-    try std.testing.expectEqualStrings("2001:db8::1:0:0:1/64", result);
-}
-
-test "formatIpv6Cidr no compression with single zero group" {
-    const allocator = std.testing.allocator;
-
-    // Only a single zero group at index 2 — should NOT compress
-    const result = try formatIpv6Cidr(allocator, "20010db8000000010002000300040001", 64);
-    defer allocator.free(result);
-    try std.testing.expectEqualStrings("2001:db8:0:1:2:3:4:1/64", result);
+    try std.testing.expectEqualStrings("0000:0000:0000:0000:0000:0000:0000:0001/128", result);
 }
 
 test "formatIpv6Cidr rejects invalid hex length" {
