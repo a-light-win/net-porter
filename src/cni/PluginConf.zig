@@ -193,6 +193,19 @@ pub const PluginConf = struct {
         return null;
     }
 
+    /// Set the MAC address in the plugin's JSON config.
+    /// The macvlan CNI plugin reads the "mac" key from its config and applies it
+    /// at link creation time (before the interface is brought UP). This is the
+    /// preferred injection method over CNI_ARGS because:
+    ///   - Consistent with how patchAddresses() injects IPs into JSON config
+    ///   - The MAC naturally appears in prevResult from ADD, available for DEL
+    ///   - No string-injection risk from CNI_ARGS concatenation
+    pub fn patchMacAddress(self: *PluginConf, mac: []const u8) !void {
+        const allocator = self.arena.?.allocator();
+        try self.conf.put(allocator, "mac", .{ .string = mac });
+        log.info("patched mac '{s}' into plugin config", .{mac});
+    }
+
     /// Replace template addresses in the ipam config with actual IPs.
     /// Requires an addresses array with CIDR templates in the CNI config.
     /// Routes, DNS, and other ipam fields are preserved from the CNI config as-is.
@@ -966,6 +979,64 @@ test "patchAddresses with IPv6 only" {
     try std.testing.expectEqual(@as(usize, 1), addresses.items.len);
     try std.testing.expectEqualSlices(u8, "2001:db8::42/64", addresses.items[0].object.get("address").?.string);
     try std.testing.expectEqualSlices(u8, "2001:db8::1", addresses.items[0].object.get("gateway").?.string);
+}
+
+// -- Tests for patchMacAddress --
+
+test "patchMacAddress adds mac key to plugin config" {
+    const allocator = std.testing.allocator;
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
+    try conf.put(arena_alloc, "name", .{ .string = "test" });
+    try conf.put(arena_alloc, "cniVersion", .{ .string = "1.0.0" });
+
+    var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
+    try plugin_conf.patchMacAddress("02:42:c0:a8:01:64");
+
+    const mac_val = plugin_conf.conf.get("mac").?;
+    try std.testing.expectEqualSlices(u8, "02:42:c0:a8:01:64", mac_val.string);
+}
+
+test "patchMacAddress overwrites existing mac key" {
+    const allocator = std.testing.allocator;
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
+    try conf.put(arena_alloc, "mac", .{ .string = "00:00:00:00:00:00" });
+
+    var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
+    try plugin_conf.patchMacAddress("02:42:c0:a8:01:64");
+
+    const mac_val = plugin_conf.conf.get("mac").?;
+    try std.testing.expectEqualSlices(u8, "02:42:c0:a8:01:64", mac_val.string);
+}
+
+test "patchMacAddress preserves other config keys" {
+    const allocator = std.testing.allocator;
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var conf = try json.ObjectMap.init(arena_alloc, &.{}, &.{});
+    try conf.put(arena_alloc, "type", .{ .string = "macvlan" });
+    try conf.put(arena_alloc, "name", .{ .string = "mynet" });
+    try conf.put(arena_alloc, "cniVersion", .{ .string = "1.0.0" });
+    try conf.put(arena_alloc, "master", .{ .string = "eth0" });
+
+    var plugin_conf = PluginConf{ .arena = arena, .conf = conf };
+    try plugin_conf.patchMacAddress("aa:bb:cc:dd:ee:ff");
+
+    try std.testing.expectEqualSlices(u8, "macvlan", plugin_conf.conf.get("type").?.string);
+    try std.testing.expectEqualSlices(u8, "mynet", plugin_conf.conf.get("name").?.string);
+    try std.testing.expectEqualSlices(u8, "eth0", plugin_conf.conf.get("master").?.string);
+    try std.testing.expectEqualSlices(u8, "aa:bb:cc:dd:ee:ff", plugin_conf.conf.get("mac").?.string);
 }
 
 // -- Tests for exec timeout --
