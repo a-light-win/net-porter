@@ -225,6 +225,11 @@ fn addGrantsTo(self: *WorkerAclManager, arena_alloc: Allocator, acls: *std.Array
             const ranges = try Acl.parseIpRanges(arena_alloc, ips);
             try acl.ip_ranges.put(self.uid, ranges);
         }
+        // MAC ranges from the grant are associated with this worker's UID.
+        if (grant.macs) |macs| {
+            const ranges = try Acl.parseMacRanges(arena_alloc, macs);
+            try acl.mac_ranges.put(self.uid, ranges);
+        }
         try acls.append(arena_alloc, acl);
     }
 }
@@ -363,6 +368,20 @@ pub fn isIpAllowed(self: *WorkerAclManager, name: []const u8, uid: u32, ip: []co
     for (self.acls.items) |acl| {
         if (std.mem.eql(u8, name, acl.name)) {
             if (acl.isIpAllowed(uid, ip)) return true;
+        }
+    }
+    return false;
+}
+
+/// Check if a uid is allowed to use the given MAC on the specified resource.
+/// Deny-by-default: if no matching grant has macs, the request is rejected.
+pub fn isMacAllowed(self: *WorkerAclManager, name: []const u8, uid: u32, mac: []const u8) bool {
+    self.mutex.lock(self.io) catch return false;
+    defer self.mutex.unlock(self.io);
+
+    for (self.acls.items) |acl| {
+        if (std.mem.eql(u8, name, acl.name)) {
+            if (acl.isMacAllowed(uid, mac)) return true;
         }
     }
     return false;
