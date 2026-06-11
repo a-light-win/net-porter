@@ -327,9 +327,11 @@ pub const Attachment = struct {
         try args.appendSlice(allocator, "IgnoreUnknown=true");
         try args.appendSlice(allocator, ";K8S_POD_NAME=");
         try args.appendSlice(allocator, exec_request.container_name);
-        if (exec_request.network_options.static_mac) |mac| {
-            try args.appendSlice(allocator, ";MAC=");
-            try args.appendSlice(allocator, mac);
+        if (cni_command == .ADD) {
+            if (exec_request.network_options.static_mac) |mac| {
+                try args.appendSlice(allocator, ";MAC=");
+                try args.appendSlice(allocator, mac);
+            }
         }
         try env_map.put("CNI_ARGS", args.items);
 
@@ -361,7 +363,7 @@ pub const Attachment = struct {
         try std.testing.expectEqualSlices(u8, "/path/to/cni/plugins/macvlan", bin);
     }
 
-    test "envMap includes MAC in CNI_ARGS when static_mac is set" {
+    test "envMap includes MAC in CNI_ARGS when static_mac is set for ADD" {
         const allocator = std.testing.allocator;
         var test_arena = try ArenaAllocator.init(allocator);
         defer test_arena.deinit();
@@ -396,6 +398,43 @@ pub const Attachment = struct {
 
         const cni_args = env_map.get("CNI_ARGS").?;
         try std.testing.expect(std.mem.indexOf(u8, cni_args, ";MAC=02:42:c0:a8:01:64") != null);
+    }
+
+    test "envMap omits MAC in CNI_ARGS for DEL even when static_mac is set" {
+        const allocator = std.testing.allocator;
+        var test_arena = try ArenaAllocator.init(allocator);
+        defer test_arena.deinit();
+
+        var attachment = Attachment{
+            .arena = try ArenaAllocator.init(allocator),
+            .cni_plugin_dir = "/cni/bin",
+            .exec_configs = std.ArrayList(PluginConf).empty,
+        };
+        defer attachment.deinit();
+
+        const request = plugin.Request{
+            .action = .teardown,
+            .request = .{
+                .exec = .{
+                    .container_name = "test-container",
+                    .container_id = "test-id",
+                    .network = .{
+                        .driver = "net-porter",
+                        .options = .{ .socket = "test-socket", .resource = "test-resource" },
+                    },
+                    .network_options = .{
+                        .interface_name = "eth0",
+                        .static_mac = "02:42:c0:a8:01:64",
+                    },
+                },
+            },
+        };
+
+        var env_map = try attachment.envMap(test_arena.allocator(), .DEL, request, "/proc/self/ns/net");
+        defer env_map.deinit();
+
+        const cni_args = env_map.get("CNI_ARGS").?;
+        try std.testing.expect(std.mem.indexOf(u8, cni_args, "MAC=") == null);
     }
 
     test "envMap omits MAC in CNI_ARGS when static_mac is null" {
