@@ -597,3 +597,28 @@ test "isMacAllowed with multiple disjoint ranges for same user" {
     try std.testing.expect(acl.isMacAllowed(1000, "aa:bb:cc:dd:ee:80"));
     try std.testing.expect(!acl.isMacAllowed(1000, "02:42:c0:a8:02:00"));
 }
+
+test "parseMacRange with whitespace around dash" {
+    const range = try parseMacRange("02:42:c0:a8:01:64 - 02:42:c0:a8:01:c8");
+    try std.testing.expectEqual(@as(u64, 0x0242c0a80164), range.start);
+    try std.testing.expectEqual(@as(u64, 0x0242c0a801c8), range.end);
+}
+
+test "parseMacToInt with uppercase hex" {
+    const mac = try parseMacToInt("AA:BB:CC:DD:EE:FF");
+    try std.testing.expectEqual(@as(u64, 0xaabbccddeeff), mac);
+}
+
+test "isMacAllowed is independent of ip ranges" {
+    const allocator = std.testing.allocator;
+    var acl = init(allocator, "test");
+    defer acl.deinit();
+
+    // Add IP ranges but NO MAC ranges
+    const ips = &[_][:0]const u8{"192.168.1.10-192.168.1.20"};
+    const ip_ranges = try parseIpRanges(allocator, ips);
+    try acl.ip_ranges.put(1000, ip_ranges);
+
+    // MAC should be denied because no MAC ranges exist (deny-by-default)
+    try std.testing.expect(!acl.isMacAllowed(1000, "02:42:c0:a8:01:64"));
+}
