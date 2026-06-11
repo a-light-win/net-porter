@@ -403,6 +403,11 @@ fn validateStaticMac(self: *Handler, uid: u32, request: *const plugin.Request) !
     const exec_request = try request.requestExec();
     const static_mac = exec_request.network_options.static_mac orelse return;
 
+    if (static_mac.len == 0) {
+        self.responser.writeError("static_mac must not be empty", .{});
+        return error.InvalidMac;
+    }
+
     const resource = request.resource() catch |err| {
         log.err("Failed to resolve resource: {s}", .{@errorName(err)});
         self.responser.writeError("Internal error", .{});
