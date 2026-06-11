@@ -12,6 +12,9 @@ pub const Ipv6Addr = struct {
 pub const DetectError = error{
     ForkFailed,
     PipeFailed,
+    WaitFailed,
+    ReadFailed,
+    Timeout,
 };
 
 /// Detect SLAAC IPv6 addresses on an interface in a target network namespace.
@@ -30,13 +33,14 @@ pub fn detect(
     // Use a monotonic clock deadline so signal-interrupted nanosleep
     // does not shorten the total polling window.
     var start_ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.MONOTONIC, &start_ts);
+    if (std.posix.errno(linux.clock_gettime(.MONOTONIC, &start_ts)) != .SUCCESS)
+        return &[_]Ipv6Addr{};
     const deadline_ns: i64 = @as(i64, @intCast(start_ts.sec)) * std.time.ns_per_s +
         @as(i64, @intCast(start_ts.nsec)) +
         @as(i64, max_wait_ms) * std.time.ns_per_ms;
 
     while (true) {
-        if (queryOnce(allocator, netns_path_z)) |maybe_content| {
+        if (queryOnce(allocator, netns_path_z, deadline_ns)) |maybe_content| {
             if (maybe_content) |content| {
                 defer allocator.free(content);
                 if (parseIfInet6(allocator, content, ifname)) |addrs| {
@@ -49,7 +53,8 @@ pub fn detect(
         }
 
         var now_ts: linux.timespec = undefined;
-        _ = linux.clock_gettime(.MONOTONIC, &now_ts);
+        if (std.posix.errno(linux.clock_gettime(.MONOTONIC, &now_ts)) != .SUCCESS)
+            return &[_]Ipv6Addr{};
         const now_ns: i64 = @as(i64, @intCast(now_ts.sec)) * std.time.ns_per_s +
             @as(i64, @intCast(now_ts.nsec));
         if (now_ns >= deadline_ns) break;
@@ -59,11 +64,19 @@ pub fn detect(
             @as(i64, poll_interval_ms) * std.time.ns_per_ms,
             remaining_ns,
         );
-        const req = linux.timespec{
+        var req = linux.timespec{
             .sec = @intCast(@divTrunc(poll_ns, std.time.ns_per_s)),
             .nsec = @intCast(@rem(poll_ns, std.time.ns_per_s)),
         };
-        _ = linux.nanosleep(&req, null);
+        while (true) {
+            var rem: linux.timespec = undefined;
+            const sleep_rc = linux.nanosleep(&req, &rem);
+            if (std.posix.errno(sleep_rc) == .INTR) {
+                req = rem;
+                continue;
+            }
+            break;
+        }
     }
 
     log.warn("SLAAC detection timed out after {d}ms for {s}", .{ max_wait_ms, ifname });
@@ -72,7 +85,8 @@ pub fn detect(
 
 /// Fork a child to read /proc/net/if_inet6 inside the target netns.
 /// Returns null if the child fails or produces no data.
-fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8) DetectError!?[]const u8 {
+/// deadline_ns is the absolute monotonic deadline in nanoseconds.
+fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8, deadline_ns: i64) DetectError!?[]const u8 {
     var pipe_fds: [2]i32 = undefined;
     const pipe_rc = linux.pipe2(&pipe_fds, .{ .CLOEXEC = true });
     if (std.posix.errno(pipe_rc) != .SUCCESS) return error.PipeFailed;
@@ -94,33 +108,95 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8) DetectEr
 
     // Parent: close write end of pipe
     _ = linux.close(pipe_fds[1]);
+    errdefer _ = linux.close(pipe_fds[0]);
 
-    // Read child output from pipe into a stack buffer
-    var buf: [4096]u8 = undefined;
-    var total: usize = 0;
-    while (total < buf.len) {
-        const n_raw = linux.read(pipe_fds[0], buf[total..].ptr, buf.len - total);
+    // Compute remaining time for poll timeout
+    var now_ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &now_ts);
+    const now_ns: i64 = @as(i64, @intCast(now_ts.sec)) * std.time.ns_per_s +
+        @as(i64, @intCast(now_ts.nsec));
+    const remaining_ms: i64 = @divFloor(deadline_ns - now_ns, std.time.ns_per_ms);
+    if (remaining_ms <= 0) {
+        _ = linux.close(pipe_fds[0]);
+        _ = linux.kill(@intCast(pid_signed), .KILL);
+        var dummy: u32 = 0;
+        _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
+        return error.Timeout;
+    }
+
+    // Poll the pipe fd with a timeout so we don't block forever
+    var pfds = [1]linux.pollfd{.{
+        .fd = pipe_fds[0],
+        .events = linux.POLL.IN,
+        .revents = 0,
+    }};
+    const poll_timeout: i32 = if (remaining_ms > std.math.maxInt(i32))
+        std.math.maxInt(i32)
+    else
+        @intCast(remaining_ms);
+    const poll_rc = linux.poll(&pfds, 1, poll_timeout);
+    const poll_n: isize = @bitCast(poll_rc);
+    if (poll_n <= 0) {
+        _ = linux.close(pipe_fds[0]);
+        _ = linux.kill(@intCast(pid_signed), .KILL);
+        var dummy: u32 = 0;
+        _ = linux.waitpid(@intCast(pid_signed), &dummy, 0);
+        return error.Timeout;
+    }
+
+    // Read child output into a dynamically-sized buffer
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    var tmp: [4096]u8 = undefined;
+    while (true) {
+        const n_raw = linux.read(pipe_fds[0], &tmp, tmp.len);
         const n: isize = @bitCast(n_raw);
-        if (n <= 0) break;
-        total += @intCast(n);
+        if (n > 0) {
+            buf.appendSlice(allocator, tmp[0..@as(usize, @intCast(n))]) catch
+                return error.ReadFailed;
+        } else if (n == 0) {
+            break;
+        } else {
+            // Negative return: check for EINTR via raw syscall value
+            if (linux.errno(n_raw) == .INTR) continue;
+            break;
+        }
     }
     _ = linux.close(pipe_fds[0]);
 
     // Reap the child process and verify it exited cleanly.
     var status: u32 = 0;
-    _ = linux.waitpid(@intCast(pid_signed), &status, 0);
+    while (true) {
+        const wp_rc = linux.waitpid(@intCast(pid_signed), &status, 0);
+        const wp_n: isize = @bitCast(wp_rc);
+        if (wp_n > 0) break;
+        if (wp_n < 0 and linux.errno(wp_rc) == .INTR) continue;
+        return error.WaitFailed;
+    }
     const wifexited = (status & 0x7f) == 0;
     const wexitstatus: u32 = (status >> 8) & 0xff;
     if (!wifexited or wexitstatus != 0) return null;
 
-    if (total == 0) return null;
-    return allocator.dupe(u8, buf[0..total]) catch null;
+    if (buf.items.len == 0) return null;
+    return buf.toOwnedSlice(allocator) catch null;
 }
 
 /// Child process entry point. Opens the netns, switches to it, reads
 /// /proc/net/if_inet6, writes the raw content to the pipe, and exits.
 /// Only raw syscalls are used — no stdlib I/O, no locks, no allocations.
 fn childMain(write_fd: i32, netns_path_z: [*:0]const u8) noreturn {
+    // Ignore SIGPIPE so writing to a closed pipe returns EPIPE instead of killing us
+    var sa: linux.Sigaction = .{
+        .handler = .{ .handler = linux.SIG.IGN },
+        .mask = std.mem.zeroes(linux.sigset_t),
+        .flags = 0,
+    };
+    _ = linux.sigaction(.PIPE, &sa, null);
+
+    // Close all non-essential inherited fds (keep stdin, stdout, stderr, write_fd)
+    closeNonEssentialFds(write_fd);
+
     // Open the network namespace file
     const netns_fd_raw = linux.open(netns_path_z, .{ .ACCMODE = .RDONLY }, 0);
     const netns_fd: isize = @bitCast(netns_fd_raw);
@@ -163,12 +239,68 @@ fn childMain(write_fd: i32, netns_path_z: [*:0]const u8) noreturn {
     while (written < total) {
         const n_raw = linux.write(write_fd, buf[written..total].ptr, total - written);
         const n: isize = @bitCast(n_raw);
-        if (n <= 0) break;
-        written += @intCast(n);
+        if (n > 0) {
+            written += @intCast(n);
+        } else if (n < 0 and linux.errno(n_raw) == .PIPE) {
+            // Parent closed the read end — exit with failure
+            _ = linux.close(write_fd);
+            linux.exit(1);
+        } else {
+            break;
+        }
     }
 
     _ = linux.close(write_fd);
     linux.exit(0);
+}
+
+/// Close all file descriptors inherited from the parent except for
+/// stdin (0), stdout (1), stderr (2), and the given keep_fd.
+/// Uses raw syscalls only — safe to call in the child after fork.
+fn closeNonEssentialFds(keep_fd: i32) void {
+    const fd_dir_raw = linux.open("/proc/self/fd", .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
+    const fd_dir: isize = @bitCast(fd_dir_raw);
+    if (fd_dir < 0) return;
+    defer _ = linux.close(@intCast(fd_dir));
+
+    var dent_buf: [2048]u8 = undefined;
+    while (true) {
+        const n_raw = linux.getdents64(@intCast(fd_dir), &dent_buf, dent_buf.len);
+        const n: isize = @bitCast(n_raw);
+        if (n <= 0) break;
+        const len: usize = @intCast(n);
+
+        var pos: usize = 0;
+        while (pos + 19 <= len) {
+            // linux_dirent64 layout: d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + d_name(var)
+            const reclen: u16 = @as(u16, dent_buf[pos + 16]) |
+                (@as(u16, dent_buf[pos + 17]) << 8);
+            if (reclen == 0 or pos + reclen > len) break;
+
+            const name_start = pos + 19;
+            const name_end = pos + @as(usize, reclen);
+            if (name_start >= name_end) {
+                pos += reclen;
+                continue;
+            }
+
+            // Parse the fd number from the name string
+            var fd_val: i32 = 0;
+            var valid = true;
+            for (dent_buf[name_start..name_end]) |ch| {
+                if (ch == 0) break;
+                if (ch < '0' or ch > '9') {
+                    valid = false;
+                    break;
+                }
+                fd_val = fd_val * 10 + (ch - '0');
+            }
+            if (valid and fd_val > 2 and fd_val != keep_fd and fd_val != @as(i32, @intCast(fd_dir))) {
+                _ = linux.close(fd_val);
+            }
+            pos += reclen;
+        }
+    }
 }
 
 /// Parse /proc/net/if_inet6 content and return global-scope IPv6 addresses
@@ -189,8 +321,8 @@ pub fn parseIfInet6(allocator: std.mem.Allocator, content: []const u8, ifname: [
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
 
-        // Tokenize by whitespace (handles variable-width padding)
-        var tokens = std.mem.tokenizeScalar(u8, trimmed, ' ');
+        // Tokenize by whitespace (handles variable-width padding and tabs)
+        var tokens = std.mem.tokenizeAny(u8, trimmed, " \t");
         const hex_addr = tokens.next() orelse continue;
         _ = tokens.next() orelse continue; // ifindex
         const prefix_hex = tokens.next() orelse continue;
