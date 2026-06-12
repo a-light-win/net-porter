@@ -272,6 +272,7 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8, deadline
         const wp_n: isize = @bitCast(wp_rc);
         if (wp_n > 0) break;
         if (wp_n < 0 and linux.errno(wp_rc) == .INTR) continue;
+        reapChild(@intCast(pid_signed));
         return error.WaitFailed;
     }
     const wifexited = (status & 0x7f) == 0;
