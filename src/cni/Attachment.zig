@@ -8,6 +8,7 @@ const Responser = @import("../common/Responser.zig");
 const CniConfig = @import("CniConfig.zig").CniConfig;
 const PluginConf = @import("PluginConf.zig").PluginConf;
 const CNI_PLUGIN_TIMEOUT_MS = @import("PluginConf.zig").CNI_PLUGIN_TIMEOUT_MS;
+const max_stderr_log = @import("PluginConf.zig").max_stderr_log;
 const shadowCopy = @import("PluginConf.zig").shadowCopy;
 const CniCommand = @import("Cni.zig").CniCommand;
 const responseError = @import("Cni.zig").responseError;
@@ -242,6 +243,12 @@ pub const Attachment = struct {
                         "Setup {s} timed out after {d}ms on plugin {s}",
                         .{ request.request.exec.container_name, CNI_PLUGIN_TIMEOUT_MS, exec_config.getType() orelse "unknown" },
                     );
+                    if (exec_config.stderr_result) |se| {
+                        if (se.items.len > 0) {
+                            const truncated = if (se.items.len > max_stderr_log) se.items[0..max_stderr_log] else se.items;
+                            log.warn("CNI plugin '{s}' stderr before timeout: {s}", .{ exec_config.getType() orelse "unknown", truncated });
+                        }
+                    }
                     responser.writeError("CNI plugin timed out", .{});
                     return error.UnexpectedError;
                 },
@@ -249,8 +256,20 @@ pub const Attachment = struct {
             };
             if (result != .exited or result.exited != 0) {
                 log.warn("Setup {s} failed", .{request.request.exec.container_name});
+                if (exec_config.stderr_result) |se| {
+                    if (se.items.len > 0) {
+                        const truncated = if (se.items.len > max_stderr_log) se.items[0..max_stderr_log] else se.items;
+                        log.warn("CNI plugin '{s}' stderr: {s}", .{ exec_config.getType() orelse "unknown", truncated });
+                    }
+                }
                 try responseError(tentative_allocator, responser, exec_config.result.?);
                 return error.UnexpectedError;
+            }
+            if (exec_config.stderr_result) |se| {
+                if (se.items.len > 0) {
+                    const truncated = if (se.items.len > max_stderr_log) se.items[0..max_stderr_log] else se.items;
+                    log.debug("CNI plugin '{s}' stderr: {s}", .{ exec_config.getType() orelse "unknown", truncated });
+                }
             }
         }
 
@@ -313,6 +332,12 @@ pub const Attachment = struct {
                         "Teardown of plugin '{s}' timed out after {d}ms for container '{s}'; resources may need manual cleanup",
                         .{ exec_config.getType() orelse "unknown", CNI_PLUGIN_TIMEOUT_MS, request.request.exec.container_name },
                     );
+                    if (exec_config.stderr_result) |se| {
+                        if (se.items.len > 0) {
+                            const truncated = if (se.items.len > max_stderr_log) se.items[0..max_stderr_log] else se.items;
+                            log.warn("CNI plugin '{s}' stderr before timeout: {s}", .{ exec_config.getType() orelse "unknown", truncated });
+                        }
+                    }
                     continue;
                 },
                 else => return err,
@@ -328,6 +353,12 @@ pub const Attachment = struct {
                         exec_config.result.?.items,
                     },
                 );
+                if (exec_config.stderr_result) |se| {
+                    if (se.items.len > 0) {
+                        const truncated = if (se.items.len > max_stderr_log) se.items[0..max_stderr_log] else se.items;
+                        log.warn("CNI plugin '{s}' stderr: {s}", .{ exec_config.getType() orelse "unknown", truncated });
+                    }
+                }
             }
         }
 

@@ -7,6 +7,8 @@ const CniConfig = @import("CniConfig.zig").CniConfig;
 
 const max_plugin_output: usize = 4 * 1024 * 1024; // 4 MB
 
+pub const max_stderr_log: usize = 2048;
+
 /// Hard cap on CNI plugin execution time. A hanging plugin would otherwise
 /// block a worker handler thread indefinitely; with max_concurrent_handlers=64,
 /// 64 hanging plugins exhaust the handler pool and cause denial of service.
@@ -25,6 +27,7 @@ pub const PluginConf = struct {
     conf: json.ObjectMap,
     arena: ?ArenaAllocator = null,
     result: ?std.ArrayList(u8) = null,
+    stderr_result: ?std.ArrayList(u8) = null,
 
     pub const ValidateError = error{
         PluginTypeMissing,
@@ -56,6 +59,11 @@ pub const PluginConf = struct {
         if (self.result) |*result| {
             const allocator = self.arena.?.allocator();
             result.deinit(allocator);
+        }
+
+        if (self.stderr_result) |*sr| {
+            const allocator = self.arena.?.allocator();
+            sr.deinit(allocator);
         }
 
         if (self.arena) |*arena| {
@@ -647,6 +655,21 @@ pub const PluginConf = struct {
                 );
                 _ = std.os.linux.kill(pid, std.os.linux.SIG.KILL);
                 _ = process.wait(io) catch {};
+                // Attempt to read stderr that was captured before the timeout
+                if (process.stderr) |err_file| {
+                    var read_buffer: [4096]u8 = undefined;
+                    var file_reader = err_file.reader(io, &read_buffer);
+                    if (file_reader.interface.allocRemaining(allocator, .limited(max_plugin_output))) |data| {
+                        if (data.len > 0) {
+                            const truncated = if (data.len > max_stderr_log) data[0..max_stderr_log] else data;
+                            log.warn(
+                                "CNI plugin '{s}' stderr before timeout: {s}",
+                                .{ self.getType() orelse "unknown", truncated },
+                            );
+                        }
+                        self.stderr_result = std.ArrayList(u8).fromOwnedSlice(data);
+                    } else |_| {}
+                }
                 return error.CniPluginTimeout;
             }
             // n_ready > 0: pidfd is readable, child has exited. Fall through
@@ -668,6 +691,7 @@ pub const PluginConf = struct {
             const data = try file_reader.interface.allocRemaining(allocator, .limited(max_plugin_output));
             stderr = std.ArrayListUnmanaged(u8).fromOwnedSlice(data);
         }
+        self.stderr_result = std.ArrayList(u8).fromOwnedSlice(try stderr.toOwnedSlice(allocator));
 
         const result = try process.wait(io);
 
