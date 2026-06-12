@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-06-12
+
+### Added
+
+- **MAC-based access control**: ACL rules now support MAC address range restrictions. Define allowed MAC address ranges in ACL grants, and the system validates container MAC addresses against these ranges during CNI setup.
+- **SLAAC IPv6 auto-detection**: A new SlaacDetector module automatically detects SLAAC-assigned IPv6 addresses on macvlan interfaces, enabling IPv6 connectivity without manual static IP configuration.
+- **`static_mac` field in NetworkOptions**: Network configuration now supports specifying a static MAC address, enabling deterministic MAC address assignment to containers.
+- **MAC address injection into CNI plugins**: Container MAC addresses are now injected into CNI plugin JSON configurations, supporting SLAAC IPv6 detection and MAC-based ACL enforcement.
+
+### Internal
+
+- Set preferred build optimize mode to ReleaseSafe.
+- Extracted `reapChild` helper for child process cleanup in SlaacDetector.
+- Simplified IPv6 CIDR formatting to use expanded notation.
+
+---
+
 ## [1.4.0] - 2026-06-08
 
 ### Security
@@ -335,6 +352,7 @@ See the [Migration Guide (0.4 → 0.5)](migration-guide-0.4-to-0.5.md) for step-
 
 _Initial public release with per-user service architecture._
 
+[1.5.0]: https://github.com/a-light-win/net-porter/compare/1.4.0...1.5.0
 [1.4.0]: https://github.com/a-light-win/net-porter/compare/1.3.0...1.4.0
 [1.3.0]: https://github.com/a-light-win/net-porter/compare/1.2.0...1.3.0
 [1.2.0]: https://github.com/a-light-win/net-porter/compare/1.1.0...1.2.0

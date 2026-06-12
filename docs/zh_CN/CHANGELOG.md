@@ -5,6 +5,23 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.5.0] - 2026-06-12
+
+### 新增
+
+- **MAC 地址访问控制**：ACL 规则支持 MAC 地址范围限制。可在 ACL grant 中定义允许的 MAC 地址范围，系统在 CNI setup 时校验容器 MAC 地址。
+- **SLAAC IPv6 自动检测**：新增 SlaacDetector 模块，自动检测 macvlan 接口上 SLAAC 分配的 IPv6 地址，无需手动配置静态 IP 即可获得 IPv6 连通性。
+- **`static_mac` 网络配置字段**：NetworkOptions 新增 `static_mac` 字段，支持为容器指定静态 MAC 地址。
+- **MAC 地址注入 CNI 插件**：容器 MAC 地址现在通过 JSON 配置注入到 CNI 插件中，支持 SLAAC IPv6 检测和 MAC ACL 校验。
+
+### 内部优化
+
+- 构建优化模式改为 ReleaseSafe。
+- 提取 `reapChild` 辅助函数简化 SlaacDetector 子进程清理。
+- IPv6 CIDR 格式化改为展开表示法。
+
+---
+
 ## [1.4.0] - 2026-06-08
 
 ### 安全
@@ -334,6 +351,7 @@
 
 _初始公开发布，采用每用户服务架构。_
 
+[1.5.0]: https://github.com/a-light-win/net-porter/compare/1.4.0...1.5.0
 [1.4.0]: https://github.com/a-light-win/net-porter/compare/1.3.0...1.4.0
 [1.3.0]: https://github.com/a-light-win/net-porter/compare/1.2.0...1.3.0
 [1.2.0]: https://github.com/a-light-win/net-porter/compare/1.1.0...1.2.0
