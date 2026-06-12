@@ -666,8 +666,10 @@ pub const PluginConf = struct {
                                 "CNI plugin '{s}' stderr before timeout: {s}",
                                 .{ self.getType() orelse "unknown", truncated },
                             );
+                            self.stderr_result = std.ArrayList(u8).fromOwnedSlice(data);
+                        } else {
+                            allocator.free(data);
                         }
-                        self.stderr_result = std.ArrayList(u8).fromOwnedSlice(data);
                     } else |_| {}
                 }
                 return error.CniPluginTimeout;
@@ -691,7 +693,12 @@ pub const PluginConf = struct {
             const data = try file_reader.interface.allocRemaining(allocator, .limited(max_plugin_output));
             stderr = std.ArrayListUnmanaged(u8).fromOwnedSlice(data);
         }
-        self.stderr_result = std.ArrayList(u8).fromOwnedSlice(try stderr.toOwnedSlice(allocator));
+        const stderr_data = try stderr.toOwnedSlice(allocator);
+        if (stderr_data.len > 0) {
+            self.stderr_result = std.ArrayList(u8).fromOwnedSlice(stderr_data);
+        } else {
+            allocator.free(stderr_data);
+        }
 
         const result = try process.wait(io);
 
