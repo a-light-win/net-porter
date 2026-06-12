@@ -243,8 +243,12 @@ fn queryOnce(allocator: std.mem.Allocator, netns_path_z: [*:0]const u8, deadline
         const n_raw = linux.read(pipe_fds[0], &tmp, tmp.len);
         const n: isize = @bitCast(n_raw);
         if (n > 0) {
-            buf.appendSlice(allocator, tmp[0..@as(usize, @intCast(n))]) catch
+            buf.appendSlice(allocator, tmp[0..@as(usize, @intCast(n))]) catch {
+                _ = linux.close(pipe_fds[0]);
+                pipe_fds[0] = -1;
+                reapChild(@intCast(pid_signed));
                 return error.ReadFailed;
+            };
         } else if (n == 0) {
             break; // EOF
         } else {
