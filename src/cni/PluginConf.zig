@@ -1234,3 +1234,241 @@ test "exec succeeds when plugin exits before timeout" {
     const term = try plugin_conf.exec(io, allocator, script_path, env_map, 5_000);
     try std.testing.expectEqual(@as(u8, 0), term.exited);
 }
+
+// -- Tests for exec stderr capture --
+
+test "exec captures stderr from child process that writes to stderr" {
+    const test_utils = @import("../test_utils.zig");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var conf = try json.ObjectMap.init(a, &.{}, &.{});
+    try conf.put(a, "cniVersion", json.Value{ .string = "1.0.0" });
+    try conf.put(a, "name", json.Value{ .string = "exec-stderr-test" });
+    try conf.put(a, "type", json.Value{ .string = "stderr" });
+
+    var plugin_conf = PluginConf{
+        .arena = arena,
+        .conf = conf,
+    };
+
+    const script_path = try test_utils.uniqueTempPath(
+        io,
+        allocator,
+        ".net-porter-test-stderr-",
+        ".sh",
+    );
+    defer allocator.free(script_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, script_path) catch {};
+
+    {
+        const file = try std.Io.Dir.createFileAbsolute(io, script_path, .{
+            .permissions = @enumFromInt(0o755),
+        });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "#!/bin/sh\necho 'plugin error' >&2\nexit 0\n");
+    }
+
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+
+    const term = try plugin_conf.exec(io, allocator, script_path, env_map, 5_000);
+    try std.testing.expectEqual(@as(u8, 0), term.exited);
+
+    try std.testing.expect(plugin_conf.stderr_result != null);
+    try std.testing.expectEqualSlices(u8, "plugin error\n", plugin_conf.stderr_result.?.items);
+}
+
+test "stderr_result is freed by deinit" {
+    const test_utils = @import("../test_utils.zig");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena = try ArenaAllocator.init(allocator);
+    const a = arena.allocator();
+
+    var conf = try json.ObjectMap.init(
+        a,
+        &.{},
+        &.{},
+    );
+    try conf.put(a, "cniVersion", json.Value{ .string = "1.0.0" });
+    try conf.put(a, "name", json.Value{ .string = "exec-deinit-test" });
+    try conf.put(a, "type", json.Value{ .string = "stderr" });
+
+    var plugin_conf = PluginConf{
+        .arena = arena,
+        .conf = conf,
+    };
+
+    const script_path = try test_utils.uniqueTempPath(
+        io,
+        allocator,
+        ".net-porter-test-deinit-",
+        ".sh",
+    );
+    defer allocator.free(script_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, script_path) catch {};
+
+    {
+        const file = try std.Io.Dir.createFileAbsolute(io, script_path, .{
+            .permissions = @enumFromInt(0o755),
+        });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "#!/bin/sh\necho 'leak check payload' >&2\nexit 0\n");
+    }
+
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+
+    const term = try plugin_conf.exec(io, allocator, script_path, env_map, 5_000);
+    try std.testing.expectEqual(@as(u8, 0), term.exited);
+    try std.testing.expect(plugin_conf.stderr_result != null);
+    try std.testing.expect(plugin_conf.stderr_result.?.items.len > 0);
+
+    plugin_conf.deinit();
+    // If stderr_result memory leaks, std.testing.allocator will report it.
+}
+
+test "stderr_result is null when child writes nothing to stderr" {
+    const test_utils = @import("../test_utils.zig");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var conf = try json.ObjectMap.init(a, &.{}, &.{});
+    try conf.put(a, "cniVersion", json.Value{ .string = "1.0.0" });
+    try conf.put(a, "name", json.Value{ .string = "exec-no-stderr-test" });
+    try conf.put(a, "type", json.Value{ .string = "silent" });
+
+    var plugin_conf = PluginConf{
+        .arena = arena,
+        .conf = conf,
+    };
+
+    const script_path = try test_utils.uniqueTempPath(
+        io,
+        allocator,
+        ".net-porter-test-silent-",
+        ".sh",
+    );
+    defer allocator.free(script_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, script_path) catch {};
+
+    {
+        const file = try std.Io.Dir.createFileAbsolute(io, script_path, .{
+            .permissions = @enumFromInt(0o755),
+        });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "#!/bin/sh\necho 'stdout only'\nexit 0\n");
+    }
+
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+
+    const term = try plugin_conf.exec(io, allocator, script_path, env_map, 5_000);
+    try std.testing.expectEqual(@as(u8, 0), term.exited);
+    try std.testing.expect(plugin_conf.stderr_result == null);
+}
+
+test "exec captures stderr when plugin exits with non-zero code" {
+    const test_utils = @import("../test_utils.zig");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var conf = try json.ObjectMap.init(a, &.{}, &.{});
+    try conf.put(a, "cniVersion", json.Value{ .string = "1.0.0" });
+    try conf.put(a, "name", json.Value{ .string = "exec-fail-stderr-test" });
+    try conf.put(a, "type", json.Value{ .string = "fail-stderr" });
+
+    var plugin_conf = PluginConf{
+        .arena = arena,
+        .conf = conf,
+    };
+
+    const script_path = try test_utils.uniqueTempPath(
+        io,
+        allocator,
+        ".net-porter-test-fail-stderr-",
+        ".sh",
+    );
+    defer allocator.free(script_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, script_path) catch {};
+
+    {
+        const file = try std.Io.Dir.createFileAbsolute(io, script_path, .{
+            .permissions = @enumFromInt(0o755),
+        });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "#!/bin/sh\necho 'fatal: missing interface' >&2\nexit 1\n");
+    }
+
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+
+    const term = try plugin_conf.exec(io, allocator, script_path, env_map, 5_000);
+    try std.testing.expectEqual(@as(u8, 1), term.exited);
+
+    try std.testing.expect(plugin_conf.stderr_result != null);
+    try std.testing.expectEqualSlices(u8, "fatal: missing interface\n", plugin_conf.stderr_result.?.items);
+}
+
+test "exec captures stdout and stderr separately when plugin succeeds with stderr output" {
+    const test_utils = @import("../test_utils.zig");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena = try ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var conf = try json.ObjectMap.init(a, &.{}, &.{});
+    try conf.put(a, "cniVersion", json.Value{ .string = "1.0.0" });
+    try conf.put(a, "name", json.Value{ .string = "exec-mixed-output-test" });
+    try conf.put(a, "type", json.Value{ .string = "mixed" });
+
+    var plugin_conf = PluginConf{
+        .arena = arena,
+        .conf = conf,
+    };
+
+    const script_path = try test_utils.uniqueTempPath(
+        io,
+        allocator,
+        ".net-porter-test-mixed-",
+        ".sh",
+    );
+    defer allocator.free(script_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, script_path) catch {};
+
+    {
+        const file = try std.Io.Dir.createFileAbsolute(io, script_path, .{
+            .permissions = @enumFromInt(0o755),
+        });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "#!/bin/sh\necho '{\"cniVersion\":\"1.0.0\"}'\necho 'diagnostic line' >&2\nexit 0\n");
+    }
+
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+
+    const term = try plugin_conf.exec(io, allocator, script_path, env_map, 5_000);
+    try std.testing.expectEqual(@as(u8, 0), term.exited);
+
+    try std.testing.expect(plugin_conf.result != null);
+    try std.testing.expectEqualSlices(u8, "{\"cniVersion\":\"1.0.0\"}\n", plugin_conf.result.?.items);
+
+    try std.testing.expect(plugin_conf.stderr_result != null);
+    try std.testing.expectEqualSlices(u8, "diagnostic line\n", plugin_conf.stderr_result.?.items);
+}
