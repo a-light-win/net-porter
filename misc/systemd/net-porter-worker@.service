@@ -18,6 +18,16 @@ ExecStart=/usr/lib/netavark/net-porter worker \
 ProtectSystem=strict
 ReadWritePaths=/run/user/%i /run/net-porter/workers/%i
 ProtectKernelTunables=true
+# Hole in ProtectKernelTunables for network sysctls: CNI plugins
+# (containernetworking/plugins >= v1.7.0, PR #1155) unconditionally write
+# net.ipv6.conf.<ifname>.keep_addr_on_down when configuring an IPv6 address
+# and fail the whole ADD on any write error. With /proc/sys read-only,
+# dual-stack (IPv4+IPv6) CNI ADD fails with:
+#   open /proc/sys/net/ipv6/conf/eth0/keep_addr_on_down:
+#   read-only file system (code=999)
+# net.* sysctls are per-network-namespace and the worker already holds
+# CAP_NET_ADMIN, so making this subtree writable adds no real attack surface.
+ReadWritePaths=/proc/sys/net
 ProtectControlGroups=true
 
 # Namespace restriction (CNI plugins need setns(CLONE_NEWNET))
