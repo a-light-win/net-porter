@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] - 2026-11-21
+
+### Fixed
+
+- **Dual-stack (IPv4+IPv6) CNI setup failed with read-only /proc/sys**: containernetworking/plugins >= v1.7.0 (PR #1155) unconditionally writes `net.ipv6.conf.<ifname>.keep_addr_on_down` via `/proc/sys` when configuring an IPv6 address and fails the whole ADD on any write error. The worker unit's `ProtectKernelTunables=true` mounts `/proc/sys` read-only, so every dual-stack CNI ADD failed with `open /proc/sys/net/ipv6/conf/eth0/keep_addr_on_down: read-only file system (code=999)` while IPv4-only setups worked (that sysctl path is never touched for IPv4). The worker unit now opens an exception with `ReadWritePaths=/proc/sys/net`: `net.*` sysctls are per-network-namespace and the worker already holds `CAP_NET_ADMIN`, so this adds no real attack surface.
+
 ## [1.5.3] - 2026-07-19
 
 ### Fixed
@@ -23,5 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **AclScanner tracks unresolved usernames**: A new `scanUidsWithUnresolved()` method returns both resolved UIDs and usernames that could not be resolved to UIDs, enabling the server to retry resolution when the user reappears.
 - **handleAclChange now calls scanExisting**: After updating the allowed UID list, existing `/run/user/` directories are re-scanned so that newly-allowed UIDs with active sessions immediately get tracked and their workers started.
 
+[1.5.4]: https://github.com/a-light-win/net-porter/compare/1.5.3...1.5.4
 [1.5.3]: https://github.com/a-light-win/net-porter/compare/1.5.2...1.5.3
 [1.5.2]: https://github.com/a-light-win/net-porter/compare/1.5.1...1.5.2

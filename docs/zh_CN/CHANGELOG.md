@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.5.4] - 2026-11-21
+
+### 修复
+
+- **双栈（IPv4+IPv6）CNI 配置因 `/proc/sys` 只读而失败**：containernetworking-plugins >= v1.7.0（PR #1155）在配置 IPv6 地址时通过 `/proc/sys` 无条件写入 `net.ipv6.conf.<ifname>.keep_addr_on_down`，且任何写错误都会导致整个 ADD 失败。Worker 单元的 `ProtectKernelTunables=true` 将 `/proc/sys` 挂载为只读，因此所有双栈 CNI ADD 均以 `open /proc/sys/net/ipv6/conf/eth0/keep_addr_on_down: read-only file system (code=999)` 失败，而仅 IPv4 的配置不受影响（IPv4 地址永远不会触碰该 sysctl 路径）。Worker 单元现在通过 `ReadWritePaths=/proc/sys/net` 打开例外：`net.*` sysctl 属于网络命名空间作用域，且 Worker 本就持有 `CAP_NET_ADMIN`，该调整不扩大实际攻击面。
+
+---
+
 ## [1.5.3] - 2026-07-19
 
 ### 修复
@@ -407,6 +415,7 @@
 
 _初始公开发布，采用每用户服务架构。_
 
+[1.5.4]: https://github.com/a-light-win/net-porter/compare/1.5.3...1.5.4
 [1.5.3]: https://github.com/a-light-win/net-porter/compare/1.5.2...1.5.3
 [1.5.2]: https://github.com/a-light-win/net-porter/compare/1.5.1...1.5.2
 [1.5.1]: https://github.com/a-light-win/net-porter/compare/1.5.0...1.5.1
